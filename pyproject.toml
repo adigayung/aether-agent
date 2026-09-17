@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aether-agent"
+version = "0.1.0"
+description = "AETHER - coding agent engine (core library) + Django gateway + Vue workbench."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [{ name = "AETHER" }]
+
+# Dependency runtime AETHER (core library + gateway).
+# Catatan: Django hanya dipakai oleh interface layer (web/django_app), tetapi
+# disertakan di sini agar instalasi dari root project langsung siap pakai.
+dependencies = [
+    "Django>=4.2,<5.1",
+    "python-dotenv>=1.0",
+    "requests>=2.28",
+    "Pillow>=9.0",
+]
+
+[project.optional-dependencies]
+# Dependency untuk menjalankan verifier/script di scripts/ (dev only).
+dev = [
+    "pytest>=7.0",
+]
+
+[project.urls]
+Homepage = "https://example.invalid/aether"
+
+# ---------------------------------------------------------------------------
+# Packaging: package `agent_ai` berada di src/ (src-layout).
+# ---------------------------------------------------------------------------
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["agent_ai*"]
+
+# ---------------------------------------------------------------------------
+# Catatan: web/django_app dan web/frontend BUKAN bagian dari distribusi
+# package Python. Keduanya dijalankan langsung dari repo (lihat README).
+# ---------------------------------------------------------------------------

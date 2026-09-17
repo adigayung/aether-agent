@@ -1,0 +1,30 @@
+"""URL routing untuk AETHER Gateway API (#50).
+
+Endpoint minimum:
+    GET  /api/health
+    GET  /api/projects
+    GET  /api/tasks             (list/history, #53)
+    POST /api/tasks
+    GET  /api/tasks/<task_id>
+    GET  /api/events            (SSE, #51)
+"""
+
+from __future__ import annotations
+
+from django.urls import path
+
+from api import views
+
+urlpatterns = [
+    path("health", views.health, name="health"),
+    path("config", views.config, name="config"),
+    path("projects", views.projects, name="projects"),
+    path("projects/<str:project_id>", views.delete_project, name="delete_project"),
+    path("active-project", views.active_project, name="active_project"),
+    path("open-in-explorer", views.open_in_explorer, name="open_in_explorer"),
+    path("files", views.files, name="files"),
+    path("tasks", views.tasks, name="tasks"),
+    path("tasks/<str:task_id>", views.get_task, name="get_task"),
+    path("tasks/<str:task_id>/cancel", views.cancel_task, name="cancel_task"),
+    path("events", views.events, name="events"),
+]

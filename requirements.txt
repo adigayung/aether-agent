@@ -1,0 +1,16 @@
+# Dependency runtime AETHER.
+# Sumber kebenaran dependency juga ada di pyproject.toml ([project].dependencies).
+# File ini disediakan untuk instalasi cepat: pip install -r requirements.txt
+
+# Interface layer (Django Gateway, web/django_app)
+Django>=4.2,<5.1
+
+# Konfigurasi environment (src/agent_ai/config/settings.py)
+python-dotenv>=1.0
+
+# Provider HTTP (Ollama / OpenAI-compatible) + browser fetch
+requests>=2.28
+
+# Vision / preprocessing gambar (src/agent_ai/vision)
+Pillow>=9.0
+

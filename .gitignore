@@ -1,0 +1,46 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Local AETHER database (SQLite, single-user local app)
+data/
+*.db
+
+# Continue local configuration / session data
+.continue/
+
+# Workspace testing terisolasi (BUKAN bagian source AETHER)
+dummy_test/
+
+# User project workspaces
+# Folder projects tetap ada di repository,
+# tetapi seluruh isi/subfolder project tidak di-upload.
+projects/*
+!projects/.gitkeep

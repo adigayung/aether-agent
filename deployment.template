@@ -1,0 +1,96 @@
+# =============================================================================
+# AETHER - Template environment untuk DEPLOYMENT.
+# =============================================================================
+# Salin file ini menjadi `.env` lalu isi nilainya sesuai environment Anda:
+#     Copy-Item deployment.template .env
+#
+# PENTING (keamanan):
+#   - File ini TIDAK berisi credential/API key apa pun (semua placeholder kosong).
+#   - JANGAN commit file `.env` yang sudah diisi (sudah di-ignore oleh .gitignore).
+#   - Isi API key HANYA di `.env` (bukan di source code / template ini).
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Provider default
+# -----------------------------------------------------------------------------
+# Pilihan: ollama | deepseek | openrouter | openai
+DEFAULT_PROVIDER=ollama
+
+# -----------------------------------------------------------------------------
+# Ollama (lokal, tanpa API key)
+# -----------------------------------------------------------------------------
+OLLAMA_HOST=http://127.0.0.1:11434
+OLLAMA_MODEL=qwen2.5-coder:7b
+OLLAMA_TIMEOUT=120
+
+# -----------------------------------------------------------------------------
+# Provider cloud (OPSIONAL - isi API key HANYA di .env, JANGAN di sini)
+# -----------------------------------------------------------------------------
+# DEEPSEEK_API_KEY=
+# DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
+# DEEPSEEK_MODEL=deepseek-coder
+
+# OPENROUTER_API_KEY=
+# OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+# OPENROUTER_MODEL=
+
+# OPENAI_API_KEY=
+# OPENAI_BASE_URL=https://api.openai.com/v1
+# OPENAI_MODEL=gpt-4o-mini
+
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
+LOG_LEVEL=INFO
+
+# -----------------------------------------------------------------------------
+# Parameter generasi default
+# -----------------------------------------------------------------------------
+DEFAULT_TEMPERATURE=0.2
+DEFAULT_MAX_TOKENS=2048
+
+# -----------------------------------------------------------------------------
+# Permission / Safety Policy (#54)
+# -----------------------------------------------------------------------------
+# Mode per ActionClass: allow | deny | require_approval
+PERMISSION_ENABLED=true
+PERMISSION_READ_ONLY=allow
+PERMISSION_WORKSPACE_WRITE=allow
+PERMISSION_DELETE_MOVE=allow
+PERMISSION_COMMAND_EXECUTION=allow
+PERMISSION_EXTERNAL_NETWORK=allow
+PERMISSION_UNKNOWN=require_approval
+
+# -----------------------------------------------------------------------------
+# Django Gateway (web/django_app)
+# -----------------------------------------------------------------------------
+# Batas ukuran body request (bytes).
+AETHER_GATEWAY_MAX_BODY_BYTES=1000000
+
+# -----------------------------------------------------------------------------
+# Django production hardening (#57)
+# -----------------------------------------------------------------------------
+# AETHER_ENV: development | production
+#   - development (default): DEBUG=true, ALLOWED_HOSTS=localhost, tanpa TLS.
+#   - production: WAJIB isi DJANGO_SECRET_KEY + DJANGO_ALLOWED_HOSTS, DEBUG=false.
+AETHER_ENV=development
+
+# SECRET_KEY Django. WAJIB diisi di production (JANGAN pakai nilai dev).
+# Hasilkan dengan: python -c "import secrets; print(secrets.token_urlsafe(64))"
+DJANGO_SECRET_KEY=
+
+# DEBUG: true untuk development, false untuk production.
+DJANGO_DEBUG=true
+
+# ALLOWED_HOSTS: daftar host dipisah koma (WAJIB di production).
+# Contoh: DJANGO_ALLOWED_HOSTS=aether.example.com,www.aether.example.com
+DJANGO_ALLOWED_HOSTS=127.0.0.1,localhost
+
+# Security (default mengikuti AETHER_ENV; override bila perlu).
+# DJANGO_SECURE_SSL_REDIRECT=true
+# DJANGO_SESSION_COOKIE_SECURE=true
+# DJANGO_CSRF_COOKIE_SECURE=true
+# DJANGO_SECURE_HSTS_SECONDS=31536000
+# DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS=true
+# DJANGO_SECURE_HSTS_PRELOAD=true
+

@@ -1,0 +1,298 @@
+"""Execution bridge: Django Gateway -> AETHER Runtime (#55 wiring).
+
+Django HANYA menjadi gateway/orchestration boundary. Modul ini TIDAK
+mendefinisikan Runtime/Orchestrator/Loop/Planning/Tool baru: ia hanya
+MERAKIT komponen AETHER yang sudah ada dan menjalankannya.
+
+Alur:
+    PreparedTask
+        -> AgentRuntime (AETHER, existing)
+             -> AgentOrchestrator -> ToolExecutor(permission_manager=...)
+                  -> PermissionManager (#54) -> ToolRegistry -> Tools
+        -> TaskLifecycle (AETHER, existing) -> status lifecycle
+        -> SessionStore (AETHER, existing) -> events -> SSE (#51)
+
+Eksekusi dijalankan di background thread daemon (minimal, tanpa dependency
+baru). Ini BUKAN Task Queue subsystem / worker framework: hanya satu thread
+per task agar request HTTP tidak blocking. Technical debt dicatat di laporan.
+
+Provider-agnostic: provider diambil dari ProviderRegistry AETHER. Bila provider
+tidak tersedia (mis. tidak ada API key / server lokal mati), task ditandai
+FAILED dengan error jelas (tidak crash).
+"""
+
+from __future__ import annotations
+
+import threading
+from typing import Any, Callable, Dict, Optional
+
+from agent_ai.core.executor import ToolExecutor
+from agent_ai.permission.manager import PermissionManager
+from agent_ai.runtime.runtime import AgentRuntime
+from agent_ai.session.events import EventType, make_event
+from agent_ai.session.store import SessionStore
+from agent_ai.task.models import PreparedTask
+from agent_ai.tasks.lifecycle import TaskLifecycle
+from agent_ai.tasks.models import TaskStatus
+
+
+class TaskExecutor:
+    """Merakit & menjalankan AETHER Runtime untuk sebuah PreparedTask.
+
+    Args:
+        session_store: SessionStore AETHER (event system existing).
+        provider_factory: callable `() -> BaseProvider` opsional. Bila None,
+            provider diambil dari ProviderRegistry AETHER (settings default).
+            Disediakan agar verifier dapat menyuntikkan provider fake.
+        permission_manager: PermissionManager opsional (#54). Bila None,
+            dibuat default (dari settings) sehingga policy tetap terpasang.
+        runtime_factory: callable opsional untuk membangun AgentRuntime
+            (disediakan agar verifier dapat menyuntikkan runtime terkontrol).
+    """
+
+    def __init__(
+        self,
+        session_store: SessionStore,
+        *,
+        provider_factory: Optional[Callable[[], Any]] = None,
+        permission_manager: Optional[PermissionManager] = None,
+        runtime_factory: Optional[Callable[..., AgentRuntime]] = None,
+    ) -> None:
+        self.sessions = session_store
+        self._provider_factory = provider_factory
+        self.permission_manager = permission_manager or PermissionManager()
+        self._runtime_factory = runtime_factory
+
+    # ------------------------------------------------------------------ #
+    # Provider
+    # ------------------------------------------------------------------ #
+    def _build_provider(self, provider_name: Optional[str] = None) -> Any:
+        """Bangun provider AETHER (provider-agnostic).
+
+        Args:
+            provider_name: nama provider eksplisit (mis. "deepseek", "ollama").
+                Bila None, memakai provider default dari settings AETHER.
+        """
+        if self._provider_factory is not None:
+            return self._provider_factory()
+        from agent_ai.providers.registry import get_provider
+
+        return get_provider(provider_name)
+
+    # ------------------------------------------------------------------ #
+    # Runtime
+    # ------------------------------------------------------------------ #
+    def _build_runtime(
+        self,
+        provider: Any,
+        session_id: Optional[str] = None,
+        workspace_root: Optional[str] = None,
+        model_name: Optional[str] = None,
+    ) -> AgentRuntime:
+        """Rakit AgentRuntime dengan ToolExecutor yang punya PermissionManager.
+
+        PermissionManager (#54) DIPASANG di sini sehingga policy benar-benar
+        aktif pada execution path produksi: action yang ditolak tidak sampai
+        dieksekusi oleh tool.
+
+        SessionStore + session_id (#55) diteruskan agar event observability
+        (tool/provider/validation) tercatat ke Session/Event System existing.
+
+        workspace_root: bila diisi (active project root), tool filesystem/
+        workspace diarahkan ke root tersebut sehingga write/edit relatif
+        terhadap project aktif (bukan root AETHER). Bila None, memakai
+        registry global (backward compatible).
+
+        model_name: nama model eksplisit dari pilihan UI. Bila diisi, dipakai
+        sebagai GenerateOptions.model sehingga provider memakai model tersebut
+        (bukan model default provider). Bila None, provider memakai default.
+        """
+        if workspace_root:
+            from agent_ai.tools.registry import build_registry
+
+            registry = build_registry(root=workspace_root)
+            executor = ToolExecutor(
+                registry=registry, permission_manager=self.permission_manager
+            )
+        else:
+            executor = ToolExecutor(permission_manager=self.permission_manager)
+
+        options = None
+        if model_name:
+            from agent_ai.providers.base import GenerateOptions
+
+            options = GenerateOptions(model=model_name)
+
+        if self._runtime_factory is not None:
+            # Backward compatible: hanya teruskan `options` bila diisi, agar
+            # runtime_factory lama (tanpa parameter options) tetap bekerja.
+            if options is not None:
+                return self._runtime_factory(
+                    provider=provider,
+                    executor=executor,
+                    session_id=session_id,
+                    options=options,
+                )
+            return self._runtime_factory(
+                provider=provider,
+                executor=executor,
+                session_id=session_id,
+            )
+        return AgentRuntime(
+            provider=provider,
+            executor=executor,
+            session_store=self.sessions,
+            session_id=session_id,
+            options=options,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Event helpers (memakai SessionStore AETHER; tanpa event bus baru)
+    # ------------------------------------------------------------------ #
+    def _emit(
+        self,
+        session_id: str,
+        event_type: EventType,
+        *,
+        task_id: Optional[str],
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        try:
+            event = make_event(
+                session_id=session_id,
+                event_type=event_type,
+                task_id=task_id,
+                payload=payload or {},
+            )
+            self.sessions.append_event(event)
+        except Exception:  # noqa: BLE001 - event emission tidak boleh crash
+            return
+
+    # ------------------------------------------------------------------ #
+    # Execution
+    # ------------------------------------------------------------------ #
+    def run(
+        self,
+        prepared: PreparedTask,
+        *,
+        session_id: str,
+        task_id: str,
+        on_status: Optional[Callable[[str, Optional[str], Optional[str]], None]] = None,
+        workspace_root: Optional[str] = None,
+        provider_name: Optional[str] = None,
+        model_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Jalankan PreparedTask lewat AETHER Runtime (synchronous).
+
+        Args:
+            prepared: PreparedTask (task + context + plan).
+            session_id: session AETHER untuk event.
+            task_id: id task (untuk lifecycle + event).
+            on_status: callback opsional `(status, result, error)` dipanggil
+                saat status berubah (dipakai gateway untuk update TaskRecord).
+            workspace_root: active project root opsional. Bila diisi, tool
+                filesystem/workspace diarahkan ke root tersebut sehingga
+                write/edit relatif terhadap project aktif.
+            provider_name: nama provider eksplisit dari pilihan UI (mis.
+                "deepseek", "ollama"). Bila None, memakai default AETHER.
+            model_name: nama model eksplisit dari pilihan UI. Bila None,
+                provider memakai model default-nya.
+
+        Returns:
+            Ringkasan hasil: {"status", "result", "error", "iterations"}.
+        """
+        lifecycle = TaskLifecycle(task=prepared.task, task_id=task_id)
+
+        # Catatan: event task_started diemit oleh AgentRuntime (sumber tunggal
+        # observability) saat eksekusi dimulai. Di sini hanya update status.
+        if on_status is not None:
+            on_status(TaskStatus.RUNNING.value, None, None)
+
+        # Change Tracker AETHER (existing): snapshot SEBELUM eksekusi, lalu
+        # deteksi perubahan SETELAH eksekusi. Read-only terhadap project.
+        change_tracker = None
+        if workspace_root:
+            try:
+                from pathlib import Path as _Path
+
+                from agent_ai.changes.tracker import ChangeTracker
+
+                change_tracker = ChangeTracker(root=_Path(workspace_root))
+                change_tracker.start(task_id)
+                change_tracker.snapshot(".", task_id=task_id)
+            except Exception:  # noqa: BLE001 - tracking tidak boleh crash task
+                change_tracker = None
+
+        try:
+            provider = self._build_provider(provider_name)
+            runtime = self._build_runtime(
+                provider,
+                session_id=session_id,
+                workspace_root=workspace_root,
+                model_name=model_name,
+            )
+            result = runtime.run(prepared, lifecycle=lifecycle)
+        except Exception as exc:  # noqa: BLE001 - provider/runtime error -> FAILED
+            error = f"{type(exc).__name__}: {exc}"
+            self._emit(
+                session_id,
+                EventType.TASK_FAILED,
+                task_id=task_id,
+                payload={"error": error},
+            )
+            if on_status is not None:
+                on_status(TaskStatus.FAILED.value, None, error)
+            return {"status": TaskStatus.FAILED.value, "result": None, "error": error, "iterations": 0}
+
+        # Deteksi perubahan nyata via Change Tracker AETHER (existing) dan
+        # emit event change_detected (event system existing). Ini membuat
+        # Changes panel menampilkan perubahan filesystem yang sebenarnya.
+        if change_tracker is not None:
+            try:
+                records = change_tracker.detect_changes(task_id, path=".")
+                change_tracker.finish(task_id)
+                for rec in records:
+                    self._emit(
+                        session_id,
+                        EventType.CHANGE_DETECTED,
+                        task_id=task_id,
+                        payload={
+                            "path": rec.path,
+                            "kind": rec.change_type.value,
+                            "before_size": rec.before_size,
+                            "after_size": rec.after_size,
+                        },
+                    )
+            except Exception:  # noqa: BLE001 - deteksi tidak boleh crash task
+                pass
+
+        # Sinkronkan status akhir dari runtime ke record gateway.
+        # Catatan: event terminal (task_completed/task_failed) diemit oleh
+        # AgentRuntime (sumber tunggal observability). Di sini hanya update
+        # status record gateway.
+        if result.success:
+            status = TaskStatus.COMPLETED.value
+        else:
+            status = TaskStatus.FAILED.value
+
+        if on_status is not None:
+            on_status(status, result.result, result.error)
+
+        return {
+            "status": status,
+            "result": result.result,
+            "error": result.error,
+            "iterations": result.iterations,
+        }
+
+
+def run_in_background(target: Callable[[], Any]) -> threading.Thread:
+    """Jalankan `target` di background thread daemon (minimal, tanpa queue).
+
+    Ini BUKAN worker framework / Task Queue subsystem: hanya satu thread
+    daemon per task agar request HTTP tidak blocking. Technical debt: tidak ada
+    retry/persistence/backpressure (lihat laporan).
+    """
+    thread = threading.Thread(target=target, daemon=True, name="aether-task-exec")
+    thread.start()
+    return thread
