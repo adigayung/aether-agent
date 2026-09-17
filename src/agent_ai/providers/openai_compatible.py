@@ -195,7 +195,13 @@ class OpenAICompatibleProvider(BaseProvider):
             - choices[0].finish_reason        -> finish_reason
 
         Argument JSON string diparse menjadi dict. JSON invalid menghasilkan
-        ProviderResponseError yang jelas (bukan crash tersembunyi).
+        ProviderResponseError yang jelas (bukan crash tersembunyi) — KECUALI
+        bila response memang TERPOTONG oleh batas token (finish_reason=length):
+        dalam kasus itu tool-call yang argumennya tidak lengkap DIBUANG (tidak
+        ditebak/diperbaiki) dan ditandai `truncated` agar caller dapat
+        melanjutkan secara recoverable, bukan gagal langsung. Ini mencegah
+        "beberapa write_file besar dalam satu response" mematikan task.
+        Tool-call yang lengkap tetap dikembalikan apa adanya.
         Tidak mengeksekusi tool apa pun. API key tidak pernah disertakan.
         """
         import json
@@ -210,10 +216,15 @@ class OpenAICompatibleProvider(BaseProvider):
         raw = result.raw if isinstance(result.raw, dict) else {}
         choices = raw.get("choices") or []
         message = (choices[0].get("message") if choices else {}) or {}
+        raw_reason = choices[0].get("finish_reason") if choices else None
+        # Provider memotong output karena batas token: tool-call terakhir bisa
+        # tidak lengkap (JSON argumen terpotong).
+        length_truncated = raw_reason == "length"
 
         text = result.text or message.get("content") or ""
 
         actions: List[LLMAction] = []
+        dropped = 0
         for call in message.get("tool_calls") or []:
             function = call.get("function") or {}
             name = function.get("name", "")
@@ -225,10 +236,19 @@ class OpenAICompatibleProvider(BaseProvider):
                     try:
                         arguments = json.loads(arguments)
                     except (ValueError, TypeError) as exc:
+                        if length_truncated:
+                            # Respons terpotong: JANGAN menebak/memperbaiki JSON.
+                            # Buang tool-call tak lengkap (tidak menulis file
+                            # parsial) agar agent melanjutkan di turn berikutnya.
+                            dropped += 1
+                            continue
                         raise ProviderResponseError(
                             f"Argumen tool '{name}' bukan JSON yang valid: {exc}"
                         ) from exc
             if not isinstance(arguments, dict):
+                if length_truncated:
+                    dropped += 1
+                    continue
                 raise ProviderResponseError(
                     f"Argumen tool '{name}' harus berupa objek JSON."
                 )
@@ -244,7 +264,6 @@ class OpenAICompatibleProvider(BaseProvider):
         if actions:
             finish_reason = FinishReason.TOOL_CALLS
         else:
-            raw_reason = choices[0].get("finish_reason") if choices else None
             if raw_reason in (None, "stop"):
                 finish_reason = FinishReason.STOP
             elif raw_reason == "length":
@@ -261,5 +280,9 @@ class OpenAICompatibleProvider(BaseProvider):
             raw=raw,
             provider=self.name,
             model=result.model or self.config.model,
+            # Ditandai "truncated" hanya bila benar-benar ada tool-call yang
+            # dibuang karena terpotong (length + ada argumen tak lengkap).
+            truncated=length_truncated and dropped > 0,
+            incomplete_tool_calls=dropped,
         )
 

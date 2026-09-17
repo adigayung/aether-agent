@@ -75,6 +75,12 @@ class LLMResponse:
         raw: response mentah provider untuk debugging/audit.
         provider: nama provider asal (opsional).
         model: nama model (opsional).
+        truncated: True bila response provider terpotong (finish_reason=length)
+            sehingga ada tool-call yang argumennya tidak lengkap dan DIBUANG
+            (bukan file parsial). Dipakai caller untuk memperlakukan kondisi ini
+            sebagai recoverable, bukan sebagai jawaban final.
+        incomplete_tool_calls: jumlah tool-call yang dibuang karena argumennya
+            terpotong (JSON tidak lengkap). 0 bila tidak ada.
     """
 
     text: str = ""
@@ -83,6 +89,8 @@ class LLMResponse:
     raw: Any = None
     provider: str = ""
     model: str = ""
+    truncated: bool = False
+    incomplete_tool_calls: int = 0
 
     # ------------------------------------------------------------------ #
     # Convenience

@@ -18,7 +18,9 @@ Tidak ada terminal/Git/web/RAG/UI.
 
 from __future__ import annotations
 
+import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -67,6 +69,29 @@ def _ensure_not_root(target: Path, root: Path, action: str) -> None:
         )
 
 
+def _atomic_write_text(target: Path, content: str) -> None:
+    """Tulis teks ke file secara atomic (temp file di folder yang sama + replace).
+
+    Mencegah file setengah isi bila proses gagal di tengah penulisan. Semantik
+    encoding/newline sama dengan `Path.write_text(..., encoding="utf-8")`.
+    Parent directory diasumsikan sudah ada (dibuat oleh caller).
+    """
+    parent = target.parent
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(parent), prefix=".aether_tmp_", suffix=".swp"
+    )
+    os.close(fd)
+    try:
+        Path(tmp_name).write_text(content, encoding="utf-8")
+        os.replace(tmp_name, target)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
 class WriteFileTool(BaseTool):
     """Tulis/buat file di dalam workspace (buat parent directory bila perlu)."""
 
@@ -99,7 +124,8 @@ class WriteFileTool(BaseTool):
 
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(str(arguments["content"]), encoding="utf-8")
+            # Atomic: hindari file setengah isi bila penulisan terputus.
+            _atomic_write_text(target, str(arguments["content"]))
         except OSError as exc:
             raise ToolExecutionError(f"Gagal menulis file '{rel_path}': {exc}") from exc
 

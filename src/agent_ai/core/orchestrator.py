@@ -16,10 +16,14 @@ Prinsip:
     - Tool error dikirim kembali sebagai observation (loop tidak crash).
     - Hormati max_iterations via AgentLoop sebagai SAFETY LIMIT, bukan target.
     - Completion detection: sinyal final dari model adalah source of truth;
-      loop berhenti saat final muncul. Bila iteration limit tercapai, loop
-      memakai bukti langkah (implementasi + verifikasi, tanpa error aktif)
-      untuk memutuskan Completed vs Failed, sehingga task yang sudah selesai
-      tidak salah ditandai Failed hanya karena model terus memanggil tool.
+      loop berhenti saat final muncul. Selain itu, setelah setiap observation
+      loop memeriksa bukti langkah (implementasi + requirement task terpenuhi,
+      tanpa error aktif) dan berhenti lebih awal bila task terdeteksi selesai.
+      Verification hanya diwajibkan bila task menuntutnya; mutasi sukses +
+      requirement terpenuhi dapat menjadi completion. Bila iteration limit
+      tercapai, bukti langkah yang sama dipakai untuk memutuskan Completed vs
+      Failed, sehingga task yang sudah selesai tidak salah ditandai Failed
+      hanya karena model terus memanggil tool.
     - ProjectBrain (opsional) dipakai untuk membaca context sebelum task dan
       menyimpan learning setelah selesai. Orchestrator tidak tahu detail
       IntelligenceContext/Learner (hanya lewat facade ProjectBrain).
@@ -29,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -256,6 +261,141 @@ class AgentOrchestrator:
     # (lihat tools/workspace.py). Dipakai generik, bukan hardcode nama tool.
     _MUTATION_MARKERS = ("written", "edited", "deleted", "moved")
 
+    # Batas berapa kali response provider yang TERPOTONG (finish_reason=length,
+    # tool-call tidak lengkap) boleh dipulihkan sebelum menyerah dengan pesan
+    # yang jelas. Ini safety-limit (seperti max_iterations), bukan target.
+    _MAX_TRUNCATION_RECOVERIES = 3
+
+    # ------------------------------------------------------------------ #
+    # Requirement dari teks task (deterministik, provider-agnostic).
+    # Dipakai HANYA untuk memutuskan apakah bukti verifikasi diwajibkan dan
+    # artifact mana yang harus terpenuhi. BUKAN semantic evaluator / planner.
+    # ------------------------------------------------------------------ #
+    _VALIDATION_KEYWORDS = (
+        "test", "tests", "testing", "debug", "validate", "validation",
+        "validasi", "verifikasi", "verify", "lulus", "pytest", "unit test",
+        "uji", "spec",
+    )
+    # Frasa yang MENIADAKAN kebutuhan validation (user eksplisit: jangan test).
+    _NO_VALIDATION_PHRASES = (
+        "jangan test", "jangan debug", "jangan uji", "jangan validasi",
+        "tanpa test", "tanpa debug", "tanpa uji", "tanpa verifikasi",
+        "tidak perlu test", "tidak perlu debug", "tidak usah test",
+        "tidak usah debug", "no test", "no tests", "no debug", "no validation",
+        "skip test", "skip tests", "don't test", "dont test",
+        "without test", "without tests",
+    )
+    # Token file/path eksplisit pada teks task (artifact yang diminta task).
+    _TARGET_FILE_RE = re.compile(
+        r"[A-Za-z0-9_\-./\\]+\.(?:py|js|jsx|ts|tsx|html|htm|css|scss|json|md|"
+        r"txt|yml|yaml|toml|ini|cfg|sh|bat|ps1|java|c|h|cpp|hpp|go|rb|php|"
+        r"vue|sql|xml|csv|env)"
+    )
+    # Fitur/aksi yang SECARA JELAS dinyatakan task kompleks (mis. "menggunakan
+    # cookie/session", "redirect", "validasi credential"). Deterministik dan
+    # HANYA dipakai bila kata tersebut benar-benar tertulis di task. BUKAN
+    # semantic evaluator / planner baru.
+    _REQUIREMENT_FEATURES = {
+        "auth": ("login", "log in", "signin", "sign in", "auth",
+                 "authenticate", "authentication", "autentikasi"),
+        "session": ("session", "sessions", "cookie", "cookies"),
+        "redirect": ("redirect", "alihkan", "arahkan"),
+        "credential": ("credential", "credentials", "password", "kata sandi"),
+    }
+    # Operasi CRUD hanya menjadi requirement bila task memang CRUD (kata "crud"
+    # atau menyebut >= 2 operasi), agar kata seperti "tambah/ubah" pada task
+    # biasa tidak salah dianggap requirement.
+    _CRUD_WORDS = ("create", "read", "update", "delete")
+    _CRUD_FEATURES = {
+        "create": ("create", "insert", "add", "tambah", "buat"),
+        "read": ("read", "get", "list", "fetch", "lihat", "tampil"),
+        "update": ("update", "edit", "modify", "ubah", "perbarui"),
+        "delete": ("delete", "remove", "destroy", "hapus"),
+    }
+
+    @classmethod
+    def _task_requires_validation(cls, task: str) -> bool:
+        """True bila task eksplisit menuntut test/validasi/debug.
+
+        Bila user meniadakannya (mis. "jangan test/debug", "tidak perlu test"),
+        kembalikan False agar test/debug tidak dipaksa. Deterministik dari teks
+        task yang sudah tersedia; BUKAN semantic evaluator.
+        """
+        text = (task or "").lower()
+        if any(phrase in text for phrase in cls._NO_VALIDATION_PHRASES):
+            return False
+        return any(keyword in text for keyword in cls._VALIDATION_KEYWORDS)
+
+    @classmethod
+    def _task_target_files(cls, task: str) -> set:
+        """Nama file/path yang disebut eksplisit pada task.
+
+        Ini daftar artifact yang benar-benar diminta task (requirement),
+        BUKAN hitungan jumlah file/mutasi. Dipakai agar task multi-artifact
+        tidak dianggap selesai hanya karena satu mutasi terjadi.
+        """
+        targets = set()
+        for match in cls._TARGET_FILE_RE.findall(task or ""):
+            base = match.replace("\\", "/").split("/")[-1].strip().lower()
+            if base:
+                targets.add(base)
+        return targets
+
+    @staticmethod
+    def _step_targets(step: Any) -> set:
+        """Semua basename path dari argumen action sebuah step (bila ada)."""
+        arguments = getattr(getattr(step, "action", None), "arguments", None) or {}
+        targets = set()
+        for key in ("path", "file", "filename", "target", "source", "destination"):
+            value = arguments.get(key)
+            if value:
+                targets.add(str(value).replace("\\", "/").split("/")[-1].strip().lower())
+        targets.discard("")
+        return targets
+
+    @staticmethod
+    def _contains_word(text: str, word: str) -> bool:
+        """True bila `word` muncul sebagai kata utuh pada `text` (lowercase)."""
+        return re.search(
+            rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", text
+        ) is not None
+
+    @classmethod
+    def _task_requirement_features(cls, task: str) -> Dict[str, tuple]:
+        """Fitur/aksi yang SECARA JELAS dinyatakan task (deterministik).
+
+        Mengembalikan mapping {nama_requirement: aliases} untuk fitur yang
+        benar-benar tertulis di task. Dipakai sebagai requirement tambahan
+        untuk task kompleks (mis. cookie/session, redirect, CRUD). BUKAN
+        semantic evaluator: hanya pencocokan kata terbatas dari teks task.
+        """
+        text = (task or "").lower()
+        features: Dict[str, tuple] = {}
+        for name, aliases in cls._REQUIREMENT_FEATURES.items():
+            if any(cls._contains_word(text, alias) for alias in aliases):
+                features[name] = aliases
+        crud_words = [word for word in cls._CRUD_WORDS if cls._contains_word(text, word)]
+        if cls._contains_word(text, "crud") or len(crud_words) >= 2:
+            for word in crud_words:
+                features[f"crud_{word}"] = cls._CRUD_FEATURES[word]
+        return features
+
+    @staticmethod
+    def _step_evidence(step: Any) -> str:
+        """Teks bukti dari argumen action step (konten/command yang dihasilkan).
+
+        Memakai argumen action (mis. isi file yang ditulis, command yang
+        dijalankan) — bukan nama tool — sehingga bukan sekadar arti tool.
+        """
+        arguments = getattr(getattr(step, "action", None), "arguments", None) or {}
+        parts = []
+        for value in arguments.values():
+            if isinstance(value, str):
+                parts.append(value)
+            elif value is not None:
+                parts.append(str(value))
+        return " ".join(parts)
+
     @staticmethod
     def _is_change_observation(observation: AgentObservation) -> bool:
         """True bila observation menandakan perubahan nyata (implementasi)."""
@@ -290,6 +430,22 @@ class AgentOrchestrator:
                 return True
         return False
 
+    @staticmethod
+    def _is_validation_observation(observation: AgentObservation) -> bool:
+        """True bila observation adalah eksekusi command yang sukses.
+
+        Dipakai sebagai bukti validation/test untuk task yang menuntut "test
+        lulus". Sinyal generik: hasil eksekusi membawa `exit_code` (bentuk
+        output run_command) dan tidak sedang gagal. Bukan hardcode nama tool,
+        dan read_file/search TIDAK dianggap validation.
+        """
+        if not observation.success or AgentOrchestrator._is_failure_observation(observation):
+            return False
+        if (observation.metadata or {}).get("exit_code") is not None:
+            return True
+        content = observation.content
+        return isinstance(content, dict) and content.get("exit_code") is not None
+
     def _completion_signal(self, response: LLMResponse) -> Optional[str]:
         """Teks final bila response membawa sinyal penyelesaian task.
 
@@ -311,22 +467,45 @@ class AgentOrchestrator:
         return None
 
     def _completion_detected(self, loop: AgentLoop) -> bool:
-        """Deteksi penyelesaian task dari bukti langkah yang sudah tercatat.
+        """Deteksi penyelesaian task dari bukti langkah + requirement task.
 
-        Task dianggap selesai bila, berdasarkan keseluruhan langkah:
-            1) Ada implementasi: minimal satu observasi perubahan (mutasi file
-               sukses) terjadi.
-            2) Ada verifikasi: setelah perubahan terakhir, ada observasi sukses
-               (bukti bahwa hasil task sesuai) yang bukan error.
-            3) Tidak ada error aktif: observasi terakhir bukan kegagalan.
+        Requirement yang dinilai (deterministik dari teks task + evidence step):
+            1) Implementasi: minimal satu mutasi sukses (write/edit/delete/move).
+               Loop read-only TIDAK dianggap selesai.
+            2) Tidak ada error aktif: observasi terakhir bukan kegagalan.
+            3) Bila task eksplisit menuntut test/validasi (dan TIDAK ditiadakan
+               dengan "jangan test/debug"), WAJIB ada bukti eksekusi command
+               (test/validation) yang sukses SETELAH perubahan terakhir. Ini
+               menjaga task seperti "pastikan test lulus" tetap CONTINUE sampai
+               validation benar-benar dijalankan (read_file saja tidak cukup).
+            4) Bila task menyebut artifact eksplisit (mis. "a.html dan b.js"),
+               SEMUA artifact tersebut harus terpenuhi. Ini mencegah task
+               multi-file dianggap selesai hanya karena ada mutasi, tanpa
+               memakai hitungan jumlah file/mutasi.
+            5) Bila task kompleks menyebut fitur/aksi eksplisit (mis.
+               "cookie/session", "redirect", "validasi credential", CRUD),
+               setiap fitur tersebut WAJIB punya evidence pada argumen action
+               (konten/command yang dihasilkan). Fitur tanpa evidence ->
+               CONTINUE. write_file/edit_file TIDAK otomatis memenuhi semua
+               requirement.
 
-        Fungsi ini dipakai HANYA saat iteration limit (safety limit) tercapai
-        untuk memutuskan Completed vs Failed — bukan untuk memotong model di
-        tengah jalan. Karena itu loop yang hanya membaca (tanpa perubahan) atau
-        yang berakhir dengan error tetap dianggap belum selesai.
+        Verification TIDAK lagi diwajibkan bila task tidak menuntutnya: mutasi
+        sukses dapat menjadi evidence completion untuk task sederhana. Ini BUKAN
+        "mutation == complete": tetap wajib ada mutasi sukses, tanpa error aktif,
+        dan seluruh requirement task (validation/artifact) terpenuhi.
+
+        Dipakai di dua titik: (1) setelah setiap observation di dalam loop, dan
+        (2) saat iteration limit (safety limit) tercapai.
         """
+        task = loop.state.task or ""
+        needs_validation = self._task_requires_validation(task)
+        required_targets = self._task_target_files(task)
+        required_features = self._task_requirement_features(task)
+
         change_applied = False
-        verification_after_change = False
+        validation_after_change = False
+        satisfied_targets: set = set()
+        evidence_parts: List[str] = []
         last: Optional[AgentObservation] = None
 
         for step in loop.state.steps:
@@ -336,20 +515,43 @@ class AgentOrchestrator:
             last = observation
             if self._is_change_observation(observation):
                 change_applied = True
-                # Verifikasi harus terjadi SETELAH perubahan terakhir.
-                verification_after_change = False
-            elif change_applied and not self._is_failure_observation(observation):
-                verification_after_change = True
+                # Bukti validation harus terjadi SETELAH perubahan terakhir.
+                validation_after_change = False
+            elif self._is_validation_observation(observation):
+                validation_after_change = True
+            # Artifact/fitur task dianggap terpenuhi pada step yang sukses.
+            if observation.success:
+                satisfied_targets.update(self._step_targets(step))
+                evidence_parts.append(self._step_evidence(step))
 
-        if not (change_applied and verification_after_change):
+        # 1) Wajib ada implementasi (mutasi sukses); read-only belum selesai.
+        if not change_applied:
             return False
-        return last is not None and not self._is_failure_observation(last)
+        # 2) Observasi terakhir tidak boleh kegagalan aktif (mis. write gagal).
+        if last is None or self._is_failure_observation(last):
+            return False
+        # 3) Task yang menuntut validation wajib punya bukti eksekusi command
+        #    (test/validation) setelah perubahan terakhir.
+        if needs_validation and not validation_after_change:
+            return False
+        # 4) Semua artifact yang disebut task harus terpenuhi.
+        if required_targets and not required_targets.issubset(satisfied_targets):
+            return False
+        # 5) Fitur/aksi yang jelas diminta task harus punya evidence pada
+        #    argumen action (konten/command). Requirement tanpa evidence ->
+        #    CONTINUE (hindari false positive completion task kompleks).
+        if required_features:
+            evidence = " ".join(evidence_parts).lower()
+            for aliases in required_features.values():
+                if not any(self._contains_word(evidence, alias) for alias in aliases):
+                    return False
+        return True
 
     @staticmethod
     def _completion_result() -> str:
-        """Result ringkas saat completion terdeteksi di iteration limit."""
+        """Result ringkas saat completion terdeteksi (di loop atau di limit)."""
         return (
-            "Task selesai: perubahan diterapkan dan diverifikasi "
+            "Task selesai: perubahan diterapkan dan requirement task terpenuhi "
             "(completion terdeteksi sebelum iteration limit)."
         )
 
@@ -363,6 +565,28 @@ class AgentOrchestrator:
                 f"{events}. {decision.reason} "
                 "Ubah pendekatan: jangan ulangi action yang sama tanpa informasi baru. "
                 "Jika task sudah selesai, berikan jawaban final."
+            ),
+        )
+
+    @staticmethod
+    def _truncation_message() -> Message:
+        """Pesan recovery saat response provider terpotong (finish_reason=length).
+
+        Deterministik: meminta model menulis SATU file per turn (satu tool call)
+        dan menulis secara bertahap bila satu file sangat besar, sehingga tidak
+        membutuhkan satu response raksasa yang melampaui batas token.
+        """
+        return Message(
+            role="user",
+            content=(
+                "[provider] Respons sebelumnya TERPOTONG (finish_reason=length) "
+                "sehingga tool-call tidak lengkap dan DIBATALKAN — tidak ada file "
+                "parsial yang ditulis. Jangan menggabungkan beberapa file besar ke "
+                "dalam satu respons. Tulis SATU file per turn (satu tool call per "
+                "respons). Bila satu file sangat besar, tulis secara bertahap: buat "
+                "bagian awal lebih dulu, lalu lanjutkan dengan tool berikutnya pada "
+                "turn selanjutnya. Lanjutkan task dari langkah terakhir yang sudah "
+                "berhasil."
             ),
         )
 
@@ -472,6 +696,7 @@ class AgentOrchestrator:
 
         history: List[Message] = []
         provider_error = False
+        truncation_recoveries = 0
 
         # Context Project Intelligence (opsional) disisipkan sebelum task.
         brain_context = self._brain_context_message()
@@ -543,10 +768,42 @@ class AgentOrchestrator:
             #    FINAL (tanpa tool call) -> selesai. Bila action FINAL datang
             #    bersama tool call, `completion` tidak None tetapi response
             #    bukan is_final; tool call dieksekusi dulu lalu loop berhenti.
+            #    Response yang TERPOTONG (finish_reason=length) TIDAK dianggap
+            #    final: tool-call tak lengkap sudah DIBUANG oleh provider (tidak
+            #    ada file parsial), dan agent diberi kesempatan melanjutkan.
+            truncated = bool(getattr(response, "truncated", False))
+            if truncated:
+                truncation_recoveries += 1
+            else:
+                truncation_recoveries = 0
             completion = self._completion_signal(response)
-            if response.is_final:
+            if response.is_final and not truncated:
                 loop.finish(result=completion)
                 break
+            if truncated:
+                emit_event(
+                    self.event_sink,
+                    "provider_response_truncated",
+                    {
+                        "provider": response.provider or getattr(self.provider, "name", ""),
+                        "model": response.model or self._model_name(),
+                        "finish_reason": response.finish_reason.value,
+                        "completed_tool_calls": len(response.tool_calls()),
+                        "incomplete_tool_calls": int(
+                            getattr(response, "incomplete_tool_calls", 0)
+                        ),
+                        "recovery": truncation_recoveries,
+                    },
+                )
+                # Safety limit: bila model terus menghasilkan response terpotong,
+                # berhenti dengan kegagalan yang JELAS (bukan exception parsing).
+                if truncation_recoveries > self._MAX_TRUNCATION_RECOVERIES:
+                    loop.fail(
+                        "Provider response terpotong berulang kali "
+                        f"(finish_reason=length, {truncation_recoveries}x); "
+                        "model tidak menghasilkan tool-call yang lengkap."
+                    )
+                    break
 
             # 3) TOOL_CALL -> eksekusi tiap action, catat step, kirim balik.
             try:
@@ -588,6 +845,19 @@ class AgentOrchestrator:
                     )
                     history.append(self._observation_to_message(observation))
 
+                    # Completion detection selama loop: setelah SETIAP
+                    # observation, periksa apakah requirement task sudah
+                    # terpenuhi (implementasi + validasi/artifact bila diminta,
+                    # tanpa error aktif). Bila ya, hentikan loop lebih awal
+                    # tanpa menunggu max_iterations. Satu tool call (termasuk
+                    # write_file) TIDAK otomatis dianggap selesai; keputusan
+                    # tetap memakai kriteria _completion_detected(). Bila
+                    # requirement masih ada, loop tetap lanjut. max_iterations
+                    # tetap menjadi safety fallback.
+                    if not loop.is_finished and self._completion_detected(loop):
+                        loop.finish(result=self._completion_result())
+                        break
+
                     # Reliability: catat progres & putuskan tindakan.
                     decision = self._record_and_decide(loop, action, observation)
                     if decision is None:
@@ -600,6 +870,16 @@ class AgentOrchestrator:
                     elif decision.action == DecisionAction.FAIL:
                         loop.fail(f"Gagal oleh reliability: {decision.reason}")
                         break
+                # Response terpotong: tool-call yang LENGKAP sudah dieksekusi di
+                # atas (progres tidak hilang), lalu minta model melanjutkan
+                # dengan penulisan bertahap (satu file per turn). Jangan
+                # menandai task final hanya karena actions kosong.
+                if truncated:
+                    if not loop.is_finished:
+                        history.append(self._truncation_message())
+                    if loop.is_finished:
+                        break
+                    continue
                 # Bila model sudah memberi sinyal final (mis. action FINAL
                 # bersama tool call), jangan terus loop: selesaikan sekarang.
                 if completion is not None and not loop.is_finished:
@@ -610,10 +890,10 @@ class AgentOrchestrator:
             except MaxIterationsExceeded:
                 # Iteration limit = SAFETY LIMIT (loop sudah di-set FAILED oleh
                 # AgentLoop). Completion detection: bila bukti langkah
-                # menunjukkan pekerjaan sudah selesai (implementasi + verifikasi
-                # tanpa error aktif), tutup loop sebagai sukses (Completed),
-                # bukan iteration-limit failure. Bila belum selesai -> tetap
-                # FAILED dengan alasan iteration limit.
+                # menunjukkan pekerjaan sudah selesai (implementasi + requirement
+                # task terpenuhi, tanpa error aktif), tutup loop sebagai sukses
+                # (Completed), bukan iteration-limit failure. Bila belum
+                # selesai -> tetap FAILED dengan alasan iteration limit.
                 if self._completion_detected(loop):
                     loop.state.error = None
                     loop.finish(result=self._completion_result())
