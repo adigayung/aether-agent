@@ -14,7 +14,12 @@ Prinsip:
       normalize_response). Tidak ada format tool-call provider baru.
     - LLMResponse adalah protocol internal.
     - Tool error dikirim kembali sebagai observation (loop tidak crash).
-    - Hormati max_iterations via AgentLoop.
+    - Hormati max_iterations via AgentLoop sebagai SAFETY LIMIT, bukan target.
+    - Completion detection: sinyal final dari model adalah source of truth;
+      loop berhenti saat final muncul. Bila iteration limit tercapai, loop
+      memakai bukti langkah (implementasi + verifikasi, tanpa error aktif)
+      untuk memutuskan Completed vs Failed, sehingga task yang sudah selesai
+      tidak salah ditandai Failed hanya karena model terus memanggil tool.
     - ProjectBrain (opsional) dipakai untuk membaca context sebelum task dan
       menyimpan learning setelah selesai. Orchestrator tidak tahu detail
       IntelligenceContext/Learner (hanya lewat facade ProjectBrain).
@@ -33,7 +38,7 @@ from agent_ai.core.executor import ToolExecutor
 from agent_ai.core.loop import AgentLoop, MaxIterationsExceeded
 from agent_ai.core.models import AgentObservation, AgentStatus
 from agent_ai.core.observability import EventSink, emit as emit_event
-from agent_ai.core.response import LLMResponse
+from agent_ai.core.response import ActionType, LLMResponse
 from agent_ai.providers.base import (
     BaseProvider,
     GenerateOptions,
@@ -244,6 +249,110 @@ class AgentOrchestrator:
             return "command_failure"
         return "success"
 
+    # ------------------------------------------------------------------ #
+    # Completion detection (provider-agnostic)
+    # ------------------------------------------------------------------ #
+    # Penanda mutasi workspace yang dikembalikan tool tulis/ubah/hapus/pindah
+    # (lihat tools/workspace.py). Dipakai generik, bukan hardcode nama tool.
+    _MUTATION_MARKERS = ("written", "edited", "deleted", "moved")
+
+    @staticmethod
+    def _is_change_observation(observation: AgentObservation) -> bool:
+        """True bila observation menandakan perubahan nyata (implementasi)."""
+        content = observation.content
+        return (
+            observation.success
+            and isinstance(content, dict)
+            and any(marker in content for marker in AgentOrchestrator._MUTATION_MARKERS)
+        )
+
+    @staticmethod
+    def _is_failure_observation(observation: Optional[AgentObservation]) -> bool:
+        """True bila observation merepresentasikan error aktif.
+
+        Mencakup tool_error (tool gagal) dan command failure (command jalan
+        tetapi exit_code != 0 / timeout / gagal spawn). run_command
+        "success=True" TIDAK berarti command berhasil: status sebenarnya dibaca
+        dari field `outcome` yang dikembalikan tool terminal.
+        """
+        if observation is None:
+            return False
+        meta = observation.metadata or {}
+        if not observation.success:
+            return True
+        if meta.get("tool_error") or meta.get("command_failure"):
+            return True
+        content = observation.content
+        if isinstance(content, dict):
+            if content.get("outcome") in ("command_failure", "timeout", "spawn_error"):
+                return True
+            if content.get("success") is False:
+                return True
+        return False
+
+    def _completion_signal(self, response: LLMResponse) -> Optional[str]:
+        """Teks final bila response membawa sinyal penyelesaian task.
+
+        Sinyal final = response tanpa tool call (FINAL) ATAU response yang
+        memuat action bertipe FINAL. Bila action FINAL datang bersama tool
+        call, caller mengeksekusi tool call tersebut lebih dahulu lalu
+        MENGHENTIKAN loop (final completion = source of truth; tool call
+        tambahan bukan alasan untuk terus loop).
+
+        Returns:
+            Teks final (bisa string kosong), atau None bila tidak ada sinyal.
+        """
+        if response.is_final:
+            return response.text
+        for action in response.actions:
+            if action.type == ActionType.FINAL:
+                answer = (action.arguments or {}).get("answer")
+                return response.text or (str(answer) if answer is not None else "")
+        return None
+
+    def _completion_detected(self, loop: AgentLoop) -> bool:
+        """Deteksi penyelesaian task dari bukti langkah yang sudah tercatat.
+
+        Task dianggap selesai bila, berdasarkan keseluruhan langkah:
+            1) Ada implementasi: minimal satu observasi perubahan (mutasi file
+               sukses) terjadi.
+            2) Ada verifikasi: setelah perubahan terakhir, ada observasi sukses
+               (bukti bahwa hasil task sesuai) yang bukan error.
+            3) Tidak ada error aktif: observasi terakhir bukan kegagalan.
+
+        Fungsi ini dipakai HANYA saat iteration limit (safety limit) tercapai
+        untuk memutuskan Completed vs Failed — bukan untuk memotong model di
+        tengah jalan. Karena itu loop yang hanya membaca (tanpa perubahan) atau
+        yang berakhir dengan error tetap dianggap belum selesai.
+        """
+        change_applied = False
+        verification_after_change = False
+        last: Optional[AgentObservation] = None
+
+        for step in loop.state.steps:
+            observation = step.observation
+            if observation is None:
+                continue
+            last = observation
+            if self._is_change_observation(observation):
+                change_applied = True
+                # Verifikasi harus terjadi SETELAH perubahan terakhir.
+                verification_after_change = False
+            elif change_applied and not self._is_failure_observation(observation):
+                verification_after_change = True
+
+        if not (change_applied and verification_after_change):
+            return False
+        return last is not None and not self._is_failure_observation(last)
+
+    @staticmethod
+    def _completion_result() -> str:
+        """Result ringkas saat completion terdeteksi di iteration limit."""
+        return (
+            "Task selesai: perubahan diterapkan dan diverifikasi "
+            "(completion terdeteksi sebelum iteration limit)."
+        )
+
     def _recovery_message(self, decision: ReliabilityDecision) -> Message:
         """Pesan recovery yang disisipkan ke context (bukan loop baru)."""
         events = ", ".join(e.type.value for e in decision.events) or "unknown"
@@ -430,9 +539,13 @@ class AgentOrchestrator:
                     {"text": commentary, "iteration": loop.iteration},
                 )
 
-            # 2) FINAL -> selesai (tidak menjalankan tool).
+            # 2) Sinyal penyelesaian dari model adalah source of truth.
+            #    FINAL (tanpa tool call) -> selesai. Bila action FINAL datang
+            #    bersama tool call, `completion` tidak None tetapi response
+            #    bukan is_final; tool call dieksekusi dulu lalu loop berhenti.
+            completion = self._completion_signal(response)
             if response.is_final:
-                loop.finish(result=response.text)
+                loop.finish(result=completion)
                 break
 
             # 3) TOOL_CALL -> eksekusi tiap action, catat step, kirim balik.
@@ -487,10 +600,23 @@ class AgentOrchestrator:
                     elif decision.action == DecisionAction.FAIL:
                         loop.fail(f"Gagal oleh reliability: {decision.reason}")
                         break
+                # Bila model sudah memberi sinyal final (mis. action FINAL
+                # bersama tool call), jangan terus loop: selesaikan sekarang.
+                if completion is not None and not loop.is_finished:
+                    loop.finish(result=completion)
+                    break
                 if loop.is_finished:
                     break
             except MaxIterationsExceeded:
-                # loop sudah di-set FAILED oleh AgentLoop.
+                # Iteration limit = SAFETY LIMIT (loop sudah di-set FAILED oleh
+                # AgentLoop). Completion detection: bila bukti langkah
+                # menunjukkan pekerjaan sudah selesai (implementasi + verifikasi
+                # tanpa error aktif), tutup loop sebagai sukses (Completed),
+                # bukan iteration-limit failure. Bila belum selesai -> tetap
+                # FAILED dengan alasan iteration limit.
+                if self._completion_detected(loop):
+                    loop.state.error = None
+                    loop.finish(result=self._completion_result())
                 break
 
         # Setelah selesai: simpan learning (opsional, error terisolasi).

@@ -32,7 +32,6 @@ _IGNORED_DIRS = {
     ".pytest_cache",
     ".cache",
     "cache",
-    "dummy_test",
 }
 
 # Batas ukuran file agar tidak membaca file raksasa.

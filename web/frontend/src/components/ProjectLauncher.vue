@@ -8,8 +8,8 @@
 //   DELETE /api/projects/<id>         -> hapus record project
 //   GET    /api/active-project        -> project/session terakhir (pulihkan)
 //
-// Visual mengikuti template dummy_test/project.html (dark AETHER): topbar,
-// New Project, "lanjutkan project terakhir", dan daftar project (tabel).
+// Visual (dark AETHER): topbar, New Project,
+// "lanjutkan project terakhir", dan daftar project (tabel).
 import { computed, ref } from "vue";
 
 const props = defineProps({

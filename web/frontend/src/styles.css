@@ -1,5 +1,5 @@
 /* AETHER Workbench — custom CSS.
-   Sumber kebenaran visual: dummy_test/index.html (shell, sidebar, header,
+   Sumber kebenaran visual: komponen Workbench (shell, sidebar, header,
    content, footer/status, cards, terminal, explorer, modal). Tema dark
    charcoal + aksen ungu. Bootstrap 5 hanya untuk reset/dasar; seluruh
    tampilan workbench dikendalikan file ini. */
@@ -962,7 +962,7 @@ select.input-a {
 
 /* ===================================================================== */
 /* Project Launcher (halaman awal sebelum Workbench)                     */
-/* Visual mengikuti template dummy_test/project.html, tema dark charcoal:*/
+/* Visual: daftar project dengan tema dark charcoal.                     */
 /* topbar, panel/card, pill, form, dan tabel daftar project.             */
 /* ===================================================================== */
 .pl-root {

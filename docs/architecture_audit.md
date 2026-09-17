@@ -1,7 +1,7 @@
 # Architecture Audit — AETHER Core
 
 Tanggal: audit tahap "Architecture Audit + Core Hardening".
-Scope: seluruh source Python di `src/agent_ai` (tanpa venv/.git/dummy_test/cache).
+Scope: seluruh source Python di `src/agent_ai` (tanpa venv/.git/cache).
 
 ## Ringkasan
 
