@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+upload_repo.bat
 
 # Python
 __pycache__/
@@ -28,10 +29,6 @@ Thumbs.db
 
 # Logs
 *.log
-
-# Local AETHER database (SQLite, single-user local app)
-data/
-*.db
 
 # Continue local configuration / session data
 .continue/
