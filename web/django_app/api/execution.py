@@ -16,9 +16,16 @@ Eksekusi dijalankan di background thread daemon (minimal, tanpa dependency
 baru). Ini BUKAN Task Queue subsystem / worker framework: hanya satu thread
 per task agar request HTTP tidak blocking. Technical debt dicatat di laporan.
 
-Provider-agnostic: provider diambil dari ProviderRegistry AETHER. Bila provider
-tidak tersedia (mis. tidak ada API key / server lokal mati), task ditandai
-FAILED dengan error jelas (tidak crash).
+Sumber konfigurasi provider (dua jalur, provider-agnostic):
+    1. DEFAULT (backward compatible): ProviderRegistry AETHER (settings/.env),
+       dipilih lewat `provider_name` + `model_name`.
+    2. KONFIGURASI TERSIMPAN (SQLite): `provider_instance_id` + `model_id`.
+       Bila diisi, provider dirakit dari api_url/api_key/model instance lewat
+       `agent_ai.providers.factory` (bukan dari settings); `model_name`
+       diabaikan karena model berasal dari konfigurasi tersimpan.
+
+Bila provider tidak tersedia (mis. tidak ada API key / server lokal mati),
+task ditandai FAILED dengan error jelas (tidak crash).
 """
 
 from __future__ import annotations
@@ -48,6 +55,10 @@ class TaskExecutor:
             dibuat default (dari settings) sehingga policy tetap terpasang.
         runtime_factory: callable opsional untuk membangun AgentRuntime
             (disediakan agar verifier dapat menyuntikkan runtime terkontrol).
+        llm_config_service: LLMConfigService opsional (konfigurasi LLM tersimpan).
+            Bila None, dibuat lazy (database GLOBAL `data/aether.db`). Dipakai
+            untuk merakit provider dari provider instance + model yang dipilih
+            di UI konfigurasi LLM (SQLite-driven), bukan hanya dari settings.
     """
 
     def __init__(
@@ -57,24 +68,72 @@ class TaskExecutor:
         provider_factory: Optional[Callable[[], Any]] = None,
         permission_manager: Optional[PermissionManager] = None,
         runtime_factory: Optional[Callable[..., AgentRuntime]] = None,
+        llm_config_service: Optional[Any] = None,
     ) -> None:
         self.sessions = session_store
         self._provider_factory = provider_factory
         self.permission_manager = permission_manager or PermissionManager()
         self._runtime_factory = runtime_factory
+        self._llm_config_service = llm_config_service
+
+    @property
+    def llm_config_service(self) -> Any:
+        """LLMConfigService efektif (lazy; database GLOBAL `data/aether.db`)."""
+        if self._llm_config_service is None:
+            from agent_ai.llm_config import LLMConfigService
+
+            self._llm_config_service = LLMConfigService()
+        return self._llm_config_service
 
     # ------------------------------------------------------------------ #
     # Provider
     # ------------------------------------------------------------------ #
-    def _build_provider(self, provider_name: Optional[str] = None) -> Any:
+    def _resolve_provider_config(
+        self,
+        provider_instance_id: Optional[str],
+        *,
+        model_id: Optional[str] = None,
+        model_name: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Baca konfigurasi provider instance + model dari SQLite (bila dipilih).
+
+        Returns:
+            dict hasil `resolve_runtime_config(...)` atau None bila tidak ada
+            provider instance yang dipilih (jalur default/backward compatible).
+
+        Raises:
+            LLMConfigError: instance/model tidak ditemukan atau tidak valid.
+        """
+        if not provider_instance_id:
+            return None
+        return self.llm_config_service.resolve_runtime_config(
+            provider_instance_id,
+            model_id=model_id,
+            model_name=model_name,
+            include_api_key=True,
+        )
+
+    def _build_provider(
+        self,
+        provider_name: Optional[str] = None,
+        *,
+        resolved_config: Optional[Dict[str, Any]] = None,
+    ) -> Any:
         """Bangun provider AETHER (provider-agnostic).
 
         Args:
             provider_name: nama provider eksplisit (mis. "deepseek", "ollama").
                 Bila None, memakai provider default dari settings AETHER.
+            resolved_config: konfigurasi provider instance dari SQLite. Bila
+                diisi, provider dirakit dari api_url/api_key/model tersimpan
+                (bukan dari settings), lewat `providers.factory`.
         """
         if self._provider_factory is not None:
             return self._provider_factory()
+        if resolved_config is not None:
+            from agent_ai.providers.factory import build_provider_from_config
+
+            return build_provider_from_config(resolved_config)
         from agent_ai.providers.registry import get_provider
 
         return get_provider(provider_name)
@@ -185,6 +244,8 @@ class TaskExecutor:
         workspace_root: Optional[str] = None,
         provider_name: Optional[str] = None,
         model_name: Optional[str] = None,
+        provider_instance_id: Optional[str] = None,
+        model_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Jalankan PreparedTask lewat AETHER Runtime (synchronous).
 
@@ -201,6 +262,11 @@ class TaskExecutor:
                 "deepseek", "ollama"). Bila None, memakai default AETHER.
             model_name: nama model eksplisit dari pilihan UI. Bila None,
                 provider memakai model default-nya.
+            provider_instance_id: id provider instance dari konfigurasi LLM
+                tersimpan (SQLite). Bila diisi, provider + api_url + api_key +
+                model diambil dari konfigurasi ini (mengalahkan provider_name).
+            model_id: id model spesifik (dari konfigurasi LLM tersimpan) yang
+                harus dipakai. Hanya relevan bila provider_instance_id diisi.
 
         Returns:
             Ringkasan hasil: {"status", "result", "error", "iterations"}.
@@ -228,12 +294,20 @@ class TaskExecutor:
                 change_tracker = None
 
         try:
-            provider = self._build_provider(provider_name)
+            # Konfigurasi LLM tersimpan (SQLite) mengalahkan jalur registry
+            # default: provider + api_url + api_key + model dari instance.
+            resolved_config = self._resolve_provider_config(
+                provider_instance_id, model_id=model_id, model_name=model_name
+            )
+            effective_model = (resolved_config or {}).get("model") or model_name
+            provider = self._build_provider(
+                provider_name, resolved_config=resolved_config
+            )
             runtime = self._build_runtime(
                 provider,
                 session_id=session_id,
                 workspace_root=workspace_root,
-                model_name=model_name,
+                model_name=effective_model,
             )
             result = runtime.run(prepared, lifecycle=lifecycle)
         except Exception as exc:  # noqa: BLE001 - provider/runtime error -> FAILED

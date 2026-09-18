@@ -92,6 +92,115 @@ def config(request: HttpRequest, service: GatewayService) -> JsonResponse:
     return _json_response(service.get_config())
 
 
+# ---------------------------------------------------------------------------
+# LLM Config (halaman Settings; LLMConfigService AETHER existing)
+#
+# Gateway HANYA memanggil facade konfigurasi LLM AETHER. Nilai secret (.env)
+# TIDAK pernah dikembalikan ke klien: hanya versi masked.
+# ---------------------------------------------------------------------------
+@require_http_methods(["GET"])
+@_handle
+def llm_config(request: HttpRequest, service: GatewayService) -> JsonResponse:
+    """GET /api/llm/config -> credential, provider type, provider + model."""
+    return _json_response(service.get_llm_config())
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@_handle
+def llm_credentials(request: HttpRequest, service: GatewayService) -> JsonResponse:
+    """POST /api/llm/credentials -> set API key .env (body: {name, value})."""
+    body = _parse_json_body(request)
+    record = service.create_llm_credential(
+        name=body.get("name"), value=body.get("value")
+    )
+    return _json_response(record, status=201)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@_handle
+def delete_llm_credential(request: HttpRequest, service: GatewayService) -> JsonResponse:
+    """POST /api/llm/credentials/delete -> hapus API key .env (name, force?)."""
+    body = _parse_json_body(request)
+    return _json_response(
+        service.delete_llm_credential(
+            body.get("name"), force=bool(body.get("force", False))
+        )
+    )
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@_handle
+def llm_providers(request: HttpRequest, service: GatewayService) -> JsonResponse:
+    """POST /api/llm/providers -> buat provider instance baru."""
+    body = _parse_json_body(request)
+    record = service.create_llm_provider(
+        name=body.get("name"),
+        provider_type=body.get("provider_type"),
+        api_key_env=body.get("api_key_env") or "",
+        api_url=body.get("api_url") or "",
+        enabled=bool(body.get("enabled", True)),
+    )
+    return _json_response(record, status=201)
+
+
+@csrf_exempt
+@require_http_methods(["PUT", "DELETE"])
+@_handle
+def llm_provider_detail(
+    request: HttpRequest, service: GatewayService, provider_id: str
+) -> JsonResponse:
+    """PUT/DELETE /api/llm/providers/<provider_id>."""
+    if request.method == "DELETE":
+        return _json_response(service.delete_llm_provider(provider_id))
+
+    body = _parse_json_body(request)
+    record = service.update_llm_provider(
+        provider_id,
+        name=body.get("name"),
+        provider_type=body.get("provider_type"),
+        api_key_env=body.get("api_key_env"),
+        api_url=body.get("api_url"),
+        enabled=body.get("enabled"),
+    )
+    return _json_response(record)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@_handle
+def llm_models(request: HttpRequest, service: GatewayService) -> JsonResponse:
+    """POST /api/llm/models -> tambah model pada provider instance."""
+    body = _parse_json_body(request)
+    record = service.create_llm_model(
+        provider_id=body.get("provider_id"),
+        model_name=body.get("model_name"),
+        enabled=bool(body.get("enabled", True)),
+    )
+    return _json_response(record, status=201)
+
+
+@csrf_exempt
+@require_http_methods(["PUT", "DELETE"])
+@_handle
+def llm_model_detail(
+    request: HttpRequest, service: GatewayService, model_id: str
+) -> JsonResponse:
+    """PUT/DELETE /api/llm/models/<model_id>."""
+    if request.method == "DELETE":
+        return _json_response(service.delete_llm_model(model_id))
+
+    body = _parse_json_body(request)
+    record = service.update_llm_model(
+        model_id,
+        model_name=body.get("model_name"),
+        enabled=body.get("enabled"),
+    )
+    return _json_response(record)
+
+
 @csrf_exempt
 @require_http_methods(["GET", "POST"])
 @_handle

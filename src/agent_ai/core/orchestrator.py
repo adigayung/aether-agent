@@ -111,6 +111,9 @@ class AgentOrchestrator:
         use_continuous_loop: bila True, `run()` memakai continuous loop Native
             Tool Calling (satu percakapan kontinu) menggantikan loop lama.
             Default False (perilaku lama tetap dipertahankan).
+        environment_context: Environment Context project-local (markdown dari
+            `.aether/ENVIRONMENT.md`). Bila diisi, disisipkan sebagai system
+            message pada awal session continuous loop. Disiapkan pemanggil.
     """
 
     def __init__(
@@ -127,6 +130,7 @@ class AgentOrchestrator:
         reliability: Optional[ReliabilityManager] = None,
         event_sink: Optional[EventSink] = None,
         use_continuous_loop: bool = False,
+        environment_context: Optional[str] = None,
     ) -> None:
         self.provider = provider
         self.executor = executor or ToolExecutor()
@@ -134,6 +138,11 @@ class AgentOrchestrator:
         self.options = options
         self.system_prompt = system_prompt
         self.brain = brain
+        # Environment Context (project-local, opsional). Bila diisi (teks
+        # markdown dari `.aether/ENVIRONMENT.md`), disisipkan sebagai system
+        # message pada awal session continuous loop. Disiapkan oleh pemanggil
+        # (mis. AgentRuntime) agar tidak menulis file di sini.
+        self.environment_context = environment_context
         # Bila False, orchestrator tetap membaca context brain tetapi TIDAK
         # melakukan learning di akhir run (learning dikelola pemanggil, mis.
         # sekali per task di Runtime). Default True (perilaku lama).
@@ -192,6 +201,18 @@ class AgentOrchestrator:
             return None
         text = getattr(ctx, "text", "") or ""
         if not text.strip():
+            return None
+        return Message(role="system", content=text)
+
+    def _environment_context_message(self) -> Optional[Message]:
+        """Environment Context (project-local) sebagai system message (opsional).
+
+        Teks berasal dari `<root>/.aether/ENVIRONMENT.md` yang sudah disiapkan
+        pemanggil (AgentRuntime). Bila kosong/tidak diisi, kembalikan None tanpa
+        efek samping. Tidak menulis file di sini.
+        """
+        text = (self.environment_context or "").strip()
+        if not text:
             return None
         return Message(role="system", content=text)
 
@@ -1007,6 +1028,9 @@ class AgentOrchestrator:
         history = ConversationHistory()
         if prompt:
             history.append_system_message(prompt)
+        environment_context = self._environment_context_message()
+        if environment_context is not None:
+            history.append_system_message(environment_context.content)
         brain_context = self._brain_context_message()
         if brain_context is not None:
             history.append_system_message(brain_context.content)

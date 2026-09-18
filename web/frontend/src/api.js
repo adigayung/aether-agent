@@ -38,6 +38,68 @@ export function getConfig() {
   return request("/config");
 }
 
+// --- LLM Config / Settings -------------------------------------------------
+// Halaman Settings HANYA memanggil endpoint konfigurasi LLM backend (yang
+// memakai LLMConfigService AETHER existing). Nilai secret TIDAK pernah
+// dikembalikan oleh backend (hanya versi masked).
+export function getLLMConfig() {
+  return request("/llm/config");
+}
+
+export function createLLMCredential(name, value) {
+  return request("/llm/credentials", {
+    method: "POST",
+    body: JSON.stringify({ name, value }),
+  });
+}
+
+export function deleteLLMCredential(name, force = false) {
+  return request("/llm/credentials/delete", {
+    method: "POST",
+    body: JSON.stringify({ name, force }),
+  });
+}
+
+export function createLLMProvider(payload) {
+  return request("/llm/providers", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateLLMProvider(providerId, payload) {
+  return request(`/llm/providers/${encodeURIComponent(providerId)}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteLLMProvider(providerId) {
+  return request(`/llm/providers/${encodeURIComponent(providerId)}`, {
+    method: "DELETE",
+  });
+}
+
+export function createLLMModel(payload) {
+  return request("/llm/models", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateLLMModel(modelId, payload) {
+  return request(`/llm/models/${encodeURIComponent(modelId)}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteLLMModel(modelId) {
+  return request(`/llm/models/${encodeURIComponent(modelId)}`, {
+    method: "DELETE",
+  });
+}
+
 export function getProjects() {
   return request("/projects");
 }

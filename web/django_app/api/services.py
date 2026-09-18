@@ -13,6 +13,13 @@ Task execution (#55): setelah task disiapkan, eksekusi nyata dijalankan lewat
 AETHER Runtime di background thread daemon (non-blocking HTTP). TIDAK ada
 background queue / worker framework / database. State task disimpan di memori
 proses. Event eksekusi memakai SessionStore AETHER (event system existing).
+
+Konfigurasi provider (dua jalur, provider-agnostic): provider instance + model
+opsional dibaca dari LLMConfigService (SQLite GLOBAL `data/aether.db`, tabel
+yang sama dengan ProjectStore) via metadata task (`provider_instance_id`,
+`model_id`). Bila kosong, jalur default (ProviderRegistry + settings) dipakai
+sehingga backward compatible. `get_config()` juga mengekspos daftar provider
+instance + model ke UI agar pilihan tidak di-hardcode di frontend.
 """
 
 from __future__ import annotations
@@ -61,6 +68,13 @@ class NotFoundError(GatewayError):
 
     status_code = 404
     code = "not_found"
+
+
+class ConflictError(GatewayError):
+    """Konflik resource (mis. nama provider instance sudah dipakai)."""
+
+    status_code = 409
+    code = "conflict"
 
 
 @dataclass
@@ -122,6 +136,7 @@ class GatewayService:
         task_executor: Optional[Any] = None,
         auto_execute: bool = True,
         project_store: Optional[ProjectStore] = None,
+        llm_config_service: Optional[Any] = None,
     ) -> None:
         self.projects = project_registry or ProjectRegistry()
         self.preparation = task_preparation or TaskPreparation()
@@ -136,6 +151,9 @@ class GatewayService:
         # runtime tidak membebani jalur read-only (health/projects).
         self._task_executor = task_executor
         self.auto_execute = auto_execute
+        # Konfigurasi LLM tersimpan (SQLite) — provider instance + model.
+        # Lazy agar jalur read-only tetap ringan. Database GLOBAL AETHER.
+        self._llm_config_service = llm_config_service
         self._tasks: Dict[str, TaskRecord] = {}
         # PreparedTask asli (bukan ringkasan) untuk diteruskan ke runtime.
         self._prepared: Dict[str, Any] = {}
@@ -147,8 +165,23 @@ class GatewayService:
         if self._task_executor is None:
             from api.execution import TaskExecutor
 
-            self._task_executor = TaskExecutor(self.sessions)
+            self._task_executor = TaskExecutor(
+                self.sessions, llm_config_service=self.llm_config_service
+            )
         return self._task_executor
+
+    @property
+    def llm_config_service(self) -> Any:
+        """LLMConfigService efektif (lazy; database GLOBAL `data/aether.db`).
+
+        Dibuat lazy agar gateway tetap ringan pada jalur read-only, dan agar
+        verifier dapat menyuntikkan service dengan DB fixture sementara.
+        """
+        if self._llm_config_service is None:
+            from agent_ai.llm_config import LLMConfigService
+
+            self._llm_config_service = LLMConfigService()
+        return self._llm_config_service
 
     # ------------------------------------------------------------------ #
     # Health
@@ -198,14 +231,204 @@ class GatewayService:
         # Mode = retrieval profile AETHER (#40): minimal | balanced | deep.
         # Dipetakan ke label user (Fast/Balanced/Deep) di frontend, bukan
         # routing baru.
+
+        # Provider instance + model dari konfigurasi LLM tersimpan (SQLite).
+        # Frontend membaca dari sini (bukan hardcode) sehingga task dapat
+        # menunjuk provider_instance_id + model_id yang benar-benar tersimpan.
+        instances: List[Dict[str, Any]] = []
+        try:
+            instances = self.llm_config_service.get_full_config()
+        except Exception:  # noqa: BLE001 - config read tidak boleh mematikan UI
+            instances = []
+
+        # Default terpilih: instance enabled pertama yang punya model enabled.
+        default_instance_id = ""
+        default_model_id = ""
+        for inst in instances:
+            if not inst.get("enabled"):
+                continue
+            inst_models = inst.get("models") or []
+            enabled_models = [m for m in inst_models if m.get("enabled")] or inst_models
+            if enabled_models:
+                default_instance_id = inst.get("id", "")
+                default_model_id = enabled_models[0].get("id", "")
+                break
+
         return {
             "provider": provider,
             "model": model,
             "providers": registry.list_providers(),
             "models": models,
+            "provider_instances": instances,
+            "provider_instance_id": default_instance_id,
+            "model_id": default_model_id,
             "mode": settings.context.retrieval_profile,
             "modes": ["minimal", "balanced", "deep"],
         }
+
+    # ------------------------------------------------------------------ #
+    # LLM Config (halaman Settings; LLMConfigService AETHER existing)
+    #
+    # Gateway HANYA memanggil facade CRUD konfigurasi LLM AETHER
+    # (`agent_ai.llm_config`). TIDAK ada model konfigurasi kedua. Nilai
+    # secret (.env) TIDAK pernah dikembalikan: hanya versi masked.
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _llm_error_to_gateway(exc: Exception) -> GatewayError:
+        """Petakan error konfigurasi LLM AETHER -> error gateway (HTTP)."""
+        from agent_ai.llm_config import (
+            LLMConfigConflictError,
+            LLMConfigNotFoundError,
+            LLMConfigValidationError,
+        )
+
+        if isinstance(exc, LLMConfigNotFoundError):
+            return NotFoundError(str(exc))
+        if isinstance(exc, LLMConfigConflictError):
+            return ConflictError(str(exc))
+        if isinstance(exc, LLMConfigValidationError):
+            return ValidationError(str(exc))
+        return GatewayError(str(exc))
+
+    def get_llm_config(self) -> Dict[str, Any]:
+        """Konfigurasi LLM lengkap untuk halaman Settings (TANPA secret).
+
+        Mengembalikan:
+            credentials: daftar credential .env (masked + relasi pemakai),
+            provider_types: katalog provider type (statis), dan
+            providers: provider instance tersimpan + nested model.
+        """
+        from agent_ai.llm_config import list_provider_types
+
+        try:
+            credentials = self.llm_config_service.list_credentials()
+            providers = self.llm_config_service.get_full_config()
+        except Exception as exc:  # noqa: BLE001 - error baca -> error gateway
+            raise self._llm_error_to_gateway(exc) from exc
+
+        return {
+            "credentials": [c.to_dict() for c in credentials],
+            "provider_types": [t.to_dict() for t in list_provider_types()],
+            "providers": providers,
+        }
+
+    # ---- Credential (.env API key) ----
+    def create_llm_credential(self, name: str, value: str) -> Dict[str, Any]:
+        """Simpan/set API key di .env (dikembalikan hanya versi masked)."""
+        from agent_ai.llm_config import LLMConfigError
+
+        try:
+            info = self.llm_config_service.set_api_key(name, value)
+        except LLMConfigError as exc:
+            raise self._llm_error_to_gateway(exc) from exc
+        return info.to_dict()
+
+    def delete_llm_credential(self, name: str, force: bool = False) -> Dict[str, Any]:
+        """Hapus API key dari .env (hanya baris variabel terkait)."""
+        from agent_ai.llm_config import LLMConfigError
+
+        try:
+            deleted = self.llm_config_service.delete_api_key(name, force=bool(force))
+        except LLMConfigError as exc:
+            raise self._llm_error_to_gateway(exc) from exc
+        if not deleted:
+            raise NotFoundError(f"Credential '{name}' tidak ditemukan.")
+        return {"deleted": True, "name": name}
+
+    # ---- Provider Instance ----
+    def create_llm_provider(
+        self,
+        name: str,
+        provider_type: str,
+        api_key_env: str = "",
+        api_url: str = "",
+        enabled: bool = True,
+    ) -> Dict[str, Any]:
+        """Buat provider instance baru (relasi ke credential .env)."""
+        from agent_ai.llm_config import LLMConfigError
+
+        try:
+            instance = self.llm_config_service.create_provider_instance(
+                name=name,
+                provider_type=provider_type,
+                api_key_env=api_key_env,
+                api_url=api_url,
+                enabled=enabled,
+            )
+            return self.llm_config_service.get_provider_config(instance.id)
+        except LLMConfigError as exc:
+            raise self._llm_error_to_gateway(exc) from exc
+
+    def update_llm_provider(
+        self,
+        provider_id: str,
+        name: Optional[str] = None,
+        provider_type: Optional[str] = None,
+        api_key_env: Optional[str] = None,
+        api_url: Optional[str] = None,
+        enabled: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Update provider instance (field None = tidak diubah)."""
+        from agent_ai.llm_config import LLMConfigError
+
+        try:
+            self.llm_config_service.update_provider_instance(
+                provider_id,
+                name=name,
+                provider_type=provider_type,
+                api_key_env=api_key_env,
+                api_url=api_url,
+                enabled=enabled,
+            )
+            return self.llm_config_service.get_provider_config(provider_id)
+        except LLMConfigError as exc:
+            raise self._llm_error_to_gateway(exc) from exc
+
+    def delete_llm_provider(self, provider_id: str) -> Dict[str, Any]:
+        """Hapus provider instance (beserta model-nya, cascade di store)."""
+        deleted = self.llm_config_service.delete_provider_instance(provider_id)
+        if not deleted:
+            raise NotFoundError(f"Provider instance '{provider_id}' tidak ditemukan.")
+        return {"deleted": True, "id": provider_id}
+
+    # ---- Model ----
+    def create_llm_model(
+        self, provider_id: str, model_name: str, enabled: bool = True
+    ) -> Dict[str, Any]:
+        """Tambah model pada sebuah provider instance."""
+        from agent_ai.llm_config import LLMConfigError
+
+        try:
+            model = self.llm_config_service.add_model(
+                provider_id, model_name, enabled=enabled
+            )
+        except LLMConfigError as exc:
+            raise self._llm_error_to_gateway(exc) from exc
+        return model.to_dict()
+
+    def update_llm_model(
+        self,
+        model_id: str,
+        model_name: Optional[str] = None,
+        enabled: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Update model (nama/enabled; None = tidak diubah)."""
+        from agent_ai.llm_config import LLMConfigError
+
+        try:
+            model = self.llm_config_service.update_model(
+                model_id, model_name=model_name, enabled=enabled
+            )
+        except LLMConfigError as exc:
+            raise self._llm_error_to_gateway(exc) from exc
+        return model.to_dict()
+
+    def delete_llm_model(self, model_id: str) -> Dict[str, Any]:
+        """Hapus satu model."""
+        deleted = self.llm_config_service.delete_model(model_id)
+        if not deleted:
+            raise NotFoundError(f"Model '{model_id}' tidak ditemukan.")
+        return {"deleted": True, "id": model_id}
 
     # ------------------------------------------------------------------ #
     # Projects (memakai ProjectRegistry AETHER)
@@ -443,6 +666,11 @@ class GatewayService:
             if self.project_store.get_project(project_id) is None:
                 raise NotFoundError(f"Project '{project_id}' tidak ditemukan.")
 
+        # Validasi pilihan provider instance/model (bila diberikan) terhadap
+        # konfigurasi LLM tersimpan (SQLite). Ini menjamin relasi
+        # Provider Instance -> Model valid SEBELUM task dieksekusi.
+        self._validate_provider_selection(metadata or {})
+
         task_id = new_task_id()
         prepared = self.preparation.prepare(task.strip(), task_id=task_id)
 
@@ -521,6 +749,12 @@ class GatewayService:
         provider_name = meta.get("provider") or None
         model_name = meta.get("model") or None
 
+        # Pilihan provider instance/model dari konfigurasi LLM tersimpan
+        # (SQLite). Bila diisi, backend merakit provider + api_url + api_key +
+        # model dari konfigurasi ini (mengalahkan provider_name registry).
+        provider_instance_id = meta.get("provider_instance_id") or None
+        model_id = meta.get("model_id") or None
+
         try:
             summary = self.task_executor.run(
                 prepared,
@@ -530,6 +764,8 @@ class GatewayService:
                 workspace_root=workspace_root,
                 provider_name=provider_name,
                 model_name=model_name,
+                provider_instance_id=provider_instance_id,
+                model_id=model_id,
             )
         except Exception as exc:  # noqa: BLE001 - jangan biarkan thread crash
             self._update_task_status(
@@ -545,6 +781,37 @@ class GatewayService:
                 rec.runtime = {
                     "iterations": summary.get("iterations", 0),
                 }
+
+    def _validate_provider_selection(self, metadata: Dict[str, Any]) -> None:
+        """Validasi provider_instance_id / model_id dari metadata task.
+
+        Hanya memvalidasi bila field diisi (backward compatible). Mengubah
+        error konfigurasi LLM menjadi ValidationError gateway sehingga request
+        invalid ditolak dengan pesan jelas.
+
+        Raises:
+            ValidationError: instance/model tidak ada atau model bukan milik
+                provider instance yang dipilih.
+        """
+        instance_id = metadata.get("provider_instance_id")
+        model_id = metadata.get("model_id")
+        if not instance_id and not model_id:
+            return
+
+        from agent_ai.llm_config import LLMConfigError
+
+        try:
+            if instance_id:
+                self.llm_config_service.get_provider_instance(instance_id)
+            if model_id:
+                model = self.llm_config_service.get_model(model_id)
+                if instance_id and model.provider_id != instance_id:
+                    raise ValidationError(
+                        f"Model '{model_id}' bukan milik provider instance "
+                        f"'{instance_id}'."
+                    )
+        except LLMConfigError as exc:
+            raise ValidationError(str(exc)) from exc
 
     def _resolve_workspace_root(self, project_id: Optional[str]) -> Optional[str]:
         """Tentukan workspace root untuk eksekusi task.

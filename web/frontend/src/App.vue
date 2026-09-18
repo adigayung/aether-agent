@@ -17,6 +17,7 @@ import TaskComposer from "./components/TaskComposer.vue";
 import ChangesPanel from "./components/ChangesPanel.vue";
 import FileExplorer from "./components/FileExplorer.vue";
 import TerminalView from "./components/TerminalView.vue";
+import SettingsView from "./components/SettingsView.vue";
 import {
   cancelTask,
   closeActiveProject,
@@ -847,21 +848,8 @@ onBeforeUnmount(() => {
             </table>
           </section>
 
-          <!-- Settings -->
-          <section v-else class="panel">
-            <div class="panel-head">
-              <div>
-                <div class="title">Configuration</div>
-                <div class="desc">Provider, model, and workspace currently used by AETHER.</div>
-              </div>
-            </div>
-            <div class="panel-body">
-              <div class="kv"><span class="k">Provider</span><span class="v">{{ config.provider || "—" }}</span></div>
-              <div class="kv"><span class="k">Model</span><span class="v">{{ config.model || "—" }}</span></div>
-              <div class="kv"><span class="k">Mode</span><span class="v">{{ config.mode || "—" }}</span></div>
-              <div class="kv"><span class="k">Workspace</span><span class="v">{{ activeProject.path }}</span></div>
-            </div>
-          </section>
+          <!-- Settings (kelola provider/model/credential via Gateway). -->
+          <SettingsView v-else :config="config" />
         </main>
       </div>
     </div>

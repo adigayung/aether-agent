@@ -15,6 +15,7 @@ Struktur yang dikelola (di ROOT project target):
                 problems.md
             log/
                 <task_id>.log     # log task (JSON Lines)
+            ENVIRONMENT.md        # Environment Context (deteksi OS/shell/runtime)
 
 Prinsip:
     - Project-local: semua ditulis di dalam root project target, tidak di
@@ -55,6 +56,8 @@ LOG_DIR_NAME = "log"
 BIBLE_DIR_NAME = "bible"
 #: Nama file manifest Bible.
 BIBLE_INDEX_NAME = "index.md"
+#: Nama file Environment Context (didokumentasikan di environment.py).
+ENVIRONMENT_FILE_NAME = "ENVIRONMENT.md"
 #: Versi format file Bible (marker kompatibilitas).
 BIBLE_FORMAT = "entry-v1"
 #: Marker awal satu entri di file kategori Bible.
@@ -72,6 +75,8 @@ _CATEGORY_GUIDE = (
     ("facts", "fakta project (stack, dependency, versi, entry point); baca selalu"),
     ("learnings", "pelajaran dari task sebelumnya (termasuk yang gagal); baca untuk hindari kesalahan sama"),
     ("problems", "masalah/known-issue yang belum selesai; baca sebelum menyimpulkan selesai"),
+    ("known_bugs", "bug/masalah yang sudah ditemukan/terverifikasi (BUG-xxx); baca sebelum memperbaiki"),
+    ("known_gaps", "kekurangan/fitur yang belum tersedia tetapi bukan bug (GAP-xxx); baca sebelum menambah fitur"),
 )
 
 
@@ -162,6 +167,10 @@ class AetherProjectStore:
     def index_path(self) -> Path:
         """Path file manifest Bible (`index.md`)."""
         return self.bible_dir / BIBLE_INDEX_NAME
+
+    def environment_path(self) -> Path:
+        """Path file Environment Context (`<root>/.aether/ENVIRONMENT.md`)."""
+        return self.aether_dir / ENVIRONMENT_FILE_NAME
 
     def __repr__(self) -> str:  # pragma: no cover - bantuan debug
         return f"<AetherProjectStore root={self.root}>"

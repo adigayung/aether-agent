@@ -18,6 +18,22 @@ from api import views
 urlpatterns = [
     path("health", views.health, name="health"),
     path("config", views.config, name="config"),
+    # LLM Config / Settings (LLMConfigService AETHER existing).
+    path("llm/config", views.llm_config, name="llm_config"),
+    path("llm/credentials", views.llm_credentials, name="llm_credentials"),
+    path(
+        "llm/credentials/delete",
+        views.delete_llm_credential,
+        name="delete_llm_credential",
+    ),
+    path("llm/providers", views.llm_providers, name="llm_providers"),
+    path(
+        "llm/providers/<str:provider_id>",
+        views.llm_provider_detail,
+        name="llm_provider_detail",
+    ),
+    path("llm/models", views.llm_models, name="llm_models"),
+    path("llm/models/<str:model_id>", views.llm_model_detail, name="llm_model_detail"),
     path("projects", views.projects, name="projects"),
     path("projects/<str:project_id>", views.delete_project, name="delete_project"),
     path("active-project", views.active_project, name="active_project"),

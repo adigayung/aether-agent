@@ -117,6 +117,14 @@ class AgentRuntime:
         self.project_brain_enabled = project_brain
         self._task_log: Optional[Any] = None
         self._brain: Optional[Any] = None
+        # Environment Context project-local (`<project_root>/.aether/ENVIRONMENT.md`).
+        # Dibuat/dimuat SEKALI per session (instance runtime); hasilnya di-cache
+        # di `_environment_text` dan hanya disuntikkan pada task pertama.
+        self._environment_text: Optional[str] = None
+        self._environment_injected: bool = False
+        # Environment Context untuk task berjalan (diteruskan ke orchestrator
+        # continuous loop). None pada jalur legacy / non-continuous.
+        self._current_environment_context: Optional[str] = None
 
         # Validation <-> Runtime Integration (#42), semuanya OPSIONAL.
         # Bila validation_runner/validation_request tidak diberikan, runtime
@@ -222,6 +230,7 @@ class AgentRuntime:
         # Native Tool Calling). Task TIDAK dipecah menjadi TaskStep; plan
         # (bila ada) hanya context advisory. Tidak ada pemanggilan per-step.
         if self.use_continuous_loop:
+            self._current_environment_context = self._session_environment_context()
             result = self._run_continuous(prepared, progress)
             result = self._maybe_validate(prepared, progress, result, lifecycle)
             self._lifecycle_finalize(lifecycle, result)
@@ -666,6 +675,8 @@ class AgentRuntime:
 
         Brain dipakai untuk context injection. Learning TIDAK dilakukan per
         run; runtime menanganinya sekali per task (__record_project_learning).
+        Environment Context project-local (bila ada) diteruskan sebagai system
+        message pada awal session continuous loop.
         """
         return AgentOrchestrator(
             provider=provider,
@@ -677,7 +688,33 @@ class AgentRuntime:
             brain=self._brain,
             brain_learning=False,
             use_continuous_loop=self.use_continuous_loop,
+            environment_context=self._current_environment_context,
         )
+
+    def _session_environment_context(self) -> Optional[str]:
+        """Environment Context project-local, dimuat SEKALI per session.
+
+        Session = satu instance AgentRuntime. Pada task PERTAMA session, file
+        `<project_root>/.aether/ENVIRONMENT.md` dibuat bila belum ada (atau
+        dimuat bila sudah ada) dan dikembalikan untuk dijadikan system message.
+        Task berikutnya pada session yang sama TIDAK membaca/menyusun ulang
+        (mengembalikan None). Instance runtime baru = session baru -> deteksi
+        ulang. Best-effort: kegagalan tidak boleh menggagalkan eksekusi task.
+        """
+        if self._environment_injected:
+            return None
+        self._environment_injected = True
+        if not self.project_root:
+            return None
+        if self._environment_text is None:
+            try:
+                from agent_ai.projects.environment import build_or_load_environment
+
+                self._environment_text = build_or_load_environment(self.project_root)
+            except Exception:  # noqa: BLE001 - context tidak boleh menggagalkan task
+                self._environment_text = ""
+        text = (self._environment_text or "").strip()
+        return text or None
 
     def _record_project_learning(self, result: RuntimeResult) -> None:
         """Update AI Project Bible dari hasil task (best-effort, sekali/task)."""

@@ -40,6 +40,8 @@ INTELLIGENCE_CATEGORIES = (
 # Kategori AI Project Bible project-local (file `<kategori>.md` di
 # `<root project target>/.aether/bible/`). "conventions" menggantikan "rules"
 # agar knowledge tetap terwakili (lihat CATEGORY_ALIASES).
+# "known_bugs"/"known_gaps" = persistent knowledge untuk masalah terverifikasi
+# (known_bugs.md) dan kekurangan/belum-tersedia yang bukan bug (known_gaps.md).
 BIBLE_CATEGORIES = (
     "architecture",
     "ui",
@@ -48,6 +50,8 @@ BIBLE_CATEGORIES = (
     "facts",
     "learnings",
     "problems",
+    "known_bugs",
+    "known_gaps",
 )
 
 # Alias kategori lama -> kategori kanonik Bible (semantic lama tetap terwakili).
