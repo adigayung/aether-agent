@@ -46,6 +46,12 @@ export function getLLMConfig() {
   return request("/llm/config");
 }
 
+// Provider instance + nested model dari konfigurasi LLM tersimpan (SQLite).
+// Dipakai alur New Task: dropdown Provider Instance + Model (bukan settings/.env).
+export function getLLMProviders() {
+  return request("/llm/providers");
+}
+
 export function createLLMCredential(name, value) {
   return request("/llm/credentials", {
     method: "POST",

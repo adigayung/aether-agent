@@ -312,6 +312,18 @@ class GatewayService:
             "providers": providers,
         }
 
+    def list_llm_providers(self) -> List[Dict[str, Any]]:
+        """Daftar provider instance + nested model (TANPA secret).
+
+        Dipakai alur New Task: dropdown Provider Instance + Model diambil dari
+        konfigurasi LLM tersimpan (SQLite) via LLMConfigService AETHER existing,
+        BUKAN dari settings/.env. Nilai secret tidak pernah dikembalikan.
+        """
+        try:
+            return self.llm_config_service.get_full_config()
+        except Exception as exc:  # noqa: BLE001 - error baca -> error gateway
+            raise self._llm_error_to_gateway(exc) from exc
+
     # ---- Credential (.env API key) ----
     def create_llm_credential(self, name: str, value: str) -> Dict[str, Any]:
         """Simpan/set API key di .env (dikembalikan hanya versi masked)."""

@@ -273,11 +273,16 @@ def _run(env_path: Path, cleanup: list[str]) -> int:
     print("[12] DELETE model & provider OK -> 200 lalu 404")
 
     # 13) method tidak diizinkan.
+    #     GET /api/llm/providers kini VALID (dipakai alur New Task untuk
+    #     membaca Provider Instance + Model dari LLM Config Core).
     resp = client.get("/api/llm/providers")
-    assert resp.status_code == 405, resp.status_code
+    assert resp.status_code == 200, resp.status_code
+    body = resp.json()
+    assert "providers" in body, body
+    _assert_no_secret(resp, SECRET_VALUE)
     resp = client.delete("/api/llm/config")
     assert resp.status_code == 405, resp.status_code
-    print("[13] method tidak diizinkan OK -> 405")
+    print("[13] method tidak diizinkan OK -> GET /llm/providers 200, DELETE /llm/config 405")
 
     # 14) boundary: tidak ada secret yang bocor (semua koleksi config aman).
     resp = client.get("/api/llm/config")

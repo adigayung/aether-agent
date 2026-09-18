@@ -131,10 +131,19 @@ def delete_llm_credential(request: HttpRequest, service: GatewayService) -> Json
 
 
 @csrf_exempt
-@require_http_methods(["POST"])
+@require_http_methods(["GET", "POST"])
 @_handle
 def llm_providers(request: HttpRequest, service: GatewayService) -> JsonResponse:
-    """POST /api/llm/providers -> buat provider instance baru."""
+    """GET /api/llm/providers -> daftar provider instance + nested model.
+
+    POST /api/llm/providers -> buat provider instance baru.
+
+    GET dipakai alur New Task: dropdown Provider Instance + Model diambil dari
+    konfigurasi LLM tersimpan (SQLite), bukan dari settings/.env.
+    """
+    if request.method == "GET":
+        return _json_response({"providers": service.list_llm_providers()})
+
     body = _parse_json_body(request)
     record = service.create_llm_provider(
         name=body.get("name"),

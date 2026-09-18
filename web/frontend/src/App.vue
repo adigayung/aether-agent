@@ -27,6 +27,7 @@ import {
   getActiveProject,
   getConfig,
   getHealth,
+  getLLMProviders,
   getProjects,
   getTask,
   listTasks,
@@ -84,9 +85,12 @@ const lastProject = ref(null);
 
 // Konfigurasi AETHER (provider/model/mode) — TIDAK hardcode di frontend.
 const config = ref({});
-const selectedProvider = ref("");
-const selectedModel = ref("");
 const selectedMode = ref("");
+// Provider Instance + Model dari konfigurasi LLM tersimpan (SQLite).
+// New Task memakai ini (bukan settings/.env) untuk memilih provider+model.
+const llmProviders = ref([]);
+const selectedProviderInstanceId = ref("");
+const selectedModelId = ref("");
 
 // State task/workspace (diisi dari #50 + #51).
 const task = reactive({ id: "", text: "", status: "idle" });
@@ -372,12 +376,14 @@ async function submitTask(text) {
   error.value = "";
   submitting.value = true;
   try {
-    // Provider/model/mode diteruskan sebagai metadata ke mekanisme AETHER
-    // existing. Provider+model eksplisit agar runtime memakai pilihan UI
-    // (bukan selalu default provider). Mode tetap routing signal.
+    // Provider Instance + Model dari konfigurasi LLM tersimpan (SQLite)
+    // diteruskan sebagai metadata ke mekanisme AETHER existing. Runtime
+    // merakit provider + api_url + api_key + model dari DB ini (bukan .env).
+    // Mode tetap routing signal.
     const metadata = {};
-    if (selectedProvider.value) metadata.provider = selectedProvider.value;
-    if (selectedModel.value) metadata.model = selectedModel.value;
+    if (selectedProviderInstanceId.value)
+      metadata.provider_instance_id = selectedProviderInstanceId.value;
+    if (selectedModelId.value) metadata.model_id = selectedModelId.value;
     if (selectedMode.value) metadata.mode = selectedMode.value;
     const record = await createTask(
       text,
@@ -525,6 +531,30 @@ async function enterWorkbench() {
   connectStream();
 }
 
+// Muat Provider Instance + Model dari konfigurasi LLM tersimpan (SQLite).
+// New Task memakai ini (bukan settings/.env). Default: instance enabled
+// pertama + model enabled pertama (bila belum ada pilihan).
+async function refreshLLMProviders() {
+  try {
+    const data = await getLLMProviders();
+    llmProviders.value = data.providers || [];
+  } catch {
+    llmProviders.value = [];
+  }
+  const enabled = llmProviders.value.filter((p) => p.enabled !== false);
+  const current = enabled.find((p) => p.id === selectedProviderInstanceId.value);
+  if (!current) {
+    const first = enabled[0] || null;
+    selectedProviderInstanceId.value = first ? first.id : "";
+    selectedModelId.value = "";
+  }
+  const inst = enabled.find((p) => p.id === selectedProviderInstanceId.value);
+  const models = inst ? (inst.models || []).filter((m) => m.enabled !== false) : [];
+  if (!models.some((m) => m.id === selectedModelId.value)) {
+    selectedModelId.value = models[0] ? models[0].id : "";
+  }
+}
+
 // --- Lifecycle -------------------------------------------------------------
 onMounted(async () => {
   try {
@@ -534,12 +564,12 @@ onMounted(async () => {
   }
   try {
     config.value = await getConfig();
-    selectedProvider.value = config.value.provider || "";
-    selectedModel.value = config.value.model || "";
     selectedMode.value = config.value.mode || "balanced";
   } catch {
     config.value = {};
   }
+  // Provider Instance + Model untuk New Task dari konfigurasi LLM tersimpan.
+  await refreshLLMProviders();
   await refreshLauncherProjects();
   // Baca project/session terakhir untuk ditawarkan "buka kembali" di launcher.
   // AETHER TIDAK auto-masuk Workbench: user harus menentukan workspace dulu.
@@ -877,13 +907,14 @@ onBeforeUnmount(() => {
           :disabled="submitting"
           :running="isRunning"
           :config="config"
-          :provider="selectedProvider"
-          :model="selectedModel"
+          :providers="llmProviders"
+          :provider-instance-id="selectedProviderInstanceId"
+          :model-id="selectedModelId"
           :mode="selectedMode"
           @submit="submitTask"
           @stop="stopTask"
-          @update:provider="selectedProvider = $event"
-          @update:model="selectedModel = $event"
+          @update:provider-instance-id="selectedProviderInstanceId = $event"
+          @update:model-id="selectedModelId = $event"
           @update:mode="selectedMode = $event"
         />
       </div>

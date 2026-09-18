@@ -9,15 +9,18 @@ const props = defineProps({
   disabled: { type: Boolean, default: false },
   running: { type: Boolean, default: false },
   config: { type: Object, default: () => ({}) },
-  provider: { type: String, default: "" },
-  model: { type: String, default: "" },
+  // Provider Instance + Model dari konfigurasi LLM tersimpan (SQLite).
+  // `providers` = [{id, name, provider_type, provider_label, enabled, models:[...]}].
+  providers: { type: Array, default: () => [] },
+  providerInstanceId: { type: String, default: "" },
+  modelId: { type: String, default: "" },
   mode: { type: String, default: "" },
 });
 const emit = defineEmits([
   "submit",
   "stop",
-  "update:provider",
-  "update:model",
+  "update:providerInstanceId",
+  "update:modelId",
   "update:mode",
 ]);
 
@@ -28,31 +31,34 @@ const textarea = ref(null);
 const MODE_LABELS = { minimal: "Fast", balanced: "Balanced", deep: "Deep" };
 const modes = computed(() => props.config.modes || ["minimal", "balanced", "deep"]);
 
-// Daftar provider+model yang benar-benar tersedia dari konfigurasi AETHER.
-// `config.models` = [{provider, model}]. Fallback ke `config.providers`
-// (nama provider saja) bila `models` belum tersedia.
+// Provider Instance dari konfigurasi LLM tersimpan (SQLite). Hanya instance
+// enabled yang ditampilkan (instance disabled tidak bisa dipakai task).
+const providerOptions = computed(() =>
+  (props.providers || []).filter((p) => p.enabled !== false)
+);
+
+// Model difilter: HANYA model milik Provider Instance yang dipilih.
 const modelOptions = computed(() => {
-  const models = props.config.models || [];
-  if (models.length) return models;
-  return (props.config.providers || []).map((p) => ({ provider: p, model: "" }));
+  const inst = providerOptions.value.find((p) => p.id === props.providerInstanceId);
+  if (!inst) return [];
+  return (inst.models || []).filter((m) => m.enabled !== false);
 });
 
-// Label tombol: tampilkan model (bila ada) + provider.
-function optionLabel(opt) {
-  return opt.model ? `${opt.model} · ${opt.provider}` : opt.provider;
+// Label provider instance: "nama (label type)".
+function providerLabel(p) {
+  const type = p.provider_label || p.provider_type || "";
+  return type ? `${p.name} (${type})` : p.name;
 }
 
-// Nilai model aktif = "provider::model" (untuk <select>).
-const currentModelValue = computed(() => {
-  if (!props.provider && !props.model) return "";
-  return `${props.provider}::${props.model || ""}`;
-});
+// Ubah Provider Instance -> reset model (model lama milik instance lain).
+function onProviderChange(e) {
+  emit("update:providerInstanceId", String(e.target.value || ""));
+  emit("update:modelId", "");
+}
 
-// Ubah pilihan model (native select) -> emit provider+model.
+// Ubah Model.
 function onModelChange(e) {
-  const [prov, mod] = String(e.target.value || "").split("::");
-  emit("update:provider", prov || "");
-  emit("update:model", mod || "");
+  emit("update:modelId", String(e.target.value || ""));
 }
 
 onMounted(() => {
@@ -89,17 +95,34 @@ function onKeydown(e) {
 
   <div class="composer-foot">
     <div class="composer-selects">
-      <!-- Model selector: provider+model dari konfigurasi AETHER (bukan hardcode). -->
+      <!-- Provider Instance: dari konfigurasi LLM tersimpan (SQLite). -->
+      <label class="composer-select">
+        <span class="cs-label">Provider</span>
+        <select
+          class="input-a"
+          :disabled="running"
+          :value="providerInstanceId"
+          @change="onProviderChange"
+        >
+          <option v-if="!providerOptions.length" value="">No provider instance</option>
+          <option v-for="p in providerOptions" :key="p.id" :value="p.id">
+            {{ providerLabel(p) }}
+          </option>
+        </select>
+      </label>
+
+      <!-- Model: HANYA model milik Provider Instance yang dipilih. -->
       <label class="composer-select">
         <span class="cs-label">Model</span>
-        <select class="input-a" :disabled="running" :value="currentModelValue" @change="onModelChange">
-          <option v-if="!modelOptions.length" value="">No provider</option>
-          <option
-            v-for="opt in modelOptions"
-            :key="opt.provider + ':' + opt.model"
-            :value="opt.provider + '::' + (opt.model || '')"
-          >
-            {{ optionLabel(opt) }}
+        <select
+          class="input-a"
+          :disabled="running || !providerInstanceId"
+          :value="modelId"
+          @change="onModelChange"
+        >
+          <option v-if="!modelOptions.length" value="">No model</option>
+          <option v-for="m in modelOptions" :key="m.id" :value="m.id">
+            {{ m.model_name }}
           </option>
         </select>
       </label>
