@@ -144,6 +144,10 @@ class TaskExecutor:
             session_store=self.sessions,
             session_id=session_id,
             options=options,
+            # Project-local storage (Task 5): root project target -> Task Log
+            # (`.aether/log/<task_id>.log`) + AI Project Bible
+            # (`.aether/bible`). Bila None, storage project-local dilewati.
+            project_root=workspace_root,
         )
 
     # ------------------------------------------------------------------ #

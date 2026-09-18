@@ -226,6 +226,19 @@ function statusTagClass(s) {
 }
 
 // --- Event handling (#51) --------------------------------------------------
+// Filter tampilan Changes: file di dalam `.aether/**` adalah metadata internal
+// AETHER (Bible, log, dsb.), BUKAN perubahan project. Ini murni layer
+// presentasi UI; ChangeTracker/ProjectBrain/logging tidak diubah.
+function isAetherMetadata(path) {
+  if (!path) return false;
+  const normalized = String(path).replace(/\\/g, "/").replace(/^\.\//, "");
+  return (
+    normalized === ".aether" ||
+    normalized.startsWith(".aether/") ||
+    normalized.includes("/.aether/")
+  );
+}
+
 function handleEvent(evt) {
   if (!evt || !evt.event_type) return;
   pushRolling(events.value, evt, MAX_ACTIVITY);
@@ -289,14 +302,17 @@ function handleEvent(evt) {
       pushRolling(terminalLines.value, { kind: "note", text: "recovery completed" }, MAX_TERMINAL);
       break;
     case "change_detected":
-      changes.value.push({
-        kind: p.kind || "change",
-        path: p.path,
-        detail: p.detail,
-        additions: p.additions,
-        deletions: p.deletions,
-        diff: p.diff,
-      });
+      // Sembunyikan `.aether/**` di daftar Changes (metadata internal AETHER).
+      if (!isAetherMetadata(p.path)) {
+        changes.value.push({
+          kind: p.kind || "change",
+          path: p.path,
+          detail: p.detail,
+          additions: p.additions,
+          deletions: p.deletions,
+          diff: p.diff,
+        });
+      }
       // File baru berubah -> refresh File Explorer agar file muncul.
       explorerRefresh.value += 1;
       break;

@@ -3,6 +3,12 @@
 Provider palsu (scripted) -> tidak memanggil API cloud/Ollama. Fixture workspace
 dibuat di `dummy_test/` (workspace testing terisolasi) dan dibersihkan setelah.
 
+CATATAN: verifier ini menguji jalur LEGACY (`use_continuous_loop=False`),
+    yaitu loop lama beserta heuristic completion-nya ("task selesai terdeteksi
+    dari perubahan file / hasil command"). Sejak continuous loop menjadi jalur
+    NORMAL, heuristic ini TIDAK dipakai lagi; continuous tidak menebak selesai —
+    keputusan final murni dari response LLM (lihat check_continuous_loop.py).
+
 Skenario:
     A) write_file -> run_command sukses -> final response.
        Loop berhenti sebelum max_iterations, status Completed, task_failed
@@ -93,6 +99,8 @@ def run_scenario(responses, max_iterations):
         max_iterations=max_iterations,
         session_store=store,
         session_id=session.session_id,
+        # Jalur legacy: heuristic completion + iteration limit diuji di sini.
+        use_continuous_loop=False,
     )
     prepared = PreparedTask(task="Kerjakan task kecil.", task_id="lc")
     result = runtime.run(prepared)

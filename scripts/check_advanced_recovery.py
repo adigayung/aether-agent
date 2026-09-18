@@ -296,6 +296,8 @@ def _run() -> int:
         validation_runner=runner,
         validation_request=request,
         recovery_manager=RecoveryManager(config=RecoveryConfigModel()),
+        # Recovery adalah subsistem jalur LEGACY -> pakai use_continuous_loop=False.
+        use_continuous_loop=False,
     )
     result = runtime.run(PreparedTask(task="task recovery+validation", plan=TaskPlanner().create_plan("Perbaiki bug")))
     assert result.status == RuntimeStatus.COMPLETED, result.status
@@ -318,6 +320,7 @@ def _run() -> int:
                 detector=Detector(iteration_limit=10),
             ),
         ),
+        use_continuous_loop=False,
     )
     result14 = runtime14.run(PreparedTask(task="task pulih", plan=TaskPlanner().create_plan("Perbaiki bug")))
     assert result14.status == RuntimeStatus.COMPLETED, result14.status
@@ -330,6 +333,7 @@ def _run() -> int:
         recovery_manager=RecoveryManager(
             config=RecoveryConfigModel(max_attempts=1, max_total_cycles=2),
         ),
+        use_continuous_loop=False,
     )
     result15 = runtime15.run(PreparedTask(task="task gagal", plan=TaskPlanner().create_plan("Perbaiki bug")))
     assert result15.status == RuntimeStatus.FAILED, result15.status

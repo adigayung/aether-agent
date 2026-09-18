@@ -16,6 +16,11 @@ from agent_ai.providers.ollama import OllamaProvider
 from agent_ai.providers.openai_compatible import OpenAICompatibleProvider
 from agent_ai.providers.openrouter import OpenRouterProvider
 from agent_ai.providers.registry import get_provider, registry
+from agent_ai.providers.retry import (
+    InfrastructureRetryPolicy,
+    is_infrastructure_error,
+    post_with_infrastructure_retry,
+)
 
 __all__ = [
     "BaseProvider",
@@ -35,4 +40,7 @@ __all__ = [
     "OpenRouterProvider",
     "registry",
     "get_provider",
+    "InfrastructureRetryPolicy",
+    "is_infrastructure_error",
+    "post_with_infrastructure_retry",
 ]

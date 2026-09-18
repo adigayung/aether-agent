@@ -1,8 +1,10 @@
 """Model untuk Project Intelligence / AI Project Bible.
 
-Project Intelligence disimpan DI LUAR project target, di bawah workspace
-Agent-Ai (mis. J:\\Agent_Ai\\projects\\<id>\\). Tidak ada file Agent-Ai yang
-ditulis ke root project target.
+Project Intelligence disimpan sebagai AI Project Bible project-local di
+`<root project target>/.aether/bible/` (lihat `agent_ai.projects.aether_store`).
+Legacy: beberapa jalur (mis. verifier lama) masih memakai storage JSON di bawah
+workspace Agent-Ai (J:\\Agent_Ai\\projects\\<id>\\intelligence\\) saat root
+project tidak diketahui.
 
 Model di sini provider-agnostic dan hanya representasi data (JSON-friendly).
 """
@@ -25,7 +27,7 @@ def _new_id() -> str:
     return uuid.uuid4().hex
 
 
-# Kategori intelligence yang didukung (sesuai struktur Project Bible).
+# Kategori intelligence yang didukung storage JSON legacy (semantic lama).
 INTELLIGENCE_CATEGORIES = (
     "architecture",
     "facts",
@@ -34,6 +36,24 @@ INTELLIGENCE_CATEGORIES = (
     "learnings",
     "problems",
 )
+
+# Kategori AI Project Bible project-local (file `<kategori>.md` di
+# `<root project target>/.aether/bible/`). "conventions" menggantikan "rules"
+# agar knowledge tetap terwakili (lihat CATEGORY_ALIASES).
+BIBLE_CATEGORIES = (
+    "architecture",
+    "ui",
+    "conventions",
+    "decisions",
+    "facts",
+    "learnings",
+    "problems",
+)
+
+# Alias kategori lama -> kategori kanonik Bible (semantic lama tetap terwakili).
+CATEGORY_ALIASES = {
+    "rules": "conventions",
+}
 
 
 @dataclass

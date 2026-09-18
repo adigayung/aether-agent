@@ -1,9 +1,9 @@
 """Project Registry.
 
-Mendaftarkan banyak project di workspace Agent-Ai. Semua data project
-(project.json + intelligence) disimpan DI BAWAH workspace Agent-Ai
-(mis. J:\\Agent_Ai\\projects\\<id>\\), TIDAK PERNAH di root project target.
-
+Mendaftarkan banyak project di workspace Agent-Ai. Metadata project
+(`project.json`) disimpan DI BAWAH workspace Agent-Ai (mis.
+J:\\Agent_Ai\\projects\\<id>\\). Knowledge project (AI Project Bible) disimpan
+project-local di `<root project target>/.aether/bible/`.
     from agent_ai.projects import ProjectRegistry
 
     reg = ProjectRegistry()  # default: <workspace>/projects
@@ -86,8 +86,10 @@ class ProjectRegistry:
         project_dir.mkdir(parents=True, exist_ok=True)
         self._write_json(self._project_json(config.id), config.to_dict())
 
-        # Buat struktur intelligence di bawah workspace Agent-Ai.
-        ProjectIntelligence(project_dir).create()
+        # Buat AI Project Bible project-local di root project TARGET
+        # (`<root>/.aether/bible/` + index). Knowledge TIDAK ditulis ke
+        # workspace AETHER (single source of truth: project-local).
+        ProjectIntelligence(project_dir, root=config.root).create()
         return config
 
     def load(self, project_id: str) -> ProjectConfig:
@@ -133,10 +135,10 @@ class ProjectRegistry:
         return projects
 
     def intelligence(self, project_id: str) -> ProjectIntelligence:
-        """Akses ProjectIntelligence untuk sebuah project."""
+        """Akses ProjectIntelligence (Bible project-local) untuk sebuah project."""
         # Pastikan project terdaftar sebelum mengakses intelligence.
-        self.load(project_id)
-        return ProjectIntelligence(self.project_dir(project_id))
+        config = self.load(project_id)
+        return ProjectIntelligence(self.project_dir(project_id), root=config.root)
 
     def touch(self, project_id: str) -> ProjectConfig:
         """Update `updated_at` project."""
@@ -159,3 +161,4 @@ class ProjectRegistry:
     def _write_json(path: Path, data: Dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+

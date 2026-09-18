@@ -4,9 +4,17 @@ Alur:
     LLMResponse(tool_calls) -> ToolExecutor -> ToolRegistry.execute()
         -> hasil/error -> AgentObservation
 
+Native Tool Calling:
+    ToolCall -> ToolExecutor.execute_tool_call() -> ToolResultPayload
+        -> (diformat jadi message role="tool" oleh ConversationHistory)
+
 Prinsip:
     - Provider-agnostic: tidak ada logika khusus Ollama/OpenAI/DeepSeek.
     - Error tool ditangkap dan menjadi AgentObservation gagal (bukan crash).
+    - Execution-only: tidak reasoning, tidak menentukan task selesai, tidak
+      memilih tool alternatif. Semua kegagalan (permission ditolak, tool error,
+      exception runtime, command gagal) menjadi ToolResultPayload(status=error),
+      bukan exception yang memutus agent loop.
     - Membedakan secara eksplisit:
         * tool_error      : tool gagal menjalankan operasinya (metadata
                             "tool_error": True, success=False).
@@ -19,10 +27,12 @@ Prinsip:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List, Optional
+import json
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from agent_ai.core.models import AgentAction, AgentObservation
 from agent_ai.core.response import ActionType, LLMAction, LLMResponse
+from agent_ai.core.types import ToolCall, ToolResultPayload
 from agent_ai.tools.base import ToolError
 from agent_ai.tools.registry import ToolRegistry, registry as default_registry
 
@@ -145,3 +155,115 @@ class ToolExecutor:
             Daftar AgentObservation (satu per tool call, urut).
         """
         return [self.execute_action(action) for action in response.tool_calls()]
+
+    # ------------------------------------------------------------------ #
+    # Native Tool Calling
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _parse_tool_arguments(raw: Any) -> Tuple[Dict[str, Any], Optional[str]]:
+        """Parse argumen ToolCall dengan aman -> (dict, error_message|None).
+
+        Menerima dict (sudah terstruktur) atau JSON string (format provider).
+        Tidak melempar exception: JSON tidak valid dikembalikan sebagai pesan
+        error agar pemanggil bisa mengubahnya menjadi ToolResultPayload gagal.
+        """
+        if raw is None or raw == "":
+            return {}, None
+        if isinstance(raw, dict):
+            return dict(raw), None
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+            except (ValueError, TypeError) as exc:
+                return {}, f"{type(exc).__name__}: {exc}"
+            if isinstance(parsed, dict):
+                return parsed, None
+            return {}, f"arguments harus JSON object, bukan {type(parsed).__name__}"
+        return {}, f"tipe arguments tidak didukung: {type(raw).__name__}"
+
+    @staticmethod
+    def _failure_content(result: Any) -> Optional[str]:
+        """Ubah hasil tool yang menandai kegagalan menjadi string error.
+
+        Mengembalikan string (outcome/exit_code/stdout/stderr/error) bila hasil
+        menandai kegagalan (command_failure/timeout/spawn_error atau
+        success=False), atau None bila hasil dianggap sukses.
+        """
+        if not isinstance(result, dict):
+            return None
+        outcome = result.get("outcome")
+        failed = outcome in {"command_failure", "timeout", "spawn_error"}
+        if not failed and result.get("success") is not False:
+            return None
+        parts = [f"Tool execution failed (outcome={outcome or 'error'})."]
+        if result.get("exit_code") is not None:
+            parts.append(f"exit_code={result['exit_code']}")
+        if result.get("error"):
+            parts.append(f"error={result['error']}")
+        if result.get("stdout"):
+            parts.append(f"stdout:\n{result['stdout']}")
+        if result.get("stderr"):
+            parts.append(f"stderr:\n{result['stderr']}")
+        return "\n".join(parts)
+
+    def execute_tool_call(self, tool_call: ToolCall) -> ToolResultPayload:
+        """Jalankan satu ToolCall dan kembalikan ToolResultPayload.
+
+        Execution-only: tidak reasoning, tidak menentukan task selesai, tidak
+        memilih tool alternatif setelah gagal. SEMUA kegagalan (permission
+        ditolak, tool error, exception runtime, command gagal) dikembalikan
+        sebagai payload status=error (bukan raise), sehingga agent loop tidak
+        putus. Pembuatan message role="tool" adalah tanggung jawab
+        ConversationHistory, bukan ToolExecutor.
+
+        Args:
+            tool_call: ToolCall (id, fungsi/nama, argumen) dari model.
+
+        Returns:
+            ToolResultPayload yang selalu membawa tool_call_id, tool_name,
+            output/content, dan status.
+        """
+        tool_call_id = tool_call.id
+        tool_name = tool_call.name
+
+        # 1) Parse argumen dengan aman (dict atau JSON string).
+        arguments, parse_error = self._parse_tool_arguments(tool_call.arguments)
+        if parse_error is not None:
+            return ToolResultPayload.error(
+                tool_call_id, tool_name, f"Invalid arguments: {parse_error}"
+            )
+        if not tool_name:
+            return ToolResultPayload.error(
+                tool_call_id, tool_name, "Tool call tidak punya nama tool."
+            )
+
+        # 2) Permission Policy (#54): evaluasi SEBELUM eksekusi. Bila ditolak,
+        #    kembalikan payload error (jangan raise).
+        if self.permission_manager is not None:
+            decision = self.permission_manager.check(tool_name, dict(arguments))
+            if not decision.allowed:
+                return ToolResultPayload.error(
+                    tool_call_id,
+                    tool_name,
+                    f"Permission Denied: User/Policy rejected execution of tool '{tool_name}'",
+                )
+
+        # 3) Eksekusi tool via mekanisme existing (ToolRegistry). Tool error /
+        #    exception runtime -> payload error, bukan propagate ke loop.
+        try:
+            result = self.registry.execute(tool_name, arguments)
+        except ToolError as exc:
+            return ToolResultPayload.error(
+                tool_call_id, tool_name, f"{type(exc).__name__}: {exc}"
+            )
+        except Exception as exc:  # noqa: BLE001 - jangan putuskan agent loop
+            return ToolResultPayload.error(
+                tool_call_id, tool_name, f"{type(exc).__name__}: {exc}"
+            )
+
+        # 4) Hasil sukses, kecuali hasil menandai kegagalan command/program
+        #    (exit_code != 0 / timeout / spawn) -> status error + detail string.
+        failure = self._failure_content(result)
+        if failure is not None:
+            return ToolResultPayload.error(tool_call_id, tool_name, failure)
+        return ToolResultPayload.success(tool_call_id, tool_name, result)

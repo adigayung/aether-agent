@@ -39,31 +39,33 @@ class ProjectIntelligenceContext:
     # ------------------------------------------------------------------ #
     # Category resolution
     # ------------------------------------------------------------------ #
-    @staticmethod
-    def _resolve_categories(categories: Optional[List[str]]) -> List[str]:
+    def _resolve_categories(self, categories: Optional[List[str]]) -> List[str]:
         """Tentukan kategori yang dipakai (deterministik).
+
+        Kategori mengikuti backend ProjectIntelligence aktif (Bible
+        project-local atau storage JSON legacy).
 
         Args:
             categories: daftar kategori opsional. Bila None, gunakan semua.
 
         Returns:
-            Daftar kategori valid, urut sesuai INTELLIGENCE_CATEGORIES.
+            Daftar kategori valid, urut sesuai kategori kanonik backend.
 
         Raises:
             ValueError: bila ada kategori tidak dikenal.
         """
+        available = list(getattr(self.intelligence, "categories", INTELLIGENCE_CATEGORIES))
         if categories is None:
-            return list(INTELLIGENCE_CATEGORIES)
-
-        unknown = [c for c in categories if c not in INTELLIGENCE_CATEGORIES]
+            return available
+        unknown = [c for c in categories if c not in available]
         if unknown:
             raise ValueError(
                 f"Kategori tidak dikenal: {', '.join(unknown)}. "
-                f"Tersedia: {', '.join(INTELLIGENCE_CATEGORIES)}"
+                f"Tersedia: {', '.join(available)}"
             )
         # Pertahankan urutan kanonik & hilangkan duplikat.
         selected = set(categories)
-        return [c for c in INTELLIGENCE_CATEGORIES if c in selected]
+        return [c for c in available if c in selected]
 
     # ------------------------------------------------------------------ #
     # Read
@@ -136,3 +138,4 @@ class ProjectIntelligenceContext:
     def summary(self, categories: Optional[List[str]] = None) -> Dict[str, int]:
         """Jumlah entry per kategori (untuk inspeksi cepat)."""
         return {category: len(contents) for category, contents in self.read(categories).items()}
+

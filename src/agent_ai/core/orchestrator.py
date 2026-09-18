@@ -24,6 +24,10 @@ Prinsip:
       tercapai, bukti langkah yang sama dipakai untuk memutuskan Completed vs
       Failed, sehingga task yang sudah selesai tidak salah ditandai Failed
       hanya karena model terus memanggil tool.
+    - Blok heuristic di atas berlaku HANYA untuk LOOP LAMA. Jalur continuous
+      (`run_continuous_loop`, `use_continuous_loop=True`) TIDAK memakai
+      heuristic completion apa pun: keputusan selesai murni dari response LLM
+      yang tidak memiliki tool call (LLM Final -> DONE).
     - ProjectBrain (opsional) dipakai untuk membaca context sebelum task dan
       menyimpan learning setelah selesai. Orchestrator tidak tahu detail
       IntelligenceContext/Learner (hanya lewat facade ProjectBrain).
@@ -40,10 +44,12 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from agent_ai.core.coding import CodingTask
 from agent_ai.core.executor import ToolExecutor
+from agent_ai.core.history import ConversationHistory
 from agent_ai.core.loop import AgentLoop, MaxIterationsExceeded
 from agent_ai.core.models import AgentObservation, AgentStatus
 from agent_ai.core.observability import EventSink, emit as emit_event
 from agent_ai.core.response import ActionType, LLMResponse
+from agent_ai.core.types import ToolCall, ToolResultPayload
 from agent_ai.providers.base import (
     BaseProvider,
     GenerateOptions,
@@ -60,6 +66,14 @@ from agent_ai.reliability.models import (
 
 if TYPE_CHECKING:  # pragma: no cover - hanya untuk type hint, hindari import cycle
     from agent_ai.projects.brain import ProjectBrain
+
+
+# Emergency safety guard untuk continuous loop Native Tool Calling.
+# Nilai TINGGI murni proteksi infrastruktur terhadap runaway loop (mis. model
+# mengulang tool call yang sama tanpa henti). Ini BUKAN limit behavior agent,
+# BUKAN target iterasi, dan BUKAN mekanisme completion: loop normal berhenti
+# ketika LLM memberi response final TANPA tool call.
+_CONTINUOUS_SAFETY_MAX_STEPS = 1000
 
 
 @dataclass
@@ -92,6 +106,11 @@ class AgentOrchestrator:
         system_prompt: prompt sistem opsional.
         brain: ProjectBrain opsional. Bila diisi, context Project Intelligence
             disisipkan sebelum task dan learning disimpan setelah selesai.
+        brain_learning: bila False, context brain tetap dipakai tetapi learning
+            tidak dijalankan di akhir run (dikelola pemanggil, mis. Runtime).
+        use_continuous_loop: bila True, `run()` memakai continuous loop Native
+            Tool Calling (satu percakapan kontinu) menggantikan loop lama.
+            Default False (perilaku lama tetap dipertahankan).
     """
 
     def __init__(
@@ -102,10 +121,12 @@ class AgentOrchestrator:
         options: Optional[GenerateOptions] = None,
         system_prompt: Optional[str] = None,
         brain: Optional["ProjectBrain"] = None,
+        brain_learning: bool = True,
         use_tools: bool = True,
         tool_choice: Optional[ToolChoice] = None,
         reliability: Optional[ReliabilityManager] = None,
         event_sink: Optional[EventSink] = None,
+        use_continuous_loop: bool = False,
     ) -> None:
         self.provider = provider
         self.executor = executor or ToolExecutor()
@@ -113,6 +134,10 @@ class AgentOrchestrator:
         self.options = options
         self.system_prompt = system_prompt
         self.brain = brain
+        # Bila False, orchestrator tetap membaca context brain tetapi TIDAK
+        # melakukan learning di akhir run (learning dikelola pemanggil, mis.
+        # sekali per task di Runtime). Default True (perilaku lama).
+        self.brain_learning = brain_learning
         # Native tool calling: kirim definisi tool dari registry ke provider.
         # Default aktif; tool_choice default None (tidak dipaksa).
         self.use_tools = use_tools
@@ -123,6 +148,9 @@ class AgentOrchestrator:
         # yang diemit (backward compatible). Sink menerima (event_type, payload)
         # dan payload sudah disanitasi (tanpa secret).
         self.event_sink = event_sink
+        # Jalur execution baru (Native Tool Calling, satu percakapan kontinu).
+        # Default False -> `run()` memakai loop lama (backward compatible).
+        self.use_continuous_loop = use_continuous_loop
 
     # ------------------------------------------------------------------ #
     # Tool definitions
@@ -255,8 +283,12 @@ class AgentOrchestrator:
         return "success"
 
     # ------------------------------------------------------------------ #
-    # Completion detection (provider-agnostic)
+    # Completion detection — LEGACY LOOP ONLY (use_continuous_loop=False)
     # ------------------------------------------------------------------ #
+    # Blok ini HANYA dipakai jalur loop lama. Jalur continuous
+    # (`run_continuous_loop`) TIDAK memanggilnya sama sekali: di sana
+    # completion murni dari response LLM tanpa tool call. Heuristic di bawah
+    # tidak boleh (dan tidak bisa) memutus continuous reasoning loop.
     # Penanda mutasi workspace yang dikembalikan tool tulis/ubah/hapus/pindah
     # (lihat tools/workspace.py). Dipakai generik, bukan hardcode nama tool.
     _MUTATION_MARKERS = ("written", "edited", "deleted", "moved")
@@ -468,6 +500,12 @@ class AgentOrchestrator:
 
     def _completion_detected(self, loop: AgentLoop) -> bool:
         """Deteksi penyelesaian task dari bukti langkah + requirement task.
+
+        LEGACY-ONLY: method ini HANYA dipakai jalur loop lama
+        (`use_continuous_loop=False`). Jalur continuous (`run_continuous_loop`)
+        TIDAK memanggilnya: di sana AETHER tidak boleh menebak task selesai dari
+        perubahan file / hasil command / keyword task — completion hanya dari
+        response LLM tanpa tool call.
 
         Requirement yang dinilai (deterministik dari teks task + evidence step):
             1) Implementasi: minimal satu mutasi sukses (write/edit/delete/move).
@@ -688,9 +726,16 @@ class AgentOrchestrator:
     def run(self, task: str) -> OrchestratorResult:
         """Jalankan iterative agent loop untuk sebuah task.
 
+        Bila `use_continuous_loop` aktif, delegasikan ke `run_continuous_loop()`
+        (Native Tool Calling, satu percakapan kontinu). Default memakai loop
+        lama agar perilaku existing tidak berubah.
+
         Returns:
             OrchestratorResult (status DONE/FAILED, result, steps).
         """
+        if self.use_continuous_loop:
+            return self.run_continuous_loop(task)
+
         loop = AgentLoop(task=task, max_iterations=self.max_iterations)
         loop.start()
 
@@ -912,6 +957,270 @@ class AgentOrchestrator:
             provider_error=provider_error,
         )
 
+    # ------------------------------------------------------------------ #
+    # Continuous loop (Native Tool Calling, satu percakapan kontinu)
+    # ------------------------------------------------------------------ #
+    def run_continuous_loop(
+        self,
+        task: str,
+        *,
+        system_prompt: Optional[str] = None,
+        max_steps: int = _CONTINUOUS_SAFETY_MAX_STEPS,
+        options: Optional[GenerateOptions] = None,
+    ) -> OrchestratorResult:
+        """Jalankan SATU percakapan kontinu sampai LLM memberi jawaban final.
+
+        Pola Native Tool Calling (tanpa nested session, tanpa completion
+        detection semantik):
+
+            LLM -> tool_calls -> eksekusi SEMUA tool -> hasil role="tool"
+                -> LLM -> tool_calls -> ... -> LLM final (tanpa tool call)
+
+        Karakteristik:
+            - Satu `ConversationHistory` untuk seluruh task (system + task +
+              seluruh turn), BUKAN session LLM baru per langkah.
+            - Hasil tool SELALU dikirim sebagai pesan role "tool" dengan
+              `tool_call_id` (via ConversationHistory), bukan dijejalkan
+              sebagai pesan user.
+            - Tidak ada reasoning/observation buatan AETHER di antara iterasi;
+              setelah hasil tool, kontrol kembali 100% ke LLM.
+            - Completion sepenuhnya ditentukan LLM: loop berhenti saat response
+              final (tanpa tool call). Tidak ada semantic evaluator/planner baru.
+
+        Args:
+            task: task/permintaan user.
+            system_prompt: override system prompt (default: system prompt loop).
+            max_steps: emergency safety guard terhadap runaway loop. Nilai
+                default TINGGI dan bukan limit behavior agent.
+            options: override GenerateOptions (default: options loop).
+
+        Returns:
+            OrchestratorResult (status DONE/FAILED, result, steps).
+        """
+        effective_options = options if options is not None else self.options
+        prompt = system_prompt if system_prompt is not None else self.system_prompt
+
+        loop = AgentLoop(task=task, max_iterations=max(1, int(max_steps)))
+        loop.start()
+
+        # Satu percakapan kontinu untuk seluruh task.
+        history = ConversationHistory()
+        if prompt:
+            history.append_system_message(prompt)
+        brain_context = self._brain_context_message()
+        if brain_context is not None:
+            history.append_system_message(brain_context.content)
+        history.append_user_message(task)
+
+        tools = self._tool_definitions()
+        provider_error = False
+        # Safety (infrastruktur, bukan completion): batasi berapa kali response
+        # provider yang TERPOTONG boleh dicoba ulang. Bukan keputusan "task
+        # selesai"; hanya proteksi runaway saat provider terus memotong output.
+        truncation_recoveries = 0
+
+        while not loop.is_finished:
+            # Safety guard (infrastruktur, bukan completion): cegah runaway.
+            if len(loop.state.steps) >= loop.state.max_iterations:
+                loop.fail(
+                    "Continuous loop dihentikan oleh safety guard "
+                    f"(max_steps={loop.state.max_iterations}); ini proteksi "
+                    "runaway, bukan limit behavior agent."
+                )
+                break
+
+            messages = history.to_provider_format()
+            emit_event(
+                self.event_sink,
+                "provider_request",
+                {
+                    "provider": getattr(self.provider, "name", ""),
+                    "model": self._model_name(),
+                    "iteration": loop.iteration,
+                    "tool_count": len(tools),
+                },
+            )
+            try:
+                gen_result = self.provider.generate(
+                    messages=messages,
+                    options=effective_options,
+                    tools=tools or None,
+                    tool_choice=self.tool_choice,
+                )
+                response: LLMResponse = self.provider.normalize_response(gen_result)
+            except Exception as exc:  # noqa: BLE001 - provider error -> FAILED jelas
+                provider_error = True
+                emit_event(
+                    self.event_sink,
+                    "provider_response",
+                    {
+                        "provider": getattr(self.provider, "name", ""),
+                        "model": self._model_name(),
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+                # Error handling existing: hentikan loop dengan pesan jelas,
+                # tanpa mengarang keputusan reasoning pengganti LLM.
+                loop.fail(f"{type(exc).__name__}: {exc}")
+                break
+
+            emit_event(
+                self.event_sink,
+                "provider_response",
+                {
+                    "provider": response.provider or getattr(self.provider, "name", ""),
+                    "model": response.model or self._model_name(),
+                    "finish_reason": response.finish_reason.value,
+                    "tool_calls": len(response.tool_calls()),
+                },
+            )
+
+            # Commentary natural dari LLM (bila ada); bukan reasoning buatan.
+            commentary = self._extract_commentary(response)
+            if commentary:
+                emit_event(
+                    self.event_sink,
+                    "agent_commentary",
+                    {"text": commentary, "iteration": loop.iteration},
+                )
+
+            truncated = bool(getattr(response, "truncated", False))
+            if not truncated:
+                truncation_recoveries = 0
+
+            # LLM TIDAK memanggil tool -> jawaban final (source of truth LLM).
+            # Ini SATU-SATUNYA jalur completion continuous loop. TIDAK ada
+            # heuristic file/command/keyword/jumlah-step yang boleh
+            # menyelesaikan loop lebih awal: keputusan selesai murni dari
+            # response LLM tanpa tool call.
+            if not response.has_tool_calls:
+                if truncated:
+                    # Response terpotong -> BUKAN final. Bounded recovery
+                    # (infrastruktur, bukan completion): beri model kesempatan
+                    # melanjutkan; bila provider terus memotong, berhenti dengan
+                    # error JELAS agar tidak runaway.
+                    truncation_recoveries += 1
+                    emit_event(
+                        self.event_sink,
+                        "provider_response_truncated",
+                        {
+                            "provider": response.provider
+                            or getattr(self.provider, "name", ""),
+                            "model": response.model or self._model_name(),
+                            "finish_reason": response.finish_reason.value,
+                            "recovery": truncation_recoveries,
+                        },
+                    )
+                    if truncation_recoveries > self._MAX_TRUNCATION_RECOVERIES:
+                        loop.fail(
+                            "Provider response terpotong berulang kali "
+                            f"(finish_reason=length, {truncation_recoveries}x); "
+                            "model tidak menghasilkan jawaban final lengkap."
+                        )
+                        break
+                    history.append_user_message(self._truncation_message().content)
+                    continue
+                history.append_assistant_message(content=response.text or "")
+                loop.finish(result=response.text or "")
+                break
+
+            # LLM memanggil tool: simpan assistant(tool_calls) penuh lebih dulu,
+            # baru eksekusi SETIAP tool dan kirim hasilnya (role="tool").
+            model_tool_calls = response.tool_calls()
+            tool_calls = [
+                ToolCall.create(action.name, action.arguments, id=action.id)
+                for action in model_tool_calls
+            ]
+            history.append_assistant_message(
+                content=response.text or None, tool_calls=tool_calls
+            )
+
+            stop = False
+            for tool_call, action in zip(tool_calls, model_tool_calls):
+                emit_event(
+                    self.event_sink,
+                    "tool_called",
+                    {
+                        "tool": tool_call.name,
+                        "arguments": dict(action.arguments or {}),
+                        "target": self._tool_target(action.arguments or {}),
+                        "iteration": loop.iteration,
+                    },
+                )
+                payload = self.executor.execute_tool_call(tool_call)
+                # Hasil tool SELALU dikirim sebagai pesan role "tool".
+                history.append_tool_result(
+                    payload.tool_call_id, payload.tool_name, payload.to_content()
+                )
+                emit_event(
+                    self.event_sink,
+                    "tool_completed",
+                    {
+                        "tool": payload.tool_name,
+                        "success": payload.is_success,
+                        "error": None if payload.is_success else payload.to_content(),
+                        "target": self._tool_target(action.arguments or {}),
+                        "metadata": {},
+                    },
+                )
+                emit_event(
+                    self.event_sink,
+                    "observation_received",
+                    {
+                        "tool": payload.tool_name,
+                        "success": payload.is_success,
+                        "content": payload.output,
+                    },
+                )
+                # Catat step untuk observability (bukan keputusan completion).
+                # Guard runaway tetap berlaku.
+                try:
+                    loop.record_action(self.executor.to_agent_action(action))
+                    loop.record_observation(
+                        self._tool_payload_to_observation(payload)
+                    )
+                except MaxIterationsExceeded:
+                    loop.fail(
+                        "Continuous loop dihentikan oleh safety guard "
+                        f"(max_steps={loop.state.max_iterations})."
+                    )
+                    stop = True
+                    break
+            if stop:
+                break
+
+        learning = self._learn_from_run(task, loop)
+        return OrchestratorResult(
+            status=loop.status,
+            result=loop.state.result,
+            error=loop.state.error,
+            iterations=loop.iteration,
+            steps=loop.to_dict()["steps"],
+            learning=learning,
+            provider_error=provider_error,
+        )
+
+    @staticmethod
+    def _tool_payload_to_observation(payload: ToolResultPayload) -> AgentObservation:
+        """Ubah ToolResultPayload menjadi AgentObservation (bookkeeping step).
+
+        HANYA dipakai untuk mencatat step (observability). Tidak menentukan
+        completion dan TIDAK pernah dikirim ke LLM: histori LLM memakai pesan
+        role "tool" lewat ConversationHistory.
+        """
+        if payload.is_success:
+            return AgentObservation(
+                content=payload.output,
+                success=True,
+                metadata={"tool": payload.tool_name},
+            )
+        return AgentObservation(
+            content=None,
+            success=False,
+            error=payload.to_content(),
+            metadata={"tool": payload.tool_name, "tool_error": True},
+        )
+
     def run_coding_task(self, task: str) -> CodingTask:
         """Jalankan task coding dan bungkus hasilnya sebagai CodingTask.
 
@@ -946,7 +1255,7 @@ class AgentOrchestrator:
         Learning error TIDAK menggagalkan task utama; kembalikan None bila
         brain tidak tersedia atau learning gagal.
         """
-        if self.brain is None:
+        if self.brain is None or not self.brain_learning:
             return None
         try:
             observations = self._build_observations(task, loop)

@@ -64,6 +64,21 @@ class ProjectBrain:
         self._learner = IntelligenceLearner(intelligence, provider=provider, options=options)
 
     # ------------------------------------------------------------------ #
+    # Factory (Bible project-local)
+    # ------------------------------------------------------------------ #
+    @classmethod
+    def for_project(
+        cls,
+        root: Any,
+        provider: Optional[BaseProvider] = None,
+        options: Optional[GenerateOptions] = None,
+    ) -> "ProjectBrain":
+        """Bangun Brain yang membaca/menulis Bible project-local di `root`.
+
+        Knowledge disimpan di `<root>/.aether/bible/` (AI Project Bible).
+        """
+        return cls(ProjectIntelligence.for_project(root), provider=provider, options=options)
+    # ------------------------------------------------------------------ #
     # Read
     # ------------------------------------------------------------------ #
     def get_context(
@@ -90,7 +105,6 @@ class ProjectBrain:
     ) -> Dict[str, List[Any]]:
         """Baca content per kategori (tanpa metadata internal)."""
         return self._context.read(categories=categories)
-
     # ------------------------------------------------------------------ #
     # Write (delegasi ke IntelligenceLearner)
     # ------------------------------------------------------------------ #
@@ -119,3 +133,4 @@ class ProjectBrain:
 
     def __repr__(self) -> str:  # pragma: no cover - bantuan debug
         return f"<ProjectBrain categories={len(self.summary())}>"
+

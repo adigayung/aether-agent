@@ -6,7 +6,10 @@ yang layak disimpan ke ProjectIntelligence.
 Prinsip:
     - LLM TIDAK menulis langsung. LLM menghasilkan structured JSON yang
       divalidasi ketat sebelum disimpan.
-    - Kategori dibatasi: architecture, facts, decisions, rules, learnings, problems.
+    - Kategori mengikuti backend ProjectIntelligence: AI Project Bible
+      (architecture, ui, conventions, decisions, facts, learnings, problems)
+      atau storage JSON legacy (rules, dst). Semantic lama ("rules") tetap
+      didukung lewat alias.
     - Hindari duplikasi sederhana (bandingkan content dengan entry yang ada).
     - TIDAK menghapus knowledge lama; hanya add baru / skip duplicate.
     - Tidak menulis ke project source; hanya lewat ProjectIntelligence.
@@ -28,6 +31,7 @@ from typing import Any, Dict, List, Optional
 
 from agent_ai.projects.intelligence import ProjectIntelligence
 from agent_ai.projects.models import (
+    CATEGORY_ALIASES,
     INTELLIGENCE_CATEGORIES,
     IntelligenceEntry,
 )
@@ -52,19 +56,26 @@ _SYSTEM_PROMPT = (
     "Respond ONLY with a single JSON object, no prose, no markdown fences."
 )
 
-_INSTRUCTIONS = """\
+#: Hint singkat per kategori (dipakai untuk membangun instruksi prompt).
+_CATEGORY_HINTS = {
+    "architecture": "high-level structure, components, layering",
+    "ui": "UI/frontend contracts (components, layout, screens)",
+    "conventions": "coding conventions/constraints an AI should follow",
+    "rules": "coding conventions/constraints an AI should follow",
+    "facts": "concrete, verifiable facts",
+    "decisions": "notable technical decisions",
+    "learnings": "insights useful for future work",
+    "problems": "risks, gaps, or issues observed",
+}
+
+_INSTRUCTIONS_TEMPLATE = """\
 From the observations below, extract knowledge worth storing.
 
 Return a JSON object with EXACTLY these keys (arrays of entries):
-  - "architecture": high-level structure, components, layering
-  - "facts": concrete, verifiable facts
-  - "decisions": notable technical decisions
-  - "rules": conventions/constraints an AI should follow
-  - "learnings": insights useful for future work
-  - "problems": risks, gaps, or issues observed
+{category_lines}
 
 Each entry MUST be an object:
-  {"content": <string or object>, "confidence": <number 0..1>}
+  {{"content": <string or object>, "confidence": <number 0..1>}}
 
 Rules:
   - Only include categories you have evidence for; empty arrays are allowed.
@@ -115,13 +126,31 @@ class IntelligenceLearner:
         self.options = options
 
     # ------------------------------------------------------------------ #
-    # Prompt building
+    # Categories + prompt building
     # ------------------------------------------------------------------ #
+    def _categories(self) -> tuple:
+        """Kategori valid mengikuti backend ProjectIntelligence aktif."""
+        return tuple(getattr(self.intelligence, "categories", INTELLIGENCE_CATEGORIES))
+
     @staticmethod
-    def build_prompt(observations: List[str]) -> str:
-        """Bangun prompt dari daftar observations (provider-agnostic)."""
+    def build_prompt(
+        observations: List[str],
+        categories: Optional[List[str]] = None,
+    ) -> str:
+        """Bangun prompt dari daftar observations (provider-agnostic).
+
+        Args:
+            observations: hasil kerja agent yang akan diringkas.
+            categories: kategori target. Bila None, kategori legacy.
+        """
+        category_list = list(categories) if categories else list(INTELLIGENCE_CATEGORIES)
+        lines = "\n".join(
+            f'  - "{name}": {_CATEGORY_HINTS.get(name, "project knowledge")}'
+            for name in category_list
+        )
+        instructions = _INSTRUCTIONS_TEMPLATE.format(category_lines=lines)
         joined = "\n".join(f"- {obs}" for obs in observations)
-        return _INSTRUCTIONS + joined
+        return instructions + joined
 
     # ------------------------------------------------------------------ #
     # Parsing / validation (strict)
@@ -186,19 +215,25 @@ class IntelligenceLearner:
         """Parse + validasi output LLM menjadi entry per kategori."""
         data = self._extract_json(text)
 
-        result: Dict[str, List[IntelligenceEntry]] = {}
-        for category in INTELLIGENCE_CATEGORIES:
-            raw_entries = data.get(category, [])
+        # Kategori target backend + alias semantic lama (mis. "rules" -> "conventions")
+        # agar knowledge lama tetap terwakili.
+        available = list(self._categories())
+        sources: Dict[str, str] = {name: name for name in available}
+        for legacy, canonical in CATEGORY_ALIASES.items():
+            if legacy not in sources and canonical in available:
+                sources[legacy] = canonical
+
+        result: Dict[str, List[IntelligenceEntry]] = {name: [] for name in available}
+        for source_key, target in sources.items():
+            raw_entries = data.get(source_key, [])
             if raw_entries is None:
                 raw_entries = []
             if not isinstance(raw_entries, list):
                 raise LearningParseError(
-                    f"Kategori '{category}' harus berupa array, bukan {type(raw_entries).__name__}."
+                    f"Kategori '{source_key}' harus berupa array, bukan {type(raw_entries).__name__}."
                 )
-            entries: List[IntelligenceEntry] = []
             for index, raw in enumerate(raw_entries):
-                entries.append(self._validate_entry(raw, category, index))
-            result[category] = entries
+                result[target].append(self._validate_entry(raw, source_key, index))
         return result
 
     # ------------------------------------------------------------------ #
@@ -257,7 +292,7 @@ class IntelligenceLearner:
         if self.provider is None:
             raise LearningError("Provider diperlukan untuk learn().")
 
-        prompt = self.build_prompt(observations)
+        prompt = self.build_prompt(observations, categories=list(self._categories()))
         messages = [
             Message(role="system", content=_SYSTEM_PROMPT),
             Message(role="user", content=prompt),
@@ -292,10 +327,10 @@ class IntelligenceLearner:
         Raises:
             LearningError: bila kategori/content/confidence invalid.
         """
-        if category not in INTELLIGENCE_CATEGORIES:
+        available = self._categories()
+        if category not in available and category not in INTELLIGENCE_CATEGORIES:
             raise LearningError(
-                f"Kategori '{category}' tidak valid. "
-                f"Tersedia: {', '.join(INTELLIGENCE_CATEGORIES)}"
+                f"Kategori '{category}' tidak valid. Tersedia: {', '.join(available)}"
             )
         if content is None or (isinstance(content, str) and not content.strip()):
             raise LearningError("Content tidak boleh kosong.")

@@ -302,6 +302,46 @@ class FallbackConfig:
 
 
 # ---------------------------------------------------------------------------
+# Konfigurasi Provider Infrastructure Retry (technical only)
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class ProviderRetryConfig:
+    """Konfigurasi retry INFRASTRUKTUR di layer provider (bounded).
+
+    HANYA untuk kegagalan TEKNIS yang bersifat sementara: network/timeout/
+    connection error dan status HTTP 429/500/529. BUKAN untuk kegagalan logika
+    agent (tool error, command exit != 0, validation gagal, prompt salah).
+
+    Policy TIDAK di-hardcode di provider; dibaca dari sini dan dapat
+    di-override lewat environment (.env). Default aman: retry terbatas + backoff.
+
+    Attributes:
+        enabled: bila False, retry dimatikan (provider langsung melaporkan error).
+        max_retries: jumlah retry maksimum setelah percobaan pertama (3-5).
+        base_delay: delay awal (detik) sebelum retry pertama.
+        max_delay: batas atas delay (detik) antar retry.
+        backoff_factor: faktor backoff eksponensial antar retry.
+    """
+
+    enabled: bool = field(
+        default_factory=lambda: _get("PROVIDER_RETRY_ENABLED", "true").lower()
+        in ("1", "true", "yes", "on")
+    )
+    max_retries: int = field(
+        default_factory=lambda: _get_int("PROVIDER_RETRY_MAX_ATTEMPTS", 3)
+    )
+    base_delay: float = field(
+        default_factory=lambda: _get_float("PROVIDER_RETRY_BASE_DELAY", 1.0)
+    )
+    max_delay: float = field(
+        default_factory=lambda: _get_float("PROVIDER_RETRY_MAX_DELAY", 8.0)
+    )
+    backoff_factor: float = field(
+        default_factory=lambda: _get_float("PROVIDER_RETRY_BACKOFF_FACTOR", 2.0)
+    )
+
+
+# ---------------------------------------------------------------------------
 # Konfigurasi Vision / Multimodal Input (#46)
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
@@ -408,6 +448,9 @@ class Settings:
 
     # Provider Fallback (#45)
     fallback: FallbackConfig = field(default_factory=FallbackConfig)
+
+    # Provider Infrastructure Retry (technical only)
+    provider_retry: ProviderRetryConfig = field(default_factory=ProviderRetryConfig)
 
     # Vision / Multimodal Input (#46)
     vision: VisionConfig = field(default_factory=VisionConfig)

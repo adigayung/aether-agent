@@ -15,8 +15,23 @@ from typing import Any, Dict, List, Optional
 # ---------------------------------------------------------------------------
 # Exception hierarchy untuk provider
 # ---------------------------------------------------------------------------
+# Status HTTP yang bersifat INFRASTRUKTUR (sementara) sehingga layak di-retry di
+# layer provider. Status lain (mis. 400/401/403/404) adalah kegagalan
+# permanen/konfigurasi dan TIDAK boleh di-retry.
+RETRYABLE_HTTP_STATUSES: frozenset = frozenset({429, 500, 529})
+
+
 class ProviderError(Exception):
-    """Base exception untuk semua error provider."""
+    """Base exception untuk semua error provider.
+
+    Class attribute `retryable` menandai apakah error bersifat INFRASTRUKTUR
+    (sementara) sehingga layak di-retry di layer provider. Default False:
+    retry HANYA untuk kegagalan teknis (network/timeout/HTTP 429/5xx), BUKAN
+    untuk kegagalan logika agent (tool/command/validation/prompt).
+    """
+
+    #: True bila error bersifat infrastruktur sementara (boleh di-retry).
+    retryable: bool = False
 
 
 class ProviderNotConfiguredError(ProviderError):
@@ -24,11 +39,30 @@ class ProviderNotConfiguredError(ProviderError):
 
 
 class ProviderUnavailableError(ProviderError):
-    """Provider tidak dapat dihubungi (connection error / server mati)."""
+    """Provider tidak dapat dihubungi (connection error / server mati).
+
+    Kegagalan koneksi/timeout bersifat sementara -> layak di-retry di layer
+    provider (bounded) sebelum diserahkan ke Provider Fallback (#45).
+    """
+
+    retryable = True
 
 
 class ProviderAPIError(ProviderError):
-    """Provider mengembalikan HTTP/API error."""
+    """Provider mengembalikan HTTP/API error.
+
+    Attributes:
+        status_code: kode HTTP dari response (bila tersedia).
+    """
+
+    def __init__(self, message: str, status_code: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        # Retry HANYA untuk status HTTP infrastruktur (429/500/529). Tanpa status
+        # code, error dianggap TIDAK retryable (aman: hindari retry buta).
+        self.retryable = (
+            status_code is not None and status_code in RETRYABLE_HTTP_STATUSES
+        )
 
 
 class ProviderResponseError(ProviderError):
@@ -191,22 +225,36 @@ class BaseProvider(ABC):
     @staticmethod
     def _build_messages(
         prompt: Optional[str],
-        messages: Optional[List[Message]],
-    ) -> List[Dict[str, str]]:
+        messages: Optional[List[Any]],
+    ) -> List[Dict[str, Any]]:
         """Normalisasi input menjadi daftar pesan format chat.
 
         Args:
             prompt: prompt tunggal (string).
-            messages: daftar Message.
+            messages: daftar Message ATAU dict bentuk provider (mis. hasil
+                `ConversationHistory.to_provider_format()` yang memuat
+                "tool_calls"/"tool_call_id" untuk Native Tool Calling). Dict
+                diteruskan apa adanya agar skema tool tetap utuh.
 
         Returns:
-            Daftar dict {"role", "content"}.
+            Daftar dict pesan siap kirim ke API ({"role", ...}).
 
         Raises:
-            ValueError: bila keduanya kosong.
+            ValueError: bila keduanya kosong, atau tipe pesan tidak didukung.
         """
         if messages:
-            return [m.to_dict() for m in messages]
+            normalized: List[Dict[str, Any]] = []
+            for m in messages:
+                if isinstance(m, dict):
+                    normalized.append(dict(m))
+                elif isinstance(m, Message):
+                    normalized.append(m.to_dict())
+                else:
+                    raise ValueError(
+                        "messages harus berisi Message atau dict provider-format, "
+                        f"bukan {type(m).__name__}."
+                    )
+            return normalized
         if prompt is not None:
             return [{"role": "user", "content": prompt}]
         raise ValueError("Salah satu dari 'prompt' atau 'messages' harus diisi.")

@@ -2,18 +2,23 @@
 
 Membuktikan:
     1. PreparedTask dapat diterima Runtime.
-    2. Runtime menjalankan plan.
+    2. Runtime menjalankan task via continuous loop (satu percakapan kontinu).
     3. LLM dipanggil melalui provider yang sudah ada (Ollama nyata).
     4. tool dipanggil melalui ToolExecutor.
     5. observation kembali ke runtime/LLM.
-    6. multi-step task dapat berjalan.
+    6. task kontinu berjalan (tanpa pemecahan TaskStep per-step).
     7. command failure dapat dikirim kembali sebagai observation.
     8. status runtime benar.
-    9. completed/failed step tercatat.
+    9. completed/failed work tercatat di progress.
    10. final result tersedia.
    11. workspace boundary tetap bekerja.
    12. tidak ada fixture tersisa.
    13. AETHER tetap dapat di-import.
+
+Catatan: sejak continuous loop menjadi jalur NORMAL, runtime TIDAK lagi
+memecah task menjadi TaskStep. Plan (bila ada) hanya jadi context advisory.
+Jalur legacy (per step + recovery) diuji oleh check_loop_completion.py,
+check_advanced_recovery.py, dan check_provider_fallback.py.
 
 Menggunakan Ollama NYATA (bukan mock). Provider + model ditampilkan.
 Fixture hanya di J:\Agent_Ai\dummy_test dan dibersihkan setelah test.
@@ -154,26 +159,24 @@ def _run() -> int:
         ),
     )
 
-    # 2) Runtime menjalankan plan + 3) LLM dipanggil + 6) multi-step.
+    # 2) Runtime menjalankan task via continuous loop + 3) LLM dipanggil.
     result = runtime.run(prepared)
-    print(f"[2] Runtime menjalankan plan -> status={result.status.value}")
+    print(f"[2] Runtime menjalankan task (continuous) -> status={result.status.value}")
     print(f"[3] LLM dipanggil via provider '{provider.name}' -> iterations={result.iterations}")
     assert result.iterations >= 1, "LLM harus dipanggil minimal sekali"
-    assert len(result.steps) == len(prepared.plan.steps), "semua step harus tercatat"
+    # Continuous: task TIDAK dipecah menjadi TaskStep -> result.steps kosong.
+    assert result.steps == [], "continuous loop tidak boleh membuat TaskStep per-step"
 
-    # 5) observation kembali ke runtime/LLM (step punya observation).
+    # 5) observation kembali ke runtime/LLM.
     #    Catatan: model Ollama (qwen2.5-coder) tidak selalu menghasilkan native
     #    tool call, sehingga observation bergantung pada keputusan model.
-    #    Jalur observation deterministik dibuktikan di check_agent_tool_loop.py.
-    has_observation = any(
-        (s.get("observation") is not None) for s in result.steps
-    )
-    print(f"[5] observation kembali ke runtime -> ada_observation={has_observation}")
-    if not has_observation:
-        print("    (model tidak memanggil tool; jalur observation diuji di check_agent_tool_loop.py)")
+    #    Jalur observation deterministik dibuktikan di check_continuous_loop.py
+    #    dan check_agent_tool_loop.py.
+    print("[5] observation/percakapan kontinu dikelola orchestrator "
+          "(detail di check_continuous_loop.py)")
 
-    # 6) multi-step berjalan (semua step plan diproses).
-    print(f"[6] multi-step berjalan -> {len(result.steps)} step diproses")
+    # 6) satu percakapan kontinu (bukan multi-step plan).
+    print(f"[6] task kontinu berjalan -> iterations={result.iterations}, steps={len(result.steps)}")
 
     # 8) status runtime benar.
     assert result.status in (RuntimeStatus.COMPLETED, RuntimeStatus.FAILED)
@@ -208,7 +211,7 @@ def _run() -> int:
     print("[13] AETHER tetap dapat di-import : OK")
 
     print()
-    print("[OK] Agent Runtime bekerja (multi-step, provider nyata, tool via ToolExecutor).")
+    print("[OK] Agent Runtime bekerja (continuous loop, provider nyata, tool via ToolExecutor).")
     return 0
 
 

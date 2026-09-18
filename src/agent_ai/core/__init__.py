@@ -1,6 +1,7 @@
 from agent_ai.core.agent import Agent, AgentResponse
 from agent_ai.core.coding import CodingTask
 from agent_ai.core.executor import ToolExecutor
+from agent_ai.core.history import ConversationHistory
 from agent_ai.core.loop import AgentLoop, MaxIterationsExceeded
 from agent_ai.core.models import (
     AgentAction,
@@ -15,6 +16,13 @@ from agent_ai.core.response import (
     FinishReason,
     LLMAction,
     LLMResponse,
+)
+from agent_ai.core.types import (
+    ChatMessage,
+    ChatRole,
+    ToolCall,
+    ToolResultPayload,
+    ToolResultStatus,
 )
 
 __all__ = [
@@ -35,5 +43,11 @@ __all__ = [
     "LLMAction",
     "ActionType",
     "FinishReason",
+    "ChatMessage",
+    "ChatRole",
+    "ToolCall",
+    "ToolResultPayload",
+    "ToolResultStatus",
+    "ConversationHistory",
 ]
 

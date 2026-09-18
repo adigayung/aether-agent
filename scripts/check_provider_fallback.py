@@ -334,6 +334,8 @@ def _run() -> int:
         max_iterations=3,
         fallback_manager=FallbackManager(routing_reg, config=FallbackConfig(max_attempts=2)),
         provider_factory=factory,
+        # Provider fallback adalah subsistem jalur LEGACY.
+        use_continuous_loop=False,
     )
     result9 = runtime9.run(PreparedTask(task="tool gagal", plan=TaskPlanner().create_plan("Perbaiki bug")))
     assert result9.status == RuntimeStatus.FAILED, result9.status
@@ -351,6 +353,8 @@ def _run() -> int:
         max_iterations=3,
         fallback_manager=FallbackManager(routing_reg, config=FallbackConfig(max_attempts=2)),
         provider_factory=lambda name: provider_b if name == "provider_b" else provider_a,
+        # Provider fallback adalah subsistem jalur LEGACY.
+        use_continuous_loop=False,
     )
     result10 = runtime10.run(prepared10)
     assert result10.status == RuntimeStatus.COMPLETED, result10.status

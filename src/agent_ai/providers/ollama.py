@@ -18,9 +18,12 @@ from agent_ai.providers.base import (
     Message,
     ProviderAPIError,
     ProviderResponseError,
-    ProviderUnavailableError,
     ToolChoice,
     ToolDefinition,
+)
+from agent_ai.providers.retry import (
+    InfrastructureRetryPolicy,
+    post_with_infrastructure_retry,
 )
 
 
@@ -29,8 +32,23 @@ class OllamaProvider(BaseProvider):
 
     name = "ollama"
 
-    def __init__(self, config: Optional[OllamaConfig] = None) -> None:
+    #: Policy retry INFRASTRUKTUR (network/timeout/HTTP 429/5xx). Bila None,
+    #: dibaca dari config settings.provider_retry saat generate() dipanggil.
+    retry_policy: Optional[InfrastructureRetryPolicy] = None
+
+    def __init__(
+        self,
+        config: Optional[OllamaConfig] = None,
+        retry_policy: Optional[InfrastructureRetryPolicy] = None,
+    ) -> None:
         self.config = config or settings.ollama
+        self.retry_policy = retry_policy
+
+    def _retry_policy(self) -> InfrastructureRetryPolicy:
+        """Policy retry efektif (instance override atau dari config)."""
+        if self.retry_policy is None:
+            self.retry_policy = InfrastructureRetryPolicy.from_settings()
+        return self.retry_policy
 
     # ------------------------------------------------------------------ #
     # Helper internal
@@ -106,17 +124,20 @@ class OllamaProvider(BaseProvider):
         payload = self._build_payload(prompt, messages, options, tools, tool_choice)
         url = f"{self.config.host.rstrip('/')}/api/chat"
 
-        try:
-            response = requests.post(url, json=payload, timeout=self.config.timeout)
-        except requests.RequestException as exc:
-            raise ProviderUnavailableError(
-                f"Gagal menghubungi provider '{self.name}' di {self.config.host}: "
-                f"{type(exc).__name__}"
-            ) from exc
+        # Retry INFRASTRUKTUR (technical only) dibatasi di layer ini: network/
+        # timeout/connection + HTTP 429/500/529. Retry terjadi di dalam satu
+        # pemanggilan generate(), sehingga loop/history tidak melihat retry.
+        response = post_with_infrastructure_retry(
+            lambda: requests.post(url, json=payload, timeout=self.config.timeout),
+            policy=self._retry_policy(),
+            provider_name=self.name,
+            endpoint=self.config.host,
+        )
 
         if response.status_code >= 400:
             raise ProviderAPIError(
-                f"Provider '{self.name}' mengembalikan HTTP {response.status_code}."
+                f"Provider '{self.name}' mengembalikan HTTP {response.status_code}.",
+                status_code=response.status_code,
             )
 
         try:

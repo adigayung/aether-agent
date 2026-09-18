@@ -245,10 +245,13 @@ def _run() -> int:
 
     # 12) lifecycle tetap konsisten saat iteration limit tercapai.
     #     Provider yang selalu meminta tool call -> orchestrator kena limit.
+    #     Iteration limit adalah proteksi jalur LEGACY -> pakai use_continuous_loop=False.
     loop_provider = ScriptedProvider([{"tool": "read_file", "arguments": {"path": "a.txt"}}] * 20)
     prepared_loop = PreparedTask(task="task loop", task_id="task-loop")
     lc_loop = TaskLifecycle("task loop", task_id=prepared_loop.task_id)
-    result_loop = AgentRuntime(provider=loop_provider, max_iterations=3).run(prepared_loop, lifecycle=lc_loop)
+    result_loop = AgentRuntime(
+        provider=loop_provider, max_iterations=3, use_continuous_loop=False
+    ).run(prepared_loop, lifecycle=lc_loop)
     assert result_loop.status == RuntimeStatus.FAILED
     assert lc_loop.status == TaskStatus.FAILED, f"lifecycle harus FAILED, dapat {lc_loop.status}"
     print("[12] lifecycle konsisten saat iteration limit OK")

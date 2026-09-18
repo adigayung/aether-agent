@@ -3,11 +3,11 @@
 Menguji:
     - register project (name + absolute root).
     - project.json tersimpan di workspace Agent-Ai.
-    - intelligence files dibuat di Agent-Ai.
-    - root project target TIDAK mendapat file Agent-Ai.
-    - add/read/update intelligence entry.
+    - AI Project Bible (`.aether/bible`) dibuat project-local di root target.
+    - TIDAK ada storage intelligence kedua di workspace Agent-Ai.
+    - add/read/update intelligence entry (Bible project-local).
     - project dapat dimuat kembali (simulasi proses baru).
-    - path project di luar workspace tetap tidak menulis intelligence ke sana.
+    - project.json/intelligence legacy TIDAK ditulis ke root project target.
 
 Jalankan:
     python scripts/check_projects.py
@@ -26,7 +26,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from agent_ai.projects import (  # noqa: E402
-    INTELLIGENCE_CATEGORIES,
+    BIBLE_CATEGORIES,
     IntelligenceEntry,
     ProjectRegistry,
 )
@@ -58,21 +58,27 @@ def main() -> int:
         assert str(project_json).startswith(str(workspace))
         print()
 
-        # 3) intelligence files dibuat di Agent-Ai.
-        intel_dir = workspace / config.id / "intelligence"
-        created = sorted(p.name for p in intel_dir.glob("*.json"))
-        print(f"intelligence files : {created}")
-        for category in INTELLIGENCE_CATEGORIES:
-            assert (intel_dir / f"{category}.json").exists(), f"missing {category}.json"
+        # 3) AI Project Bible dibuat project-local di root target.
+        bible_dir = target / ".aether" / "bible"
+        created = sorted(p.name for p in bible_dir.glob("*.md"))
+        print(f"bible files : {created}  (dir: {bible_dir})")
+        assert (bible_dir / "index.md").exists(), "missing index.md"
+        for category in BIBLE_CATEGORIES:
+            assert (bible_dir / f"{category}.md").exists(), f"missing {category}.md"
+        # TIDAK ada storage intelligence kedua di workspace Agent-Ai.
+        assert not (workspace / config.id / "intelligence").exists()
         print()
 
-        # 4) Root project target TIDAK mendapat file Agent-Ai.
-        target_entries = list(target.iterdir())
-        print(f"target root entries : {[p.name for p in target_entries]}")
-        assert target_entries == [], "root project target mendapat file Agent-Ai!"
+        # 4) Root project target hanya berisi .aether (Bible), tidak ada
+        #    project.json / intelligence legacy.
+        target_entries = sorted(p.name for p in target.iterdir())
+        print(f"target root entries : {target_entries}")
+        assert target_entries == [".aether"], target_entries
+        assert not (target / "project.json").exists()
+        assert not (target / "intelligence").exists()
         print()
 
-        # 5) add/read/update intelligence entry.
+        # 5) add/read/update intelligence entry (Bible project-local).
         intel = reg.intelligence(config.id)
         entry = intel.add_entry(
             "facts",
@@ -83,6 +89,12 @@ def main() -> int:
         read_back = intel.read_category("facts")
         print(f"read facts  : {len(read_back)} entry")
         assert len(read_back) == 1 and read_back[0].content == "Project memakai Python 3.11"
+        assert (bible_dir / "facts.md").exists()
+        assert "Project memakai Python 3.11" in (bible_dir / "facts.md").read_text(encoding="utf-8")
+        # Alias kategori lama ("rules") memetakan ke "conventions".
+        intel.add_entry("rules", IntelligenceEntry(content="Ikuti struktur src/", confidence=0.7))
+        assert (bible_dir / "conventions.md").exists()
+        assert intel.read_category("rules")[-1].content == "Ikuti struktur src/"
 
         updated = intel.update_entry("facts", entry.id, content="Project memakai Python 3.12", confidence=0.95)
         print(f"updated     : content={updated.content!r} confidence={updated.confidence}")
@@ -100,13 +112,13 @@ def main() -> int:
         print("reload setelah proses baru -> OK")
         print()
 
-        # 7) Path project di luar workspace tetap tidak menulis intelligence ke sana.
+        # 7) Root project target tidak mendapat project.json/intelligence legacy.
         assert not (target / "intelligence").exists()
         assert not (target / "project.json").exists()
-        print("target root tetap bersih (tidak ada intelligence/project.json) -> OK")
+        print("target root bersih (hanya .aether Bible, tanpa project.json/intelligence) -> OK")
         print()
 
-        print("[OK] Project Intelligence (registry, storage, add/read/update, reload) bekerja.")
+        print("[OK] Project Intelligence (registry, Bible storage, add/read/update, reload) bekerja.")
         return 0
     finally:
         # Bersihkan artefak verifikasi.

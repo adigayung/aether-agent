@@ -22,9 +22,12 @@ from agent_ai.providers.base import (
     ProviderAPIError,
     ProviderNotConfiguredError,
     ProviderResponseError,
-    ProviderUnavailableError,
     ToolChoice,
     ToolDefinition,
+)
+from agent_ai.providers.retry import (
+    InfrastructureRetryPolicy,
+    post_with_infrastructure_retry,
 )
 
 
@@ -33,8 +36,24 @@ class OpenAICompatibleProvider(BaseProvider):
 
     name = "openai"
 
-    def __init__(self, config: Optional[OpenAIConfig] = None) -> None:
+    #: Policy retry INFRASTRUKTUR (network/timeout/HTTP 429/5xx). Bila None,
+    #: dibaca dari config settings.provider_retry saat generate() dipanggil.
+    #: Retry terjadi di dalam generate() sehingga loop/history tidak terpengaruh.
+    retry_policy: Optional[InfrastructureRetryPolicy] = None
+
+    def __init__(
+        self,
+        config: Optional[OpenAIConfig] = None,
+        retry_policy: Optional[InfrastructureRetryPolicy] = None,
+    ) -> None:
         self.config = config or settings.openai
+        self.retry_policy = retry_policy
+
+    def _retry_policy(self) -> InfrastructureRetryPolicy:
+        """Policy retry efektif (instance override atau dari config)."""
+        if self.retry_policy is None:
+            self.retry_policy = InfrastructureRetryPolicy.from_settings()
+        return self.retry_policy
 
     # ------------------------------------------------------------------ #
     # Helper internal
@@ -127,20 +146,24 @@ class OpenAICompatibleProvider(BaseProvider):
             "Content-Type": "application/json",
         }
 
-        try:
-            response = requests.post(
+        # Retry INFRASTRUKTUR (technical only) dibatasi di layer ini: network/
+        # timeout/connection + HTTP 429/500/529. Retry terjadi di dalam satu
+        # pemanggilan generate(), sehingga loop/history tidak melihat retry
+        # (tidak ada pesan/tool yang terduplikasi). Kegagalan logika agent
+        # (tool/command/validation) tidak melalui jalur ini.
+        response = post_with_infrastructure_retry(
+            lambda: requests.post(
                 url, json=payload, headers=headers, timeout=self.config.timeout
-            )
-        except requests.RequestException as exc:
-            # Jangan sertakan header/API key pada pesan error.
-            raise ProviderUnavailableError(
-                f"Gagal menghubungi provider '{self.name}' di {self.config.base_url}: "
-                f"{type(exc).__name__}"
-            ) from exc
+            ),
+            policy=self._retry_policy(),
+            provider_name=self.name,
+            endpoint=self.config.base_url,
+        )
 
         if response.status_code >= 400:
             raise ProviderAPIError(
-                f"Provider '{self.name}' mengembalikan HTTP {response.status_code}."
+                f"Provider '{self.name}' mengembalikan HTTP {response.status_code}.",
+                status_code=response.status_code,
             )
 
         try:
