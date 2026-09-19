@@ -94,10 +94,21 @@ def build_provider_from_config(config: Dict[str, Any]) -> BaseProvider:
         from agent_ai.config.settings import OllamaConfig
         from agent_ai.providers.ollama import OllamaProvider
 
+        # Model WAJIB berasal dari konfigurasi tersimpan (SQLite Provider
+        # Instance -> Model), sama seperti DeepSeek/OpenRouter. TIDAK ada
+        # fallback diam-diam ke model default hardcode (mis. qwen2.5-coder:7b):
+        # bila tidak ada model terpilih/tersedia, gagal lebih awal dengan pesan
+        # jelas agar runtime tidak memakai model yang salah.
+        if not model:
+            raise ProviderNotConfiguredError(
+                f"Provider instance '{instance_name}' (ollama) belum memiliki "
+                f"model. Tambahkan model pada provider instance Ollama lalu "
+                f"pilih model tersebut."
+            )
         defaults = OllamaConfig()
         kwargs: Dict[str, Any] = {
             "host": api_url or defaults.host,
-            "model": model or defaults.model,
+            "model": model,
         }
         if timeout:
             kwargs["timeout"] = int(timeout)

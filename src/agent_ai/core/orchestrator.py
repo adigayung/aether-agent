@@ -217,10 +217,19 @@ class AgentOrchestrator:
         return Message(role="system", content=text)
 
     def _model_name(self) -> str:
-        """Nama model aktif (dari options bila ada). Tidak pernah secret."""
+        """Nama model aktif untuk logging. Tidak pernah secret.
+
+        Prioritas: `options.model` (model eksplisit per-run) -> `provider.config.model`
+        (model default provider, mis. OllamaConfig.model). Fallback ke config
+        provider penting agar log `provider_request` tidak menampilkan model
+        kosong ketika provider memakai model default-nya (bukan bug runtime,
+        hanya akurasi logging). Tidak mengubah payload yang dikirim provider.
+        """
         if self.options is not None and getattr(self.options, "model", None):
             return self.options.model
-        return ""
+        config = getattr(self.provider, "config", None)
+        model = getattr(config, "model", None)
+        return model or ""
 
     @staticmethod
     def _extract_commentary(response: LLMResponse) -> str:

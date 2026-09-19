@@ -39,6 +39,7 @@ _IGNORED_DIRS = {
     "build",
     ".mypy_cache",
     ".pytest_cache",
+    ".aether",
 }
 
 # Batas default agar tidak membaca seluruh project tanpa sengaja.

@@ -20,6 +20,15 @@ const expanded = ref({});
 // Path file terpilih (selected state).
 const selected = ref("");
 
+// Nama folder internal AETHER yang disembunyikan dari UI Explorer.
+// (Tidak menghapus/mengubah filesystem; hanya filter tampilan.)
+const HIDDEN_NAMES = new Set([".aether"]);
+
+// Filter entri agar folder internal (mis. .aether) tidak tampil.
+function visibleEntries(list) {
+  return (list || []).filter((e) => !HIDDEN_NAMES.has(e.name));
+}
+
 // Label root = nama project (bukan ".").
 const rootLabel = computed(() => (props.project && props.project.name) || "project");
 
@@ -31,7 +40,7 @@ async function load(path = ".") {
   error.value = "";
   try {
     const data = await listFiles(path);
-    entries.value = data.entries || [];
+    entries.value = visibleEntries(data.entries);
     currentPath.value = data.path || path;
   } catch (e) {
     error.value = e.message || "Gagal memuat file.";
@@ -77,7 +86,7 @@ async function toggleDirByPath(full) {
   }
   try {
     const data = await listFiles(full);
-    expanded.value = { ...expanded.value, [full]: data.entries || [] };
+    expanded.value = { ...expanded.value, [full]: visibleEntries(data.entries) };
   } catch (e) {
     error.value = e.message || "Gagal memuat folder.";
   }

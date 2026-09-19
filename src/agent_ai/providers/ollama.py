@@ -64,6 +64,12 @@ class OllamaProvider(BaseProvider):
         """Bangun payload untuk endpoint /api/chat."""
         opts = options or GenerateOptions()
         chat_messages = self._build_messages(prompt, messages)
+        # Ollama mengharapkan `function.arguments` pada assistant.tool_calls
+        # sebagai OBJECT (dict), bukan JSON string seperti OpenAI. Konversi di
+        # sini agar turn lanjutan (assistant(tool_calls) + tool result) tidak
+        # ditolak HTTP 400 ("Value looks like object, but can't find closing
+        # '}' symbol"). Isolasi khusus Ollama; provider lain tidak terpengaruh.
+        chat_messages = self._normalize_tool_call_arguments(chat_messages)
 
         payload: Dict[str, Any] = {
             "model": opts.model or self.config.model,
@@ -89,6 +95,44 @@ class OllamaProvider(BaseProvider):
             payload["options"] = gen_options
 
         return payload
+
+    @staticmethod
+    def _normalize_tool_call_arguments(
+        messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Ubah `function.arguments` pada assistant.tool_calls menjadi dict.
+
+        Kontrak internal AETHER (selaras OpenAI) menyerialisasi argumen tool
+        menjadi JSON string. Ollama mengharapkan argumen sebagai OBJECT (dict);
+        mengirim string memicu HTTP 400 ("Value looks like object, but can't
+        find closing '}' symbol") pada turn lanjutan. Konversi ini HANYA untuk
+        payload Ollama; struktur internal/provider lain tidak diubah.
+
+        Toleran: string JSON valid -> dict; dict -> dibiarkan; string non-JSON
+        -> dibiarkan apa adanya (tidak menebak).
+        """
+        import json
+
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            tool_calls = message.get("tool_calls")
+            if not isinstance(tool_calls, list):
+                continue
+            for call in tool_calls:
+                if not isinstance(call, dict):
+                    continue
+                function = call.get("function")
+                if not isinstance(function, dict):
+                    continue
+                arguments = function.get("arguments")
+                if isinstance(arguments, str):
+                    try:
+                        function["arguments"] = json.loads(arguments)
+                    except (ValueError, TypeError):
+                        # Bukan JSON valid: biarkan apa adanya (jangan menebak).
+                        pass
+        return messages
 
     @staticmethod
     def _to_ollama_tool(tool: ToolDefinition) -> Dict[str, Any]:
