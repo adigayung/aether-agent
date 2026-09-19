@@ -84,10 +84,20 @@ def _iter_files(base: Path):
 
 
 class ListFilesTool(BaseTool):
-    """Daftar file/directory dalam sebuah directory (read-only)."""
+    """Daftar file/directory dalam sebuah directory (read-only).
+
+    Ini adalah cara utama untuk melihat isi directory.
+    Gunakan tool ini untuk inspeksi workspace, bukan run_command dengan ls/dir.
+    """
 
     name = "list_files"
-    description = "Menampilkan daftar file dan directory dalam sebuah directory."
+    description = (
+        "Menampilkan daftar file dan directory dalam sebuah directory. "
+        "Ini adalah cara utama untuk melihat isi directory. "
+        "Gunakan tool ini untuk inspeksi workspace, bukan run_command dengan ls/dir. "
+        "Untuk membaca file, gunakan read_file. "
+        "Untuk mencari teks dalam file, gunakan search_code."
+    )
     input_schema = {
         "type": "object",
         "properties": {
@@ -135,10 +145,20 @@ class ListFilesTool(BaseTool):
 
 
 class ReadFileTool(BaseTool):
-    """Baca isi file (read-only), dengan optional line range."""
+    """Baca isi file (read-only), dengan optional line range.
+
+    Ini adalah cara utama untuk membaca isi file.
+    Gunakan tool ini untuk membaca file, bukan run_command dengan cat/type.
+    """
 
     name = "read_file"
-    description = "Membaca isi sebuah file, opsional dengan rentang baris."
+    description = (
+        "Membaca isi sebuah file, opsional dengan rentang baris. "
+        "Ini adalah cara utama untuk membaca isi file. "
+        "Gunakan tool ini untuk membaca file, bukan run_command dengan cat/type. "
+        "Untuk melihat isi directory, gunakan list_files. "
+        "Untuk mencari teks dalam file, gunakan search_code."
+    )
     input_schema = {
         "type": "object",
         "properties": {
@@ -201,10 +221,20 @@ class ReadFileTool(BaseTool):
 
 
 class SearchCodeTool(BaseTool):
-    """Cari teks di file dalam project root (read-only)."""
+    """Cari teks di file dalam project root (read-only).
+
+    Ini adalah cara utama untuk mencari source code di dalam project.
+    Gunakan tool ini untuk inspeksi kode, bukan run_command dengan find/grep.
+    """
 
     name = "search_code"
-    description = "Mencari teks pada file di dalam project root."
+    description = (
+        "Mencari teks pada file di dalam project root. "
+        "Ini adalah cara utama untuk mencari source code. "
+        "Gunakan tool ini untuk inspeksi kode, bukan run_command dengan find/grep. "
+        "Untuk membaca file, gunakan read_file. "
+        "Untuk melihat isi directory, gunakan list_files."
+    )
     input_schema = {
         "type": "object",
         "properties": {

@@ -183,6 +183,10 @@ class AgentOrchestrator:
         messages: List[Message] = []
         if self.system_prompt:
             messages.append(Message(role="system", content=self.system_prompt))
+        # Environment context (opsional): disisipkan sebelum task.
+        environment = self._environment_context_message()
+        if environment is not None:
+            messages.append(environment)
         messages.append(Message(role="user", content=task))
         messages.extend(history)
         return messages

@@ -5,7 +5,10 @@ Menyediakan satu tool:
 
 Keamanan & desain:
     - Working directory SELALU project root (workspace boundary).
-    - Tidak memakai shell parsing (shell=False); command di-split secara aman.
+    - Command Windows CMD builtins (dir, echo, set, dll.) dijalankan
+      melalui shell=True (cmd.exe) secara otomatis.
+    - Command native (python, git, npm, dll.) dijalankan dengan shell=False.
+    - Shell syntax (&&, ||, |, >, >>) dideteksi dan dijalankan via shell.
     - Timeout wajib (default) agar agent tidak menggantung.
     - stdout/stderr/exit_code/duration ditangkap dan dikembalikan terstruktur.
     - Field `outcome` membedakan secara eksplisit:
@@ -98,39 +101,122 @@ def _split_command(command: str) -> List[str]:
     return tokens
 
 
+# CMD builtins Windows yang tidak memiliki executable standalone
+# dan HARUS dijalankan melalui shell (cmd.exe /c).
+# NOTE: `where` TIDAK termasuk di sini — `where.exe` adalah executable
+# Windows yang harus dijalankan via shell=False (native subprocess).
+_WINDOWS_CMD_BUILTINS = frozenset({
+    "assoc", "attrib", "break", "chcp", "cls", "color", "copy",
+    "date", "del", "dir", "doskey", "echo", "endlocal", "erase",
+    "exit", "for", "ftype", "goto", "if", "md", "mkdir", "mklink",
+    "move", "path", "pause", "popd", "prompt", "pushd", "rd",
+    "rename", "ren", "rmdir", "set", "setlocal", "shift",
+    "start", "time", "title", "type", "ver", "verify", "vol",
+})
+
+
 def _command_needs_shell(command: str) -> bool:
     """True bila command mengandung shell syntax yang membutuhkan shell=True.
 
     Mendeteksi:
+      - Windows CMD builtins (dir, echo, set, cls, dll.)
       - operator chaining: &&, ||
       - pipe: | (yang bukan bagian dari path/argumen)
       - redirect: >, >>
       - cd sebagai command bawaan shell (di awal command)
+
+    Quote-aware: operator di dalam string kutip (misal python -c "print('a|b')")
+    TIDAK memicu shell=True.
     """
     stripped = command.strip()
 
-    # Cek operator chaining dan pipe/redirect
-    if "&&" in stripped or "||" in stripped:
+    # Cek apakah command pertamanya adalah CMD builtin Windows.
+    # Gunakan _split_command untuk tokenisasi yang quote-aware.
+    try:
+        first_token = _split_command(stripped)[0].lower().rstrip(">")
+    except ToolValidationError:
+        first_token = ""
+    if first_token in _WINDOWS_CMD_BUILTINS:
         return True
 
-    # Cek pipe atau redirect — hati-hati agar tidak false positive
-    # pada path yang mengandung karakter ini.
-    # Pipe: | yang dikelilingi spasi atau di awal/akhir
-    # Redirect: > atau >> yang dikelilingi spasi atau di akhir
-    # Kami menggunakan regex sederhana untuk menghindari path seperti "C:\\dir"
-
-    # Pipe: | dengan spasi di sekitarnya atau di awal/akhir
-    if re.search(r"(?:^|\s)\|(?:\s|$)", stripped):
-        return True
-
-    # Redirect: > atau >> dengan spasi di sekitarnya atau di akhir
-    # Hindari false positive pada path Windows seperti "C:\dir>file"
-    if re.search(r"(?:^|\s)>>?(?:\s|$)", stripped):
+    # Cek operator chaining, pipe, redirect — hanya di luar quoted strings.
+    # Gunakan state machine yang melacak quote state (seperti _split_command).
+    if _has_shell_operator_outside_quotes(stripped):
         return True
 
     # cd sebagai command pertama (diikuti spasi atau end of string)
     if re.match(r"^cd(?:\s|$)", stripped):
         return True
+
+    return False
+
+
+def _has_shell_operator_outside_quotes(command: str) -> bool:
+    """True bila command mengandung operator shell (&&, ||, |, >, >>)
+    di luar string kutip (quoted strings).
+
+    Menggunakan state machine quote-tracking yang konsisten dengan
+    _split_command(): tanda kutip tunggal dan ganda melingkupi argumen,
+    dan kutip bersarang (quote sejenis di tengah isi tanpa spasi/akhir
+    string) diperlakukan sebagai literal.
+    """
+    n = len(command)
+    i = 0
+    quote: Optional[str] = None
+
+    while i < n:
+        ch = command[i]
+
+        if quote is not None:
+            # Di dalam quoted string: cari penutup kutip
+            if ch == quote:
+                nxt = command[i + 1] if i + 1 < n else ""
+                if nxt == "" or nxt.isspace():
+                    quote = None  # penutup kutip yang valid
+                # else: kutip bersarang, tetap di dalam quote
+            i += 1
+            continue
+
+        # Di luar quoted string: periksa operator shell
+        # Cek && dan || (2-char operators)
+        if i + 1 < n:
+            two = command[i : i + 2]
+            if two == "&&" or two == "||":
+                return True
+
+        # Cek pipe | (harus dikelilingi spasi atau di awal/akhir)
+        if ch == "|":
+            prev = command[i - 1] if i > 0 else " "
+            nxt = command[i + 1] if i + 1 < n else " "
+            if prev.isspace() or prev == "" or prev == "|":
+                if nxt.isspace() or nxt == "" or nxt == "|":
+                    return True
+
+        # Cek redirect > dan >> (harus dikelilingi spasi atau di awal/akhir)
+        if ch == ">":
+            # Cek apakah ini >> (redirect append)
+            if i + 1 < n and command[i + 1] == ">":
+                # >> operator
+                prev = command[i - 1] if i > 0 else " "
+                nxt = command[i + 2] if i + 2 < n else " "
+                if prev.isspace() or prev == "" or prev == ">":
+                    if nxt.isspace() or nxt == "" or nxt == ">":
+                        return True
+                i += 2
+                continue
+            else:
+                # > operator (single redirect)
+                prev = command[i - 1] if i > 0 else " "
+                nxt = command[i + 1] if i + 1 < n else " "
+                if prev.isspace() or prev == "" or prev == ">":
+                    if nxt.isspace() or nxt == "" or nxt == ">":
+                        return True
+
+        # Cek awal kutip — masuk ke dalam quoted string
+        if ch in ('"', "'"):
+            quote = ch
+
+        i += 1
 
     return False
 
@@ -182,7 +268,16 @@ class RunCommandTool(BaseTool):
     """Menjalankan command di dalam project workspace (working directory = root)."""
 
     name = "run_command"
-    description = "Menjalankan command di dalam project workspace dan menangkap output."
+    description = (
+        "Menjalankan command di dalam project workspace dan menangkap output. "
+        "Pada Windows, command harus kompatibel dengan Windows: "
+        "gunakan executable native (python, git, npm, node, ffmpeg, where.exe) "
+        "atau Windows CMD builtins (dir, echo, set, cls, type, copy, del, mkdir, dll.). "
+        "JANGAN gunakan command Unix/Linux (find, grep, head, tail, cat, wc, ls, sed, awk, xargs, chmod, rm, cp, mv, touch). "
+        "Untuk inspeksi source code dan workspace, gunakan search_code, list_files, atau read_file. "
+        "Gunakan cwd untuk working directory (path relatif terhadap project root atau absolut). "
+        "Jangan gunakan 'cd' di dalam command; cwd sudah disediakan sebagai parameter terpisah."
+    )
     input_schema = {
         "type": "object",
         "properties": {
@@ -243,7 +338,6 @@ class RunCommandTool(BaseTool):
 
         # Tentukan apakah command membutuhkan shell execution
         use_shell = _command_needs_shell(str(command))
-        shell_executable = sys.executable if use_shell else None
 
         start = time.perf_counter()
         try:
@@ -255,7 +349,6 @@ class RunCommandTool(BaseTool):
                     text=True,
                     timeout=timeout,
                     shell=True,
-                    executable=shell_executable if os.name != "nt" else None,
                 )
             else:
                 argv = _split_command(str(command))
@@ -282,7 +375,7 @@ class RunCommandTool(BaseTool):
             }
         except FileNotFoundError as exc:
             duration = time.perf_counter() - start
-            failed_cmd = argv[0] if not use_shell else str(command).split()[0]
+            failed_cmd = str(command).split()[0] if use_shell else argv[0]
             return {
                 "command": command,
                 "stdout": "",

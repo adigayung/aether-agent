@@ -56,6 +56,19 @@ class BaseTool(ABC):
     #: {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
     input_schema: Dict[str, Any] = {"type": "object", "properties": {}}
 
+    # ------------------------------------------------------------------ #
+    # Windows tool-use contract (diterapkan oleh semua tool).
+    # ------------------------------------------------------------------ #
+    # Pada Windows:
+    #   - Source code search → gunakan search_code, bukan find/grep.
+    #   - File reading      → gunakan read_file, bukan cat/type.
+    #   - Directory listing  → gunakan list_files, bukan ls/dir.
+    #   - Terminal execution → gunakan run_command dengan command
+    #     yang kompatibel dengan Windows (native executable atau
+    #     CMD builtins). JANGAN gunakan command Unix/Linux.
+    #   - Working directory  → gunakan parameter cwd pada run_command,
+    #     bukan cd di dalam command string.
+
     @abstractmethod
     def execute(self, **arguments: Any) -> Any:
         """Jalankan tool dengan argumen yang diberikan.
