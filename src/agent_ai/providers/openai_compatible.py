@@ -74,6 +74,25 @@ class OpenAICompatibleProvider(BaseProvider):
                 f"Provider '{self.name}' belum dikonfigurasi: base URL kosong."
             )
 
+    def _extra_headers(self) -> Dict[str, str]:
+        """Header tambahan yang ditambahkan ke setiap request HTTP.
+
+        Override oleh subclass untuk menambahkan atribusi atau
+        metadata lainnya. Default: kosong.
+
+        Jangan menyertakan API key atau credential di sini.
+        """
+        return {}
+
+    def _build_headers(self) -> Dict[str, str]:
+        """Bangun header HTTP untuk request ke provider."""
+        headers: Dict[str, str] = {
+            "Authorization": f"Bearer {self.config.api_key}",
+            "Content-Type": "application/json",
+        }
+        headers.update(self._extra_headers())
+        return headers
+
     def _build_payload(
         self,
         prompt: Optional[str],
@@ -141,10 +160,7 @@ class OpenAICompatibleProvider(BaseProvider):
         self._require_config()
         payload = self._build_payload(prompt, messages, options, tools, tool_choice)
         url = f"{self.config.base_url.rstrip('/')}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.config.api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = self._build_headers()
 
         # Retry INFRASTRUKTUR (technical only) dibatasi di layer ini: network/
         # timeout/connection + HTTP 429/500/529. Retry terjadi di dalam satu
