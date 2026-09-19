@@ -365,6 +365,9 @@ function handleEvent(evt) {
       break;
     case "task_cancelled":
       task.status = "cancelled";
+      // Execution benar-benar berhenti -> indikator Agent kembali idle.
+      runtime.activity = "";
+      runtime.tool = "";
       playStatusSound("cancelled");
       refreshTaskHistory();
       break;

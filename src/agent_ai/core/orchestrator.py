@@ -42,6 +42,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from agent_ai.core.cancel import CancellationToken
 from agent_ai.core.coding import CodingTask
 from agent_ai.core.executor import ToolExecutor
 from agent_ai.core.history import ConversationHistory
@@ -131,6 +132,7 @@ class AgentOrchestrator:
         event_sink: Optional[EventSink] = None,
         use_continuous_loop: bool = False,
         environment_context: Optional[str] = None,
+        cancel_token: Optional[CancellationToken] = None,
     ) -> None:
         self.provider = provider
         self.executor = executor or ToolExecutor()
@@ -160,6 +162,11 @@ class AgentOrchestrator:
         # Jalur execution baru (Native Tool Calling, satu percakapan kontinu).
         # Default False -> `run()` memakai loop lama (backward compatible).
         self.use_continuous_loop = use_continuous_loop
+        # Cooperative cancellation (opsional). Bila diisi, loop memeriksa token
+        # ini pada SAFE BOUNDARY (sebelum iteration LLM berikutnya dan sebelum
+        # setiap tool call) dan berhenti sebagai CANCELLED tanpa tool call baru.
+        # Bukan sistem cancellation kedua: satu token dibagikan lintas layer.
+        self.cancel_token = cancel_token
 
     # ------------------------------------------------------------------ #
     # Tool definitions
@@ -174,6 +181,25 @@ class AgentOrchestrator:
             return []
         specs = self.executor.registry.specs()
         return [ToolDefinition.from_spec(spec) for spec in specs]
+
+    # ------------------------------------------------------------------ #
+    # Cooperative cancellation (safe boundary)
+    # ------------------------------------------------------------------ #
+    def _cancel_requested(self) -> bool:
+        """True bila pembatalan (user stop) sudah diminta.
+
+        Dibaca pada SAFE BOUNDARY saja (sebelum memanggil LLM lagi / sebelum
+        tool call berikutnya). Tidak memaksa menghentikan operasi yang sedang
+        blocking; operasi tersebut diselesaikan dulu lalu loop berhenti.
+        """
+        token = self.cancel_token
+        return token is not None and token.is_cancelled()
+
+    def _cancel_reason(self) -> str:
+        """Alasan pembatalan (fallback generik) untuk pesan status."""
+        token = self.cancel_token
+        reason = getattr(token, "reason", None) if token is not None else None
+        return reason or "Task dibatalkan (user stop)."
 
     # ------------------------------------------------------------------ #
     # History helpers
@@ -783,6 +809,11 @@ class AgentOrchestrator:
             history.append(brain_context)
 
         while not loop.is_finished:
+            # Cooperative cancellation (safe boundary): jangan memulai
+            # iteration/LLM call baru bila task sudah dibatalkan.
+            if self._cancel_requested():
+                loop.cancel(self._cancel_reason())
+                break
             # 1) Panggil LLM via abstraction (sertakan definisi tool native).
             messages = self._build_messages(task, history)
             tools = self._tool_definitions()
@@ -887,6 +918,11 @@ class AgentOrchestrator:
             # 3) TOOL_CALL -> eksekusi tiap action, catat step, kirim balik.
             try:
                 for action in response.tool_calls():
+                    # Cooperative cancellation (safe boundary): jangan eksekusi
+                    # tool call baru setelah pembatalan terdeteksi.
+                    if self._cancel_requested():
+                        loop.cancel(self._cancel_reason())
+                        break
                     loop.record_action(self.executor.to_agent_action(action))
                     emit_event(
                         self.event_sink,
@@ -1057,6 +1093,11 @@ class AgentOrchestrator:
         truncation_recoveries = 0
 
         while not loop.is_finished:
+            # Cooperative cancellation (safe boundary): jangan memulai
+            # iteration/LLM call baru bila task sudah dibatalkan.
+            if self._cancel_requested():
+                loop.cancel(self._cancel_reason())
+                break
             # Safety guard (infrastruktur, bukan completion): cegah runaway.
             if len(loop.state.steps) >= loop.state.max_iterations:
                 loop.fail(
@@ -1111,6 +1152,13 @@ class AgentOrchestrator:
                     "tool_calls": len(response.tool_calls()),
                 },
             )
+
+            # Cooperative cancellation (safe boundary): pembatalan yang datang
+            # saat LLM call berlangsung terdeteksi DI SINI — sebelum tool call
+            # apa pun dieksekusi dan sebelum reasoning dilanjutkan.
+            if self._cancel_requested():
+                loop.cancel(self._cancel_reason())
+                break
 
             # Commentary natural dari LLM (bila ada); bukan reasoning buatan.
             commentary = self._extract_commentary(response)
@@ -1174,6 +1222,12 @@ class AgentOrchestrator:
 
             stop = False
             for tool_call, action in zip(tool_calls, model_tool_calls):
+                # Cooperative cancellation (safe boundary): jangan eksekusi
+                # tool call baru setelah pembatalan terdeteksi.
+                if self._cancel_requested():
+                    loop.cancel(self._cancel_reason())
+                    stop = True
+                    break
                 emit_event(
                     self.event_sink,
                     "tool_called",

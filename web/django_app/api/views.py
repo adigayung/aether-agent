@@ -354,8 +354,10 @@ def get_task(request: HttpRequest, service: GatewayService, task_id: str) -> Jso
 def cancel_task(request: HttpRequest, service: GatewayService, task_id: str) -> JsonResponse:
     """POST /api/tasks/<task_id>/cancel -> minta penghentian task.
 
-    Menandai task CANCELLED + emit event AETHER existing. Bukan stop engine
-    kedua (Runtime existing tidak punya cooperative cancellation).
+    Menandai task CANCELLED dan MEMICU cooperative cancellation pada eksekusi
+    yang sedang berjalan (Agent loop berhenti di safe boundary, bukan
+    thread.kill). Bukan stop engine kedua: memakai token cancellation tunggal
+    yang dibagikan ke runtime/orchestrator AETHER yang sudah ada.
     """
     return _json_response(service.cancel_task(task_id))
 

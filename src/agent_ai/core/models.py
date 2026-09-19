@@ -23,6 +23,7 @@ class AgentStatus(str, Enum):
     WAITING = "waiting"    # menunggu observation/tool result
     DONE = "done"          # selesai dengan sukses
     FAILED = "failed"      # selesai dengan error
+    CANCELLED = "cancelled"  # dihentikan kooperatif (user stop) di safe boundary
 
 
 @dataclass
@@ -128,8 +129,12 @@ class AgentState:
 
     @property
     def is_finished(self) -> bool:
-        """True bila status sudah DONE atau FAILED."""
-        return self.status in (AgentStatus.DONE, AgentStatus.FAILED)
+        """True bila status sudah terminal (DONE/FAILED/CANCELLED)."""
+        return self.status in (
+            AgentStatus.DONE,
+            AgentStatus.FAILED,
+            AgentStatus.CANCELLED,
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         return {

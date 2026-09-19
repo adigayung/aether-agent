@@ -121,6 +121,17 @@ class AgentLoop:
         self.state.error = error
         return self.state
 
+    def cancel(self, reason: Optional[str] = None) -> AgentState:
+        """Hentikan loop secara kooperatif (status -> CANCELLED).
+
+        Dipakai saat pembatalan (user stop) terdeteksi di safe boundary.
+        Ini BUKAN kegagalan: status dibedakan agar runtime/gateway dapat
+        melaporkan CANCELLED (bukan FAILED) dan tidak melakukan retry.
+        """
+        self.state.status = AgentStatus.CANCELLED
+        self.state.error = reason
+        return self.state
+
     # ------------------------------------------------------------------ #
     # Introspection
     # ------------------------------------------------------------------ #

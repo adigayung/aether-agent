@@ -36,6 +36,7 @@ from typing import Any, Callable, Dict, Optional
 
 from agent_ai.core.executor import ToolExecutor
 from agent_ai.permission.manager import PermissionManager
+from agent_ai.runtime.models import RuntimeStatus
 from agent_ai.runtime.runtime import AgentRuntime
 from agent_ai.session.events import EventType, make_event
 from agent_ai.session.store import SessionStore
@@ -149,6 +150,7 @@ class TaskExecutor:
         session_id: Optional[str] = None,
         workspace_root: Optional[str] = None,
         model_name: Optional[str] = None,
+        cancel_token: Optional[Any] = None,
     ) -> AgentRuntime:
         """Rakit AgentRuntime dengan ToolExecutor yang punya PermissionManager.
 
@@ -209,6 +211,9 @@ class TaskExecutor:
             # (`.aether/log/<task_id>.log`) + AI Project Bible
             # (`.aether/bible`). Bila None, storage project-local dilewati.
             project_root=workspace_root,
+            # Cooperative cancellation: token dibagikan gateway -> runtime ->
+            # orchestrator agar loop berhenti di safe boundary saat user Stop.
+            cancel_token=cancel_token,
         )
 
     # ------------------------------------------------------------------ #
@@ -248,6 +253,7 @@ class TaskExecutor:
         model_name: Optional[str] = None,
         provider_instance_id: Optional[str] = None,
         model_id: Optional[str] = None,
+        cancel_token: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Jalankan PreparedTask lewat AETHER Runtime (synchronous).
 
@@ -269,6 +275,9 @@ class TaskExecutor:
                 model diambil dari konfigurasi ini (mengalahkan provider_name).
             model_id: id model spesifik (dari konfigurasi LLM tersimpan) yang
                 harus dipakai. Hanya relevan bila provider_instance_id diisi.
+            cancel_token: token pembatalan kooperatif (opsional). Bila diisi,
+                runtime/orchestrator berhenti di safe boundary saat token
+                diminta dan task dilaporkan CANCELLED (bukan FAILED).
 
         Returns:
             Ringkasan hasil: {"status", "result", "error", "iterations"}.
@@ -310,6 +319,7 @@ class TaskExecutor:
                 session_id=session_id,
                 workspace_root=workspace_root,
                 model_name=effective_model,
+                cancel_token=cancel_token,
             )
             result = runtime.run(prepared, lifecycle=lifecycle)
         except Exception as exc:  # noqa: BLE001 - provider/runtime error -> FAILED
@@ -347,13 +357,25 @@ class TaskExecutor:
                 pass
 
         # Sinkronkan status akhir dari runtime ke record gateway.
-        # Catatan: event terminal (task_completed/task_failed) diemit oleh
-        # AgentRuntime (sumber tunggal observability). Di sini hanya update
-        # status record gateway.
-        if result.success:
+        # Catatan: event terminal (task_completed/task_failed/task_cancelled)
+        # diemit oleh AgentRuntime (sumber tunggal observability). Di sini hanya
+        # update status record gateway.
+        runtime_status = getattr(result, "status", None)
+        if runtime_status == RuntimeStatus.CANCELLED:
+            # Dibatalkan secara kooperatif: CANCELLED, bukan FAILED (tanpa retry).
+            status = TaskStatus.CANCELLED.value
+        elif runtime_status == RuntimeStatus.COMPLETED:
             status = TaskStatus.COMPLETED.value
-        else:
+        elif runtime_status == RuntimeStatus.FAILED:
             status = TaskStatus.FAILED.value
+        else:
+            # Backward compatible: hasil runtime yang tidak mengekspos `.status`
+            # (mis. runtime/fake verifier) memakai flag `.success` seperti dulu.
+            status = (
+                TaskStatus.COMPLETED.value
+                if getattr(result, "success", False)
+                else TaskStatus.FAILED.value
+            )
 
         if on_status is not None:
             on_status(status, result.result, result.error)

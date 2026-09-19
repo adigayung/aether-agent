@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from agent_ai.core.cancel import CancellationToken
 from agent_ai.core.executor import ToolExecutor
 from agent_ai.core.orchestrator import AgentOrchestrator
 from agent_ai.core.models import AgentStatus
@@ -97,10 +98,15 @@ class AgentRuntime:
         project_root: Optional[str] = None,
         project_brain: bool = True,
         use_continuous_loop: bool = True,
+        cancel_token: Optional[CancellationToken] = None,
     ) -> None:
         if provider is None:
             raise ValueError("AgentRuntime butuh provider (BaseProvider).")
         self.provider = provider
+        # Cooperative cancellation (opsional). Diteruskan ke AgentOrchestrator
+        # agar loop berhenti di safe boundary saat user menekan Stop. Bukan
+        # sistem cancellation kedua: token tunggal milik gateway per task.
+        self.cancel_token = cancel_token
         self.executor = executor or ToolExecutor()
         self.max_iterations = max_iterations
         self.options = options
@@ -689,6 +695,7 @@ class AgentRuntime:
             brain_learning=False,
             use_continuous_loop=self.use_continuous_loop,
             environment_context=self._current_environment_context,
+            cancel_token=self.cancel_token,
         )
 
     def _session_environment_context(self) -> Optional[str]:
@@ -789,8 +796,13 @@ class AgentRuntime:
         Event terminal (task_completed/task_failed) diemit memakai model event
         yang sudah ada (bila session store tersedia).
         """
+        cancelled = result.status == RuntimeStatus.CANCELLED
+
         # Update AI Project Bible (sekali per task) lalu catat status akhir.
-        self._record_project_learning(result)
+        # Task yang di-CANCEL TIDAK meng-update Bible: hasilnya parsial dan
+        # tidak boleh menjadi knowledge project (hindari retry/learning).
+        if not cancelled:
+            self._record_project_learning(result)
         self._log(
             "task_finished",
             {
@@ -802,6 +814,10 @@ class AgentRuntime:
 
         if result.status == RuntimeStatus.COMPLETED:
             self._emit_event("task_completed", {"result": result.result})
+        elif cancelled:
+            # Event terminal AETHER existing (task_cancelled) supaya Task
+            # History/Agent Activity mengetahui task dihentikan, bukan selesai.
+            self._emit_event("task_cancelled", {"reason": result.error})
         else:
             self._emit_event("task_failed", {"error": result.error})
 
@@ -812,6 +828,9 @@ class AgentRuntime:
         if result.status == RuntimeStatus.COMPLETED:
             if lifecycle.can_transition(TaskStatus.COMPLETED):
                 lifecycle.complete(result=result.result)
+        elif cancelled:
+            if lifecycle.can_transition(TaskStatus.CANCELLED):
+                lifecycle.cancel(reason=result.error)
         else:
             if lifecycle.can_transition(TaskStatus.FAILED):
                 lifecycle.fail(result.error or "Runtime gagal.")
@@ -966,6 +985,19 @@ class AgentRuntime:
         orchestrator = self._make_orchestrator(self.provider)
         result = orchestrator.run(task_text)
         progress.iteration += max(1, getattr(result, "iterations", 0))
+
+        # Cancellation (cooperative): loop berhenti di safe boundary -> task
+        # CANCELLED (bukan FAILED/COMPLETED). Tidak ada retry lanjutan.
+        if result.status == AgentStatus.CANCELLED:
+            progress.current_step = None
+            return RuntimeResult(
+                status=RuntimeStatus.CANCELLED,
+                result=None,
+                error=result.error or "Task dibatalkan (user stop).",
+                progress=progress,
+                steps=[],
+                iterations=progress.iteration,
+            )
 
         if result.status == AgentStatus.DONE:
             progress.completed_steps.append(prepared.task)

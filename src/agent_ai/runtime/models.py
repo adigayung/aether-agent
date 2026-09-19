@@ -25,6 +25,9 @@ class RuntimeStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    # Dihentikan secara kooperatif (user stop) pada safe boundary. Dibedakan
+    # dari FAILED agar tidak diperlakukan sebagai kegagalan/retry.
+    CANCELLED = "cancelled"
 
 
 @dataclass

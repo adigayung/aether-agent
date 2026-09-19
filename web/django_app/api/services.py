@@ -28,6 +28,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from agent_ai.core.cancel import CancellationToken
 from agent_ai.projects.registry import (
     ProjectNotFoundError,
     ProjectRegistry,
@@ -162,6 +163,11 @@ class GatewayService:
         # PreparedTask asli (bukan ringkasan) untuk diteruskan ke runtime.
         self._prepared: Dict[str, Any] = {}
         self._lock = threading.Lock()
+        # Cooperative cancellation: satu token per task yang sedang dieksekusi.
+        # Bukan sistem cancellation kedua — primitif tunggal (agent_ai.core.cancel)
+        # yang dibagikan ke runtime/orchestrator agar loop berhenti di safe
+        # boundary. Token dihapus saat eksekusi selesai.
+        self._cancel_tokens: Dict[str, "CancellationToken"] = {}
 
     @property
     def task_executor(self) -> Any:
@@ -820,12 +826,21 @@ class GatewayService:
     # Execution bridge (#55)
     # ------------------------------------------------------------------ #
     def _start_execution(self, task_id: str) -> None:
-        """Mulai eksekusi task di background thread (minimal, tanpa queue)."""
+        """Mulai eksekusi task di background thread (minimal, tanpa queue).
+
+        Token cancellation DIBUAT & DIDAFTARKAN di sini (thread pemanggil,
+        sinkron) SEBELUM thread daemon dijalankan. Ini menutup race: Stop yang
+        datang tepat setelah task dibuat tetap menemukan token dan dapat
+        menandainya (tidak ada jendela "belum terdaftar").
+        """
         from api.execution import run_in_background
 
-        run_in_background(lambda: self._execute_task(task_id))
+        token = CancellationToken()
+        with self._lock:
+            self._cancel_tokens[task_id] = token
+        run_in_background(lambda: self._execute_task(task_id, token))
 
-    def _execute_task(self, task_id: str) -> None:
+    def _execute_task(self, task_id: str, token: CancellationToken) -> None:
         """Jalankan task lewat AETHER Runtime (dipanggil di background thread).
 
         Error apa pun ditangkap dan dicatat sebagai status FAILED agar thread
@@ -838,6 +853,10 @@ class GatewayService:
             return
 
         def on_status(status: str, result: Optional[str], error: Optional[str]) -> None:
+            # Sekali pembatalan diminta, jangan biarkan runtime menimpa status
+            # CANCELLED dengan completed/failed (menutup race di akhir eksekusi).
+            if token.is_cancelled() and status != "cancelled":
+                status = "cancelled"
             self._update_task_status(task_id, status, result=result, error=error)
 
         # Workspace root = active project root (bila ada). Ini mengarahkan
@@ -869,14 +888,27 @@ class GatewayService:
                 model_name=model_name,
                 provider_instance_id=provider_instance_id,
                 model_id=model_id,
+                cancel_token=token,
             )
         except Exception as exc:  # noqa: BLE001 - jangan biarkan thread crash
-            self._update_task_status(
-                task_id,
-                "failed",
-                error=f"{type(exc).__name__}: {exc}",
-            )
+            if token.is_cancelled():
+                # Dibatalkan saat error: pertahankan status CANCELLED.
+                self._update_task_status(
+                    task_id,
+                    "cancelled",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            else:
+                self._update_task_status(
+                    task_id,
+                    "failed",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
             return
+        finally:
+            # Eksekusi selesai (atau gagal): token tidak diperlukan lagi.
+            with self._lock:
+                self._cancel_tokens.pop(task_id, None)
 
         with self._lock:
             rec = self._tasks.get(task_id)
@@ -1236,33 +1268,37 @@ class GatewayService:
         return TaskLogReader(store, task_id=log_file.stem)
 
     def cancel_task(self, task_id: str) -> Dict[str, Any]:
-        """Minta penghentian task: tandai CANCELLED + emit event AETHER.
+        """Minta penghentian task: sinyal cancellation + tandai CANCELLED.
 
-        Catatan: AETHER Runtime existing TIDAK menyediakan cooperative
-        cancellation. Method ini menandai status task di gateway dan mengemit
-        event `task_cancelled` (event AETHER existing) agar UI/observability
-        konsisten. Ini BUKAN execution/stop engine kedua.
+        Mechanism (cooperative, aman):
+            1. set cancellation signal pada token task (bila sedang berjalan),
+            2. tandai status record gateway CANCELLED (agar UI langsung tahu),
+            3. Agent loop (runtime/orchestrator) melihat signal pada safe
+               boundary, berhenti, dan mencatat event `task_cancelled` +
+               `task_finished(status=cancelled)` ke `.aether/log` (sumber
+               tunggal observability). TIDAK ada thread.kill / force terminate.
+
+        Task yang sudah terminal (completed/failed/cancelled) TIDAK diubah.
 
         Raises:
             NotFoundError: bila task tidak ditemukan.
         """
         with self._lock:
             record = self._tasks.get(task_id)
+            token = self._cancel_tokens.get(task_id)
         if record is None:
             raise NotFoundError(f"Task '{task_id}' tidak ditemukan.")
 
-        # Hanya task yang belum terminal yang bisa dibatalkan.
+        # Hanya task yang belum terminal yang bisa dibatalkan. Task yang sudah
+        # COMPLETED/FAILED tetap pada statusnya (tidak diubah menjadi CANCELLED).
         if record.status in ("completed", "failed", "cancelled"):
             return record.to_dict()
 
+        # 1) Sinyal kooperatif: Agent loop berhenti di safe boundary.
+        if token is not None:
+            token.request("user_requested")
+        # 2) Status record gateway langsung CANCELLED (UI/HTTP responsif).
         self._update_task_status(task_id, "cancelled")
-        if record.session_id:
-            self._emit(
-                record.session_id,
-                "task_cancelled",
-                task_id=task_id,
-                payload={"reason": "user_requested"},
-            )
         return self.get_task(task_id)
 
     # ------------------------------------------------------------------ #

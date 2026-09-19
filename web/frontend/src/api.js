@@ -159,7 +159,8 @@ export function getTask(taskId) {
   return request(`/tasks/${encodeURIComponent(taskId)}`);
 }
 
-// Minta penghentian task (menandai CANCELLED + emit event AETHER existing).
+// Minta penghentian task (cooperative cancellation: Agent loop berhenti di
+// safe boundary lalu mencatat CANCELLED ke `.aether/log`).
 export function cancelTask(taskId) {
   return request(`/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST" });
 }
