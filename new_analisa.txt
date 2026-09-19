@@ -1,0 +1,164 @@
+================================================================================
+AETHER — CONSULTANT CHAT UX FIX (Multi-line Composer, Wider Modal, Bigger Font,
+             In-session Chat Persistence)
+Mode: Frontend-only. Tidak ada file Python/backend yang diubah.
+================================================================================
+
+--------------------------------------------------------------------------------
+1. LATAR BELAKANG / MASALAH
+--------------------------------------------------------------------------------
+Keluhan user: "Consultant chat tidak nyaman dipakai". Tiga akar masalah:
+
+1) Composer TIDAK bisa multi-line.
+   - Sebelum: <input type="text" v-model="input" class="input-a">
+   - Handler onKeydown: Enter (tanpa Shift) => e.preventDefault() + send()
+   - Akibat: Enter selalu mengirim, tidak bisa membuat baris baru.
+
+2) Modal sempit & teks kecil.
+   - .modal.consultant-m { max-width: 720px }
+   - .ctext = 13px, .consultant-md = 13px, .consultant-foot .input-a = 13px
+   - .crole = 10.5px, .cs-label/.cm-label/.cm-hint = 11px
+
+3) Riwayat chat HILANG saat modal ditutup lalu dibuka kembali.
+   - Di App.vue modal dirender dengan v-if="consultantOpen".
+   - v-if = unmount saat close => state messages (ref di dalam
+     ConsultantChat.vue) ikut hancur.
+
+--------------------------------------------------------------------------------
+2. LOKASI KODE YANG DIINSPEKSI (VERIFIED)
+--------------------------------------------------------------------------------
+- web/frontend/src/components/ConsultantChat.vue  (composer, keydown, state)
+- web/frontend/src/App.vue                          (pola mount modal, line ~1036)
+- web/frontend/src/styles.css                       (.consultant-m, .ctext,
+                                                     .consultant-md, .crole,
+                                                     .consultant-foot .input-a,
+                                                     .cs-label/.cm-label/.cm-hint)
+
+Fondasi layout yang SUDAH BENAR dan TIDAK diubah:
+- .consultant-messages { flex: 1 1 auto; min-height: 0; overflow-y: auto }
+- .consultant-foot    { flex-shrink: 0 }  (sibling dari .consultant-messages)
+- .consultant-proposal berada DI DALAM .consultant-messages.
+
+--------------------------------------------------------------------------------
+3. AKAR MASALAH (ROOT CAUSE)
+--------------------------------------------------------------------------------
+A. Composer single-line  : <input type="text"> tidak bisa newline; Enter di-preventDefault.
+B. Ruang & teks kecil    : max-width 720px; seluruh font percakapan/input 13px.
+C. Chat hilang           : v-if pada <ConsultantChat> meng-unmount komponen saat
+                           modal ditutup => ref 'messages' di dalam komponen reset.
+
+--------------------------------------------------------------------------------
+4. PERUBAHAN YANG DILAKUKAN
+--------------------------------------------------------------------------------
+### A. Composer multi-line (ConsultantChat.vue)
+- <input type="text"> diganti <textarea rows="1" class="input-a"> dengan:
+    ref="composer", v-model="input", @input="autoGrow", @keydown="onKeydown".
+- Ditambah logika auto-grow:
+    const COMPOSER_MAX_HEIGHT = 140;
+    function autoGrow() {
+      el.style.height = "auto";
+      el.style.height = Math.min(el.scrollHeight, 140) + "px";
+      el.style.overflowY = el.scrollHeight > 140 ? "auto" : "hidden";
+    }
+- Ditambah resetComposer(): setelah mengirim, tinggi textarea dikembalikan ke 1 baris.
+- Keyboard (KEPUTUSAN TERKUNCI):
+    Enter biasa  = baris baru (default textarea, TIDAK di-preventDefault).
+    Shift+Enter  = kirim (preventDefault + send()).
+
+### B. Lebar modal & ruang ketik (styles.css)
+- .modal.consultant-m : max-width 720px -> 860px (width: 90vw tetap, margin tetap).
+- .consultant-foot    : align-items: center -> flex-end (tombol send sejajar bawah
+  saat textarea tumbuh).
+- .consultant-foot .input-a : padding 9px 13px -> 11px 15px; font-size 13px -> 14px;
+  line-height 1.5; resize: none; min-height: 42px; max-height: 140px;
+  overflow-y: hidden; font-family: inherit.
+
+### C. Ukuran teks (proporsional, tetap AETHER-like)
+- .ctext        : 13px / 1.55 -> 14px / 1.6
+- .consultant-md: 13px / 1.55 -> 14px / 1.6
+- .crole        : 10.5px -> 11.5px
+- .cs-label     : 11px -> 12px
+- .cm-label     : 11px -> 12px
+- .cm-hint      : 11px -> 12px
+
+### D. Persistensi chat selama sesi browser (App.vue)
+- <ConsultantChat v-if="consultantOpen" ...>  ->  v-show="consultantOpen".
+- v-show menjaga komponen tetap ter-mount (hanya display: none saat tertutup),
+  sehingga ref 'messages' dan sesi Consultant tetap hidup selama sesi browser
+  (close/open modal tanpa reload).
+- Ditambahkan komentar penjelas pada markup.
+- CATATAN: scope mengikuti instruksi = cukup selama SESI (bukan lintas reload).
+  Solusi ini MURNI FRONTEND (hanya ganti v-if -> v-show); tidak perlu backend.
+
+### E. Kebersihan minor
+- Assignment redundan ke computed read-only `lastProposal.value = ...` di send()
+  DIPERIKSA: sudah tidak ada di source (no-op, tidak perlu diubah).
+
+--------------------------------------------------------------------------------
+5. FILE YANG BERUBAH
+--------------------------------------------------------------------------------
+- web/frontend/src/components/ConsultantChat.vue   (composer textarea + auto-grow
+                                                     + keydown Shift+Enter)
+- web/frontend/src/App.vue                          (v-if -> v-show pada
+                                                     <ConsultantChat>)
+- web/frontend/src/styles.css                       (lebar modal, font, styling
+                                                     textarea composer)
+(git status --porcelain: hanya 3 file frontend ini yang modified.)
+
+--------------------------------------------------------------------------------
+6. YANG TIDAK DIUBAH (SESUAI CONSTRAINT)
+--------------------------------------------------------------------------------
+- Tidak ada perubahan file Python/backend (consultant/, services.py, views.py,
+  urls.py, orchestrator, api.js, dll). VERIFIED via git status.
+- Struktur modal dipertahankan: .consultant-proposal tetap di dalam
+  .consultant-messages; .consultant-foot tetap sibling dengan flex-shrink: 0;
+  overflow tetap dimiliki .consultant-messages.
+- Fitur Consultant dipertahankan: mode selector (Quick/Investigate), Task Proposal,
+  Run Task, provider/model selection, tool activity.
+- Alur backend (provider/model, session_id, Project Bible, API) tidak disentuh.
+- Tidak ada refactor besar / unrelated change.
+
+--------------------------------------------------------------------------------
+7. VALIDASI
+--------------------------------------------------------------------------------
+- Build produksi:
+    cd web/frontend
+    node node_modules/vite/bin/vite.js build
+  HASIL: OK — 30 modules transformed, 0 error, built in ~1.15s.
+  (npm tidak tersedia di subprocess AETHER — dipakai node langsung ke vite.js.)
+
+- Inspeksi bundle CSS hasil build (dist/assets/index-*.css) — TERVERIFIKASI
+  mengandung nilai baru: "max-width:860px", "resize:none",
+  ".consultant-foot{align-items:flex-end...}", ".consultant-foot .input-a{...
+  font-size:14px...max-height:140px...}", ".ctext{font-size:14px...}",
+  ".consultant-md{font-size:14px...}", ".crole{font-size:11.5px}".
+
+- Inspeksi struktur render: tidak ada UI/interaction test otomatis tersedia;
+  validasi dilakukan via build + pembacaan bundle + pemeriksaan source.
+
+MAPPING KE ACCEPTANCE CRITERIA:
+1. Enter = baris baru .................. DONE (textarea default; keydown hanya
+                                          intercept Shift+Enter).
+2. Shift+Enter = kirim ................. DONE.
+3. Textarea auto-grow + scroll @140px .. DONE (autoGrow + max-height 140px).
+4. Modal ~860px & responsif 90vw ....... DONE.
+5. Font percakapan & input ~14px ....... DONE (.ctext/.consultant-md/input = 14px).
+6. Chat tetap ada setelah close/open .... DONE (v-show, tidak unmount).
+7. Task Proposal + Run Task + mode + provider/model tetap ........ DONE (tidak disentuh).
+8. Build sukses 0 error ................ DONE (30 modules, 0 error).
+9. Tidak ada file Python/backend berubah DONE (git status: hanya 3 file frontend).
+10. Ringkasan ke new_analisa.txt ....... DONE (dokumen ini).
+
+--------------------------------------------------------------------------------
+8. CATATAN / REMAINING
+--------------------------------------------------------------------------------
+- Persistensi dibatasi selama sesi browser (sesuai scope). Lintas reload/restart
+  TIDAK termasuk dan tetap memerlukan perubahan backend bila dikerjakan nanti —
+  tidak dilakukan pada task ini.
+- Tidak ada automated UI/interaction test; regresi layout hanya tertangkap lewat
+  build + review source.
+- Perilaku layout proposal (di dalam .consultant-messages) sengaja tidak diubah
+  agar tidak menimbulkan regresi scroll.
+================================================================================
+Status: SELESAI — frontend-only, build hijau, tanpa perubahan backend.
+================================================================================

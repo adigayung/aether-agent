@@ -1033,8 +1033,10 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- ===================== CONSULTANT CHAT MODAL ===================== -->
+    <!-- v-show (bukan v-if) agar komponen TIDAK di-unmount saat modal ditutup,
+         sehingga riwayat percakapan tetap hidup selama sesi browser. -->
     <ConsultantChat
-      v-if="consultantOpen"
+      v-show="consultantOpen"
       :providers="llmProviders"
       :provider-instance-id="selectedProviderInstanceId"
       :model-id="selectedModelId"

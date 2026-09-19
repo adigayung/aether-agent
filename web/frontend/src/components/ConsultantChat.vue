@@ -30,6 +30,27 @@ const sending = ref(false);
 const error = ref("");
 const sessionId = ref("");
 const scroller = ref(null);
+const composer = ref(null);
+
+// Tinggi maksimum composer (px). Di atas nilai ini textarea scroll internal
+// agar footer tidak memanjang tanpa batas.
+const COMPOSER_MAX_HEIGHT = 140;
+
+// Auto-grow: reset ke auto dulu lalu set tinggi = konten sebenarnya,
+// dibatasi COMPOSER_MAX_HEIGHT.
+function autoGrow() {
+  const el = composer.value;
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = Math.min(el.scrollHeight, COMPOSER_MAX_HEIGHT) + "px";
+  el.style.overflowY = el.scrollHeight > COMPOSER_MAX_HEIGHT ? "auto" : "hidden";
+}
+function resetComposer() {
+  const el = composer.value;
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.overflowY = "hidden";
+}
 
 // Mode Consultant: "quick" (default) atau "investigate".
 // - quick       : Consultant memakai Project Bible + percakapan saja
@@ -98,6 +119,7 @@ async function send() {
   error.value = "";
   messages.value.push({ role: "user", text });
   input.value = "";
+  resetComposer();
   sending.value = true;
   scrollToBottom();
   try {
@@ -131,7 +153,8 @@ async function send() {
 }
 
 function onKeydown(e) {
-  if (e.key === "Enter" && !e.shiftKey) {
+  // Shift+Enter = kirim. Enter biasa = baris baru (default textarea).
+  if (e.key === "Enter" && e.shiftKey) {
     e.preventDefault();
     send();
   }
@@ -263,14 +286,16 @@ onMounted(() => {
       <div v-if="error" class="wb-error">{{ error }}</div>
 
       <div class="consultant-foot">
-        <input
+        <textarea
+          ref="composer"
           v-model="input"
           class="input-a"
-          type="text"
+          rows="1"
           :placeholder="inputPlaceholder"
           :disabled="sending"
+          @input="autoGrow"
           @keydown="onKeydown"
-        />
+        ></textarea>
         <button class="send-btn" type="button" title="Send" :disabled="sending || !input.trim()" @click="send">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
         </button>
