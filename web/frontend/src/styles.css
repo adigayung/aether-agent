@@ -317,10 +317,14 @@ button {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  overflow-y: auto;
 }
 .ws-col.left {
   border-right: 1px solid var(--border-soft);
+}
+.ws-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .block {

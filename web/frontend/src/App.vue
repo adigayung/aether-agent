@@ -836,70 +836,72 @@ onBeforeUnmount(() => {
       <!-- Workbench content -->
       <div v-if="activeNav === 'agent'" class="ws-body">
         <div class="ws-col left">
-          <!-- Latest Task -->
-          <section class="block">
-            <div class="block-head">
-              <div class="block-title">Latest Task</div>
-              <div class="block-actions">
-                <button
-                  v-if="task.id"
-                  class="report-btn"
-                  type="button"
-                  title="View Agent Report"
-                  @click="openReport(task.id)"
-                >
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h4"/></svg>
-                  Report
-                </button>
-                <span class="tag" :class="taskTag.cls">{{ taskTag.label }}</span>
-              </div>
-            </div>
-            <div class="task-card">
-              <div class="task-top">
-                <span class="task-ico">
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h4"/></svg>
-                </span>
-                <div class="task-info">
-                  <div class="task-name">Process :</div>
-                  <span class="prompt-pill" :title="task.text || 'No task yet'">{{ task.text || "No task yet" }}</span>
-                  <div class="task-sub">{{ task.id ? task.id : "idle" }} · status: {{ task.status || "idle" }}</div>
+          <div class="ws-scroll">
+            <!-- Latest Task -->
+            <section class="block">
+              <div class="block-head">
+                <div class="block-title">Latest Task</div>
+                <div class="block-actions">
+                  <button
+                    v-if="task.id"
+                    class="report-btn"
+                    type="button"
+                    title="View Agent Report"
+                    @click="openReport(task.id)"
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h4"/></svg>
+                    Report
+                  </button>
+                  <span class="tag" :class="taskTag.cls">{{ taskTag.label }}</span>
                 </div>
               </div>
-
-              <div class="lifecycle">
-                <template v-for="(step, i) in lifecycleSteps" :key="step.label">
-                  <div class="step" :class="step.state">
-                    <span class="mark">{{ step.state === "done" ? "✓" : i + 1 }}</span>
-                    <span>{{ step.label }}</span>
+              <div class="task-card">
+                <div class="task-top">
+                  <span class="task-ico">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h4"/></svg>
+                  </span>
+                  <div class="task-info">
+                    <div class="task-name">Process :</div>
+                    <span class="prompt-pill" :title="task.text || 'No task yet'">{{ task.text || "No task yet" }}</span>
+                    <div class="task-sub">{{ task.id ? task.id : "idle" }} · status: {{ task.status || "idle" }}</div>
                   </div>
-                  <span
-                    v-if="i < lifecycleSteps.length - 1"
-                    class="step-line"
-                    :class="{ done: step.state === 'done' }"
-                  ></span>
-                </template>
-              </div>
+                </div>
 
-              <div class="progress-a"><div class="bar" :style="{ width: lifecyclePct + '%' }"></div></div>
-              <div class="progress-meta">
-                <span>{{ lifecyclePct }}% complete</span>
-                <span>{{ runtime.phase || task.status || "idle" }}</span>
-              </div>
-            </div>
-          </section>
+                <div class="lifecycle">
+                  <template v-for="(step, i) in lifecycleSteps" :key="step.label">
+                    <div class="step" :class="step.state">
+                      <span class="mark">{{ step.state === "done" ? "✓" : i + 1 }}</span>
+                      <span>{{ step.label }}</span>
+                    </div>
+                    <span
+                      v-if="i < lifecycleSteps.length - 1"
+                      class="step-line"
+                      :class="{ done: step.state === 'done' }"
+                    ></span>
+                  </template>
+                </div>
 
-          <!-- Agent Activity: unified chronological timeline (commentary,
-               tool call, tool result, observation). Live dari SSE; history
-               dari Activity API/persistent log saat membuka task lama. -->
-          <section class="block">
-            <div class="term">
-              <div class="term-head">
-                <span class="tl r"></span><span class="tl y"></span><span class="tl g"></span>
-                <span class="tt">aether — agent activity</span>
+                <div class="progress-a"><div class="bar" :style="{ width: lifecyclePct + '%' }"></div></div>
+                <div class="progress-meta">
+                  <span>{{ lifecyclePct }}% complete</span>
+                  <span>{{ runtime.phase || task.status || "idle" }}</span>
+                </div>
               </div>
-              <AgentActivity :events="activityEvents" :status="task.status" />
-            </div>
-          </section>
+            </section>
+
+            <!-- Agent Activity: unified chronological timeline (commentary,
+                 tool call, tool result, observation). Live dari SSE; history
+                 dari Activity API/persistent log saat membuka task lama. -->
+            <section class="block">
+              <div class="term">
+                <div class="term-head">
+                  <span class="tl r"></span><span class="tl y"></span><span class="tl g"></span>
+                  <span class="tt">aether — agent activity</span>
+                </div>
+                <AgentActivity :events="activityEvents" :status="task.status" />
+              </div>
+            </section>
+          </div>
 
           <!-- Agent input -> Task Composer modal -->
           <div class="agent-input">
