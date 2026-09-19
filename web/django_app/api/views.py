@@ -448,6 +448,7 @@ def consultant_consult(request: HttpRequest, service: GatewayService) -> JsonRes
 
     Body JSON:
         message (wajib)         : pertanyaan/permintaan user.
+        mode (opsional)         : "quick" | "investigate" (default "quick").
         session_id (opsional)   : id sesi untuk konteks lintas giliran.
         provider_instance_id    : pilihan provider dari konfigurasi LLM (SQLite).
         model_id (opsional)     : pilihan model.
@@ -465,6 +466,7 @@ def consultant_consult(request: HttpRequest, service: GatewayService) -> JsonRes
             provider_instance_id=body.get("provider_instance_id") or None,
             model_id=body.get("model_id") or None,
             project_id=body.get("project_id") or None,
+            mode=body.get("mode") or None,
         )
     )
 

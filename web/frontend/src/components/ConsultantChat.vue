@@ -31,6 +31,27 @@ const error = ref("");
 const sessionId = ref("");
 const scroller = ref(null);
 
+// Mode Consultant: "quick" (default) atau "investigate".
+// - quick       : Consultant memakai Project Bible + percakapan saja
+//                 (backend TIDAK menyediakan tool investigasi project).
+// - investigate : Project Bible sebagai konteks awal, lalu boleh memakai tool
+//                 project yang tersedia bila perlu verifikasi/investigasi.
+// Mengganti mode TIDAK mereset sesi/konteks Consultant.
+const mode = ref("quick");
+const MODES = [
+  { id: "quick", label: "Quick", icon: "⚡" },
+  { id: "investigate", label: "Investigate", icon: "🔍" },
+];
+function setMode(id) {
+  if (id === "quick" || id === "investigate") mode.value = id;
+}
+
+const inputPlaceholder = computed(() =>
+  mode.value === "quick"
+    ? "Ask the Consultant (Quick · Project Bible only)…"
+    : "Ask the Consultant (Investigate · may inspect project)…"
+);
+
 const providerOptions = computed(() =>
   (props.providers || []).filter((p) => p.enabled !== false)
 );
@@ -84,6 +105,7 @@ async function send() {
       sessionId: sessionId.value || null,
       providerInstanceId: props.providerInstanceId || null,
       modelId: props.modelId || null,
+      mode: mode.value,
     });
     sessionId.value = data.session_id || sessionId.value;
     messages.value.push({
@@ -93,7 +115,6 @@ async function send() {
       taskProposal: data.task_proposal || null,
       failed: data.status === "failed",
     });
-    if (data.task_proposal) lastProposal.value = data.task_proposal;
   } catch (e) {
     error.value = e.message || "Consultant request failed.";
     messages.value.push({
@@ -141,7 +162,9 @@ onMounted(() => {
     text:
       "Halo! Saya **AETHER Consultant**. Saya bisa menganalisa project, " +
       "melakukan investigasi, memvalidasi temuan, dan menyusun Task Proposal " +
-      "untuk Agent. Apa yang ingin Anda ketahui atau kerjakan?",
+      "untuk Agent. Pilih mode **⚡ Quick** (Project Bible saja, cepat) atau " +
+      "**🔍 Investigate** (boleh memeriksa project). Apa yang ingin Anda " +
+      "ketahui atau kerjakan?",
     tools: [],
     taskProposal: null,
   });
@@ -185,6 +208,28 @@ onMounted(() => {
         </button>
       </div>
 
+      <!-- Mode Consultant: Quick (Project Bible saja) vs Investigate (boleh
+           inspeksi project). Mengganti mode TIDAK mereset sesi/konteks. -->
+      <div class="consultant-modes" role="group" aria-label="Consultant mode">
+        <span class="cm-label">Mode</span>
+        <button
+          v-for="m in MODES"
+          :key="m.id"
+          type="button"
+          class="mode-btn"
+          :class="{ active: mode === m.id }"
+          :aria-pressed="mode === m.id ? 'true' : 'false'"
+          :title="m.id === 'quick' ? 'Quick: Project Bible + conversation only' : 'Investigate: may inspect the project when needed'"
+          :disabled="sending"
+          @click="setMode(m.id)"
+        >
+          <span class="mb-icon" aria-hidden="true">{{ m.icon }}</span>{{ m.label }}
+        </button>
+        <span class="cm-hint">
+          {{ mode === "quick" ? "Bible + chat only" : "Bible first, then project tools" }}
+        </span>
+      </div>
+
       <div class="consultant-messages" ref="scroller">
         <div v-for="(msg, i) in messages" :key="i" class="cmsg" :class="msg.role">
           <span class="crole">{{ msg.role === "assistant" ? "AETHER Consultant" : "You" }}</span>
@@ -222,7 +267,7 @@ onMounted(() => {
           v-model="input"
           class="input-a"
           type="text"
-          placeholder="Ask the Consultant about this project…"
+          :placeholder="inputPlaceholder"
           :disabled="sending"
           @keydown="onKeydown"
         />

@@ -1276,6 +1276,7 @@ class GatewayService:
         provider_instance_id: Optional[str] = None,
         model_id: Optional[str] = None,
         project_id: Optional[str] = None,
+        mode: Optional[str] = None,
         provider: Optional[Any] = None,
         root: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -1292,6 +1293,8 @@ class GatewayService:
                 LLM tersimpan (SQLite). Bila kosong, dipakai provider instance
                 enabled pertama.
             project_id: project terkait (opsional; default active project).
+            mode: mode Consultant ("quick" | "investigate"; default "quick").
+                Mengontrol tool yang benar-benar tersedia bagi LLM.
             provider: override provider (khusus verifier; tidak dari HTTP).
             root: override root project (khusus verifier; tidak dari HTTP).
 
@@ -1323,6 +1326,7 @@ class GatewayService:
             provider=provider,
             root=root,
             session_id=session_id,
+            mode=mode,
         )
         return result.to_dict()
 

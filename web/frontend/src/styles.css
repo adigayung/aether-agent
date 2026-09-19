@@ -2397,6 +2397,62 @@ select.input-a {
   background: var(--bg-hover);
   color: var(--text);
 }
+
+/* Mode Consultant: Quick vs Investigate */
+.consultant-modes {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border-soft);
+  background: rgba(0, 0, 0, 0.12);
+  flex-shrink: 0;
+}
+.consultant-modes .cm-label {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  white-space: nowrap;
+  margin-right: 2px;
+}
+.mode-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.mode-btn .mb-icon {
+  font-size: 12px;
+}
+.mode-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.mode-btn.active {
+  border-color: var(--accent);
+  background: rgba(139, 92, 246, 0.18);
+  color: var(--text);
+}
+.mode-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.consultant-modes .cm-hint {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .consultant-md {
   font-size: 13px;
   line-height: 1.55;

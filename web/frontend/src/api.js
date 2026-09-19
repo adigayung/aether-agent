@@ -205,16 +205,24 @@ export function getTaskReport(taskId, projectId = null) {
 // --- Consultant (AETHER reasoning layer) -----------------------------------
 // POST /api/consultant/consult -> satu giliran konsultasi. Backend menjalankan
 // reasoning/tool/boundary/bible memakai subsistem AETHER yang sudah ada.
-// Response memuat reply, tool_events, dan task_proposal (bila ada).
+// `mode` ("quick" | "investigate", default "quick") menentukan tool yang benar-
+// benar tersedia bagi LLM. Response memuat reply, tool_events, task_proposal.
 export function consult(
   message,
-  { sessionId = null, providerInstanceId = null, modelId = null, projectId = null } = {}
+  {
+    sessionId = null,
+    providerInstanceId = null,
+    modelId = null,
+    projectId = null,
+    mode = "quick",
+  } = {}
 ) {
   const body = { message };
   if (sessionId) body.session_id = sessionId;
   if (providerInstanceId) body.provider_instance_id = providerInstanceId;
   if (modelId) body.model_id = modelId;
   if (projectId) body.project_id = projectId;
+  if (mode) body.mode = mode;
   return request("/consultant/consult", { method: "POST", body: JSON.stringify(body) });
 }
 

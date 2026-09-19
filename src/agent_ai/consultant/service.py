@@ -21,9 +21,13 @@ import threading
 import uuid
 from typing import Any, Dict, List, Optional
 
-from agent_ai.consultant.models import ConsultantResult, ConsultantTurn
+from agent_ai.consultant.models import (
+    ConsultantResult,
+    ConsultantTurn,
+    normalize_consultant_mode,
+)
 from agent_ai.consultant.policy import build_consultant_permission_manager
-from agent_ai.consultant.prompt import CONSULTANT_SYSTEM_PROMPT
+from agent_ai.consultant.prompt import build_consultant_system_prompt
 from agent_ai.consultant.tools import build_consultant_registry
 from agent_ai.core.executor import ToolExecutor
 from agent_ai.core.models import AgentStatus
@@ -134,6 +138,7 @@ class ConsultantService:
         root: Optional[str] = None,
         session_id: Optional[str] = None,
         max_steps: Optional[int] = None,
+        mode: Optional[str] = None,
     ) -> ConsultantResult:
         """Jalankan satu giliran konsultasi dan kembalikan hasilnya.
 
@@ -145,6 +150,9 @@ class ConsultantService:
                 Project Bible dibaca/ditulis di `<root>/.aether/bible/`.
             session_id: id sesi konsultasi (untuk konteks lintas giliran).
             max_steps: override batas langkah.
+            mode: mode Consultant ("quick" | "investigate"). Default "quick".
+                Mode menentukan tool yang benar-benar tersedia bagi LLM dan
+                instruksi prompt (bukan sekadar prompt saja).
 
         Returns:
             ConsultantResult.
@@ -154,9 +162,11 @@ class ConsultantService:
         if provider is None:
             raise ValueError("Consultant butuh provider (BaseProvider).")
 
+        effective_mode = normalize_consultant_mode(mode)
+
         session = self._get_session(session_id)
 
-        registry = build_consultant_registry(root)
+        registry = build_consultant_registry(root, mode=effective_mode)
         executor = ToolExecutor(
             registry=registry,
             permission_manager=build_consultant_permission_manager(),
@@ -198,7 +208,7 @@ class ConsultantService:
         orchestrator = AgentOrchestrator(
             provider=provider,
             executor=executor,
-            system_prompt=CONSULTANT_SYSTEM_PROMPT,
+            system_prompt=build_consultant_system_prompt(effective_mode),
             brain=brain,
             brain_learning=False,
             event_sink=_sink,
@@ -227,4 +237,5 @@ class ConsultantService:
             iterations=int(getattr(result, "iterations", 0) or 0),
             tool_events=tool_events,
             task_proposal=proposal,
+            mode=effective_mode,
         )

@@ -1,16 +1,15 @@
 """Tool yang tersedia untuk AETHER Consultant.
 
 Boundary Consultant: READ-ONLY terhadap CODE PROJECT, READ+UPDATE terhadap
-Project Bible. Karena itu registry Consultant DIKURASI:
+Project Bible. Karena itu registry Consultant DIKURASI dan bergantung MODE:
 
-    list_files    -> inspeksi directory
-    read_file     -> baca file
-    search_code   -> cari teks/source
-    run_command   -> diagnosis/validasi (dengan guard anti-destruktif)
-    update_project_bible -> simpan knowledge terverifikasi ke Project Bible
+    mode "quick"       -> HANYA update_project_bible.
+                          (Bible read lewat konteks; TANPA tool investigasi.)
+    mode "investigate" -> list_files, read_file, search_code, run_command
+                          (READ-ONLY terhadap source) + update_project_bible.
 
 Tool tulis/hapus/pindah (`write_file`, `edit_file`, `delete_file`,
-`move_file`) SENGAJA tidak didaftarkan, sehingga Consultant tidak dapat
+`move_file`) SENGAJA tidak pernah didaftarkan, sehingga Consultant tidak dapat
 memodifikasi source lewat mekanisme tool.
 
 Modul ini TIDAK membuat subsystem baru:
@@ -24,6 +23,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from agent_ai.consultant.models import (
+    DEFAULT_CONSULTANT_MODE,
+    MODE_INVESTIGATE,
+    normalize_consultant_mode,
+)
 from agent_ai.tools.base import BaseTool, ToolValidationError
 from agent_ai.tools.terminal import RunCommandTool, _split_command
 
@@ -273,30 +277,48 @@ def build_consultant_registry(
     root: Optional[Path] = None,
     provider: Any = None,
     options: Any = None,
+    mode: str = DEFAULT_CONSULTANT_MODE,
 ):
-    """Bangun ToolRegistry Consultant (kurasi READ-ONLY + Bible).
+    """Bangun ToolRegistry Consultant (kurasi READ-ONLY + Bible) sesuai mode.
+
+    Tool yang TIDAK didaftarkan benar-benar tidak tersedia bagi LLM (arsitektur
+    Native Tool Calling hanya menawarkan tool dari registry), jadi pembatasan
+    mode bersifat struktural — bukan sekadar instruksi prompt.
 
     Args:
         root: root project target (opsional). Bila diisi, semua tool dibatasi
             ke root tersebut. Bila None, tool memakai default root-nya.
         provider/options: tidak dipakai saat ini (disediakan untuk ekstensi),
             dipertahankan agar signature stabil.
+        mode: "quick" | "investigate" (nilai tak dikenal -> default quick).
+            - quick       : HANYA update_project_bible (Bible read via konteks +
+                            Bible update via tool). Tanpa tool investigasi project.
+            - investigate : tool Consultant existing (list_files, read_file,
+                            search_code, run_command) + update_project_bible.
 
     Returns:
         ToolRegistry berisi tool yang AMAN untuk Consultant (tanpa tool tulis).
     """
-    from agent_ai.tools.filesystem import (
-        ListFilesTool,
-        ReadFileTool,
-        SearchCodeTool,
-    )
     from agent_ai.tools.registry import ToolRegistry
 
     resolved = Path(root).resolve() if root is not None else None
+    normalized = normalize_consultant_mode(mode)
+
     registry = ToolRegistry()
-    registry.register(ListFilesTool(root=resolved))
-    registry.register(ReadFileTool(root=resolved))
-    registry.register(SearchCodeTool(root=resolved))
-    registry.register(ConsultantRunCommandTool(root=resolved))
+
+    if normalized == MODE_INVESTIGATE:
+        from agent_ai.tools.filesystem import (
+            ListFilesTool,
+            ReadFileTool,
+            SearchCodeTool,
+        )
+
+        registry.register(ListFilesTool(root=resolved))
+        registry.register(ReadFileTool(root=resolved))
+        registry.register(SearchCodeTool(root=resolved))
+        registry.register(ConsultantRunCommandTool(root=resolved))
+
+    # Project Bible update tersedia di SEMUA mode (satu-satunya jalur tulis
+    # Consultant). Project Bible READ dilakukan via konteks system message.
     registry.register(ConsultantBibleTool(root=resolved))
     return registry

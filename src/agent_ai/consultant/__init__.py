@@ -25,9 +25,19 @@ Web access: belum tersedia di AETHER (tidak ada tool web). Dicatat sebagai
 capability yang belum tersedia; TIDAK dibuat tool web palsu.
 """
 
-from agent_ai.consultant.models import ConsultantResult, ConsultantTurn
+from agent_ai.consultant.models import (
+    ConsultantResult,
+    ConsultantTurn,
+    DEFAULT_CONSULTANT_MODE,
+    MODE_INVESTIGATE,
+    MODE_QUICK,
+    normalize_consultant_mode,
+)
 from agent_ai.consultant.policy import build_consultant_permission_manager
-from agent_ai.consultant.prompt import CONSULTANT_SYSTEM_PROMPT
+from agent_ai.consultant.prompt import (
+    CONSULTANT_SYSTEM_PROMPT,
+    build_consultant_system_prompt,
+)
 from agent_ai.consultant.service import ConsultantService, extract_task_proposal
 from agent_ai.consultant.tools import (
     ConsultantBibleTool,
@@ -45,4 +55,9 @@ __all__ = [
     "ConsultantBibleTool",
     "ConsultantRunCommandTool",
     "CONSULTANT_SYSTEM_PROMPT",
+    "build_consultant_system_prompt",
+    "DEFAULT_CONSULTANT_MODE",
+    "MODE_QUICK",
+    "MODE_INVESTIGATE",
+    "normalize_consultant_mode",
 ]

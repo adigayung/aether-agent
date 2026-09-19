@@ -1,100 +1,155 @@
 ====================================================================
-AETHER — Agent Report UI Fix: tampilkan isi report UTUH (tanpa truncate)
+AETHER Consultant — Mode QUICK / INVESTIGATE
 ====================================================================
-Scope: FRONTEND ONLY (Agent Activity / Agent Report). Tidak ada perubahan
-logic Python/backend, Agent execution, TaskExecutor, logging .aether/log,
-Report API, report generation, maupun Task lifecycle.
+Scope: Feature mode pada Consultant yang SUDAH ADA. Tidak membuat
+Consultant/service/loop/subsystem baru. Arsitektur Agent (AgentRuntime,
+TaskExecutor, TaskState, SessionStore, SSE, .aether/log, Provider/Model)
+TIDAK diubah.
 
 --------------------------------------------------------------------
-1. FILE YANG DIUBAH
+1. FILE YANG BERUBAH
 --------------------------------------------------------------------
-1) web/frontend/src/components/AgentActivity.vue
-   - import renderMarkdown dari shared renderer "../markdown.js"
-     (renderer yang SAMA dengan ReportViewer).
-   - case "task_completed": sekarang mengambil data.result (Agent Report
-     final) dan merender penuh sebagai Markdown (reportHtml). Tidak ada
-     truncate/ellipsis pada isi report.
-   - Template: menambahkan blok <div class="md act-report" v-html=...>
-     di dalam baris timeline (di dalam scroll container .act-body).
+Backend (Consultant core):
+  1) src/agent_ai/consultant/models.py
+  2) src/agent_ai/consultant/prompt.py
+  3) src/agent_ai/consultant/tools.py
+  4) src/agent_ai/consultant/service.py
+  5) src/agent_ai/consultant/__init__.py
 
-2) web/frontend/src/styles.css
-   - Menambahkan rule .act-report (container report di timeline) + reset
-     margin elemen markdown terakhir. Tidak ada clipper/line-clamp/max-height
-     pada report; overflow ditangani container .act-body yang memang scrollable.
+Backend (Django Gateway, endpoint Consultant existing):
+  6) web/django_app/api/services.py
+  7) web/django_app/api/views.py
 
-Tidak ada file lain yang disentuh. Tidak ada file Python/backend yang diubah.
+Frontend:
+  8) web/frontend/src/api.js
+  9) web/frontend/src/components/ConsultantChat.vue
+ 10) web/frontend/src/styles.css
 
---------------------------------------------------------------------
-2. PENYEBAB TRUNCATION
---------------------------------------------------------------------
-Temuan inspeksi (bukan asumsi):
+Verifikasi:
+ 11) scripts/check_consultant.py   (diperluas untuk mode)
+ 12) new_analisa.txt               (laporan ini)
 
-a) String literal "[readmore]" TIDAK ADA di seluruh codebase — baik frontend
-   (web/frontend/src) maupun backend (src, web/django_app). Diverifikasi dengan
-   search_code ("readmore", "read more", "[readmore]") dan git history
-   (`git log -S readmore` -> kosong). Jadi tidak ada kode UI yang memotong
-   report dengan penanda tersebut.
-
-b) Isi report final tersimpan UTUH di log: event task_completed memiliki
-   data.result lengkap (contoh task 94442487... = 2014 char; 0fc08d95... =
-   1376 char). Report API membaca task_completed.data.result apa adanya.
-
-c) Teks yang tampak terpotong dengan "…" pada titik penyelesaian ("AGENT —
-   Task completed") adalah pesan/commentary terakhir Agent, yang dipotong oleh
-   BACKEND menjadi 600 char + "…" di:
-       src/agent_ai/core/orchestrator.py :: _extract_commentary()
-       -> `if len(text) > 600: text = text[:600].rstrip() + "…"`
-   Sumber truncation ini ada di layer Agent execution (backend) sehingga TIDAK
-   boleh/tidak diubah sesuai batasan tugas.
-
-d) Di frontend, sebelum perbaikan, event task_completed pada Agent Activity
-   hanya merender teks label "Task completed" dan TIDAK pernah merender isi
-   report. Tidak ditemukan truncation/ellipsis/clamp pada jalur display report
-   (ReportViewer memang sudah menampilkan full + scrollable).
+Tidak ada perubahan pada: AgentRuntime, TaskExecutor, state machine,
+SessionStore, SSE contract, .aether/log, Task/Activity/Report API,
+provider system, permission layer, atau Project Bible store.
 
 --------------------------------------------------------------------
-3. PERBAIKAN YANG DILAKUKAN
+2. RINGKASAN PERUBAHAN
 --------------------------------------------------------------------
-- Agent Report final (task_completed.data.result) kini ditampilkan UTUH di alur
-  Agent Activity pada baris "AGENT — Task completed", memakai Markdown renderer
-  bersama (web/frontend/src/markdown.js) — sama seperti ReportViewer.
-- Tidak ada truncate/ellipsis dan tidak ada "[readmore]".
-- Report panjang mengikuti tinggi container dan dapat di-scroll melalui
-  .act-body (overflow-y: auto) yang sudah ada — mekanisme scroll tidak dihapus.
-- Markdown yang sudah didukung (heading, list, code block, blockquote, hr,
-  inline) tetap dirender dengan behavior yang sama (tidak diubah).
-- Report tetap berada dalam alur Agent Activity / Task History seperti sekarang
-  (ReportViewer modal + tombol Report tidak diubah).
+Konsep: `mode` dikirim per-request ("quick" | "investigate"), default
+"quick". Mode menentukan TOOL YANG BENAR-BENAR TERSEDIA bagi LLM (melalui
+registry) + instruksi prompt. Pembatasan BUKAN hanya prompt: karena
+arsitektur Native Tool Calling hanya menawarkan tool dari registry
+(orchestrator._tool_definitions -> ToolRegistry.specs()), tool yang tidak
+didaftarkan tidak pernah sampai ke LLM.
+
+a) models.py
+   - Konstanta MODE_QUICK="quick", MODE_INVESTIGATE="investigate",
+     DEFAULT_CONSULTANT_MODE="quick", VALID_CONSULTANT_MODES.
+   - normalize_consultant_mode(mode): nilai kosong/tak dikenal -> "quick".
+   - ConsultantResult: field baru `mode` (ikut di to_dict()).
+
+b) tools.py — build_consultant_registry(root, provider, options, mode=...)
+   - mode "quick"       : HANYA ConsultantBibleTool (update_project_bible).
+                          TIDAK ada list_files/read_file/search_code/
+                          run_command. (Bible READ tetap via konteks system
+                          message; Bible UPDATE via tool.)
+   - mode "investigate" : list_files, read_file, search_code,
+                          ConsultantRunCommandTool + update_project_bible
+                          (sama seperti sebelum perubahan).
+   - Tool tulis/hapus/pindah tetap tidak pernah didaftarkan (semua mode).
+
+c) prompt.py — build_consultant_system_prompt(mode)
+   - Prompt disusun: base (identitas/boundary) + blok spesifik mode +
+     Task Proposal/bahasa.
+   - Quick: "Sumber informasi HANYA Bible + percakapan", melarang
+     investigasi source/project, tidak menyebut nama tool investigasi.
+   - Investigate: mulai dari Bible, investigasi bertahap HANYA bila perlu.
+   - CONSULTANT_SYSTEM_PROMPT tetap diekspor (= prompt investigate, backward
+     compatible).
+
+d) service.py — ConsultantService.consult(..., mode=None)
+   - normalize mode (default quick), membangun registry + prompt sesuai mode,
+     dan mengembalikan ConsultantResult.mode.
+   - Session context tetap in-memory & TIDAK direset saat mode berganti.
+
+e) web/django_app/api/services.py + views.py
+   - GatewayService.consult(..., mode=None) -> diteruskan ke
+     ConsultantService.consult(mode=...).
+   - View consultant_consult membaca body["mode"] (opsional) dan
+     meneruskannya. Default (tanpa mode) = "quick".
+
+f) web/frontend/src/api.js
+   - consult(message, { ..., mode = "quick" }) mengirim field `mode`.
+
+g) web/frontend/src/components/ConsultantChat.vue
+   - State `mode = ref("quick")` (DEFAULT QUICK) + daftar MODES.
+   - Bar pemilih mode di area chat (di bawah header, di atas messages):
+     [ ⚡ Quick ] [ 🔍 Investigate ] + hint + aria-pressed.
+   - Setiap pengiriman pesan menyertakan `mode: mode.value`.
+   - setMode() hanya mengubah mode; TIDAK mereset sessionId/messages.
+   - Placeholder input berubah sesuai mode (indikasi UX).
+   - Pesan sambutan menyebut kedua mode.
+   - Cleanup: menghapus baris redundan `lastProposal.value = ...`
+     (menulis ke computed read-only; no-op + dev warning — sudah tercatat
+     sebagai known_bug). Tidak mengubah behavior.
+
+h) styles.css
+   - .consultant-modes, .cm-label, .mode-btn (+ .active), .mb-icon,
+     .cm-hint: gaya pill, konsisten dengan tema dark AETHER (aksen ungu).
+
+Alur: User pilih mode -> ConsultantChat kirim {message,...,mode} -> API ->
+GatewayService.consult(mode) -> ConsultantService.consult(mode) -> registry
++ prompt sesuai mode -> loop existing (AgentOrchestrator.run_continuous_loop,
+TIDAK diubah). Task Proposal, Run Task, tool activity, Project Bible update,
+provider/model selection tetap sama.
 
 --------------------------------------------------------------------
-4. KONFIRMASI: TIDAK ADA PERUBAHAN PYTHON/BACKEND
+3. HASIL VALIDASI
 --------------------------------------------------------------------
-- Tidak ada file .py yang dibuat/diubah/dihapus.
-- Tidak menyentuh: AgentRuntime, TaskExecutor, TaskState/state machine,
-  SessionStore, SSE contract, Activity/Report/Task History API, .aether/log,
-  report generation, maupun Task lifecycle.
-- Perubahan hanya pada 2 file frontend (lihat bagian 1).
+- Kompilasi Python (py_compile) semua file backend yang berubah + checker:
+  OK (exit 0).
+- python scripts/check_consultant.py -> SEMUA LOLOS:
+    [1] Consultant core OK (reply + Task Proposal + tool usage, mode=investigate)
+    [1b] Project Bible konteks awal + system prompt OK
+    [2] Project Bible update OK
+    [3] registry INVESTIGATE -> [list_files, read_file, run_command,
+        search_code, update_project_bible]
+    [3b] registry QUICK -> [update_project_bible] (TANPA tool investigasi)
+    [3c] prompt per-mode OK (Quick tanpa investigasi; Investigate dengan tool)
+    [4] permission boundary OK (write/delete-move DITOLAK)
+    [5] run_command guard OK (destructive ditolak, git read diizinkan)
+    [5b] executor boundary OK (write_file ditolak)
+    [6] session context lintas giliran OK
+    [7] Gateway/HTTP OK -> POST /api/consultant/consult + validasi 400 +
+        default mode "quick" + mode "investigate" diteruskan
+    [7c] frontend OK -> api.js + ConsultantChat.vue mengirim mode (default quick)
+    [7b] Task Proposal -> create_task OK
+- vite build (node node_modules/vite/bin/vite.js build, cwd web/frontend):
+  OK — 30 modules transformed, 0 error (jumlah modul sama seperti sebelumnya).
+
+Tidak dijalankan: full-project build/test di luar cakupan; check lain yang
+tidak relevan. (Catatan environment: `npm` tidak tersedia di subprocess
+AETHER — pre-existing; build dijalankan via node langsung.)
 
 --------------------------------------------------------------------
-VALIDATION
+4. LIMITATION / BELUM DIVERIFIKASI
 --------------------------------------------------------------------
-- Production build OK: `node node_modules/vite/bin/vite.js build`
-  -> 30 modules transformed, 0 errors.
-- Bundle output memuat reportHtml + class "md act-report" dan TIDAK memuat
-  "readmore".
-- scripts/check_workbench.py step [2] gagal karena assertion lama
-  ("Agent Workspace"/"Recent Projects") — PRE-EXISTING, tidak terkait perubahan
-  ini. Assertion step [8] (event agent_commentary/tool_called/tool_completed/
-  observation_received + label AGENT/TOOL/RESULT/OBSERVATION) tetap terpenuhi.
-- Tidak ada perubahan pada penanganan event lain (tool_called, tool_completed,
-  observation_received, task_failed, task_cancelled).
+- Verifikasi mode bersifat struktural + deterministik (registry & prompt)
+  memakai FakeProvider. Efek "terasa" Quick vs Investigate pada model cloud
+  nyata (kualitas jawaban LLM) tidak diuji e2e dengan API key.
+- Belum ada test UI interaktif (klik tombol mode) — validasi frontend lewat
+  build produksi + asersi statis pada api.js/ConsultantChat.vue.
+- Prompt Quick sengaja tidak menyebut nama tool investigasi; namun karena
+  constraint hanya "tidak didaftarkan", bila di masa depan registry Quick
+  berubah, prompt perlu disesuaikan agar konsisten.
+- Bible READ di Quick tetap lewat konteks system message (bukan tool read
+  Bible terpisah, karena memang tidak ada tool tersebut di arsitektur).
+- `normalize_consultant_mode` memetakan nilai tak dikenal ke "quick" (fail-
+  safe); mode typo tidak menghasilkan error, hanya fallback ke default.
 
---------------------------------------------------------------------
-CATATAN
---------------------------------------------------------------------
-- Truncation 140 char pada summarizeObservation() (baris OBSERVATION tool)
-  sengaja TIDAK diubah: itu untuk ringkasan observasi tool, bukan isi Agent
-  Report, dan tugas meminta penyesuaian truncation "hanya untuk Agent Report".
-- Karena sumber "…" (600 char) berada di backend dan di luar batas tugas,
-  perbaikan frontend difokuskan menampilkan report final yang UTUH dari
-  task_completed.data.result (sumber isi yang lengkap).
+====================================================================
+STATUS: IMPLEMENTED & DIVERIFIKASI (structural + build). 
+Default mode = quick. Quick tidak mendapat project inspection tools;
+Investigate tetap mendapat tools Consultant yang sekarang.
+====================================================================

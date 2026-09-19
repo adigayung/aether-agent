@@ -36,6 +36,7 @@ from agent_ai.consultant import (  # noqa: E402
     ConsultantService,
     build_consultant_permission_manager,
     build_consultant_registry,
+    build_consultant_system_prompt,
     extract_task_proposal,
 )
 from agent_ai.consultant.tools import (  # noqa: E402
@@ -111,7 +112,12 @@ def _run(root: Path) -> int:
     ]
     service = ConsultantService()
     provider = FakeProvider(script)
-    result = service.consult("Tolong analisa fixture ini dan buat task", provider=provider, root=str(root))
+    result = service.consult(
+        "Tolong analisa fixture ini dan buat task",
+        provider=provider,
+        root=str(root),
+        mode="investigate",
+    )
 
     assert result.status == "done", result.status
     assert "Findings" in result.reply, result.reply
@@ -119,6 +125,7 @@ def _run(root: Path) -> int:
     tools_used = {e["tool"] for e in result.tool_events}
     assert "search_code" in tools_used, tools_used
     assert "update_project_bible" in tools_used, tools_used
+    assert result.mode == "investigate", result.mode
     # Project Bible dibaca sebagai konteks awal (system message ke LLM).
     joined = "\n".join(
         (m.get("content") or "") for m in (provider.last_messages or []) if isinstance(m, dict)
@@ -136,14 +143,45 @@ def _run(root: Path) -> int:
     assert "add(a,b)" in facts.read_text(encoding="utf-8"), "knowledge harus tersimpan di Bible"
     print("[2] Project Bible update OK -> .aether/bible/facts.md")
 
-    # 3) Boundary: registry tanpa tool tulis/hapus/pindah.
-    reg = build_consultant_registry(root)
+    # 3) Boundary: registry INVESTIGATE (default) memuat tool investigasi,
+    #    tanpa tool tulis/hapus/pindah.
+    reg = build_consultant_registry(root, mode="investigate")
     names = set(reg.list())
     for forbidden in ("write_file", "edit_file", "delete_file", "move_file"):
         assert forbidden not in names, f"registry tidak boleh memuat {forbidden}"
     for required in ("list_files", "read_file", "search_code", "run_command", "update_project_bible"):
         assert required in names, f"registry harus memuat {required}"
-    print(f"[3] registry READ-ONLY OK -> {sorted(names)}")
+    print(f"[3] registry INVESTIGATE OK -> {sorted(names)}")
+
+    # 3b) Boundary: registry QUICK TIDAK memuat tool investigasi project;
+    #     hanya update_project_bible (Bible read via konteks, Bible update via tool).
+    reg_quick = build_consultant_registry(root, mode="quick")
+    names_quick = set(reg_quick.list())
+    for forbidden in (
+        "list_files",
+        "read_file",
+        "search_code",
+        "run_command",
+        "write_file",
+        "edit_file",
+        "delete_file",
+        "move_file",
+    ):
+        assert forbidden not in names_quick, f"QUICK tidak boleh memuat {forbidden}"
+    assert names_quick == {"update_project_bible"}, names_quick
+    print(f"[3b] registry QUICK OK -> {sorted(names_quick)} (tanpa tool investigasi)")
+
+    # 3c) Prompt per-mode: Quick melarang investigasi; Investigate mengizinkannya.
+    quick_prompt = build_consultant_system_prompt("quick")
+    inv_prompt = build_consultant_system_prompt("investigate")
+    assert "AETHER Consultant" in quick_prompt and "AETHER Consultant" in inv_prompt
+    assert "QUICK" in quick_prompt, "prompt quick harus menandai mode QUICK"
+    assert "TIDAK memiliki tool investigasi" in quick_prompt, quick_prompt
+    for tool_name in ("list_files", "read_file", "search_code", "run_command"):
+        assert tool_name not in quick_prompt, f"prompt quick tidak boleh menyebut tool {tool_name}"
+    assert "INVESTIGATE" in inv_prompt, "prompt investigate harus menandai mode"
+    assert "search_code" in inv_prompt and "run_command" in inv_prompt, inv_prompt
+    print("[3c] prompt per-mode OK -> Quick tanpa investigasi, Investigate dengan tool project")
 
     # 4) Boundary: permission policy menolak write / delete-move.
     pm = build_consultant_permission_manager()
@@ -218,7 +256,7 @@ def _run(root: Path) -> int:
     # validasi: message kosong -> 400
     bad = client.post("/api/consultant/consult", data="{}", content_type="application/json")
     assert bad.status_code == 400, bad.status_code
-    # sukses: -> 200 + task_proposal
+    # sukses: -> 200 + task_proposal. Tanpa 'mode' -> default "quick".
     good = client.post(
         "/api/consultant/consult",
         data='{"message": "buat task demo"}',
@@ -228,7 +266,28 @@ def _run(root: Path) -> int:
     body = good.json()
     assert body["task_proposal"] == "Goal: demo task", body
     assert body["session_id"], body
-    print("[7] Gateway/HTTP OK -> POST /api/consultant/consult + validasi 400")
+    assert body["mode"] == "quick", f"default mode harus 'quick', dapat {body.get('mode')!r}"
+    # mode "investigate" diteruskan apa adanya.
+    inv = client.post(
+        "/api/consultant/consult",
+        data='{"message": "buat task demo", "mode": "investigate"}',
+        content_type="application/json",
+    )
+    assert inv.status_code == 200, (inv.status_code, inv.content)
+    assert inv.json()["mode"] == "investigate", inv.json()
+    print("[7] Gateway/HTTP OK -> POST /api/consultant/consult + validasi 400 + mode")
+
+    # 7c) Frontend mengirim 'mode' (default quick) ke endpoint Consultant.
+    api_js = (PROJECT_ROOT / "web" / "frontend" / "src" / "api.js").read_text(encoding="utf-8")
+    assert "body.mode = mode" in api_js, "api.js harus mengirim field 'mode'"
+    assert 'mode = "quick"' in api_js, "api.js default mode harus 'quick'"
+    chat_vue = (
+        PROJECT_ROOT / "web" / "frontend" / "src" / "components" / "ConsultantChat.vue"
+    ).read_text(encoding="utf-8")
+    assert 'const mode = ref("quick")' in chat_vue, "ConsultantChat default mode = quick"
+    assert "mode: mode.value" in chat_vue, "ConsultantChat harus mengirim mode tiap request"
+    assert "setMode" in chat_vue and '"investigate"' in chat_vue, "ConsultantChat harus punya pilihan mode"
+    print("[7c] frontend OK -> api.js + ConsultantChat.vue mengirim mode (default quick)")
 
     # Task Proposal dapat dikirim lewat alur task EXISTING (create_task).
     rec = gw_service.create_task(task=body["task_proposal"])
