@@ -418,7 +418,6 @@ class PermissionConfig:
 class Settings:
     """Objek konfigurasi utama aplikasi."""
 
-    default_provider: str = field(default_factory=lambda: _get("DEFAULT_PROVIDER", "ollama"))
     log_level: str = field(default_factory=lambda: _get("LOG_LEVEL", "INFO"))
 
     # Parameter generasi default (dipakai provider bila tidak di-override)

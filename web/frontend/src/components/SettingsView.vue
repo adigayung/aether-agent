@@ -51,6 +51,12 @@ const providerTypeSpec = computed(() => {
   for (const t of providerTypes.value) map[t.key] = t;
   return map;
 });
+// Provider type terpilih butuh API key? (Ollama lokal: tidak).
+// Dipakai untuk menyembunyikan field api_key_env HANYA pada provider lokal.
+const providerNeedsApiKey = computed(() => {
+  const spec = providerTypeSpec.value[providerForm.provider_type];
+  return spec ? spec.requires_api_key !== false : true;
+});
 const providerTypeLabel = computed(() => {
   const map = {};
   for (const t of providerTypes.value) map[t.key] = t.label;
@@ -114,6 +120,8 @@ function onProviderTypeChange() {
   const spec = providerTypeSpec.value[providerForm.provider_type];
   if (!spec) return;
   providerForm.api_url = spec.default_api_url || "";
+  // Provider lokal (Ollama) tidak butuh API key: kosongkan api_key_env.
+  // Provider cloud tetap memakai <PREFIX>_API_KEY seperti sebelumnya.
   providerForm.api_key_env = spec.requires_api_key ? `${spec.env_prefix}_API_KEY` : "";
 }
 
@@ -121,7 +129,8 @@ function submitProvider() {
   const payload = {
     name: providerForm.name,
     provider_type: providerForm.provider_type,
-    api_key_env: providerForm.api_key_env,
+    // Provider lokal (Ollama) selalu dikirim tanpa api_key_env.
+    api_key_env: providerNeedsApiKey.value ? providerForm.api_key_env : "",
     api_url: providerForm.api_url,
   };
   run(async () => {
@@ -292,6 +301,7 @@ onMounted(load);
             <option v-for="t in providerTypes" :key="t.key" :value="t.key">{{ t.label }}</option>
           </select>
           <input
+            v-if="providerNeedsApiKey"
             v-model="providerForm.api_key_env"
             class="sv-input"
             placeholder="Nama variabel .env API key (mis. OPENROUTER_API_KEY)"

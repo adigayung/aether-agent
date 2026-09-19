@@ -11,13 +11,14 @@ Fixture project dibuat di J:\\Agent_Ai\\dummy_test\\model_selection_fixture dan
 dibersihkan setelah test.
 
 Menguji:
-    1. GET /api/config mengembalikan daftar provider+model dari konfigurasi.
+    1. GET /api/config mengembalikan daftar provider instance + model (SQLite).
     2. POST /api/tasks dengan metadata.provider/model diteruskan ke runtime.
     3. Runtime memakai provider yang dipilih (bukan default).
     4. Runtime memakai model yang dipilih (GenerateOptions.model).
     5. Event provider_request/provider_response mencatat provider+model terpilih.
     6. Task berikutnya memakai pilihan terbaru (tanpa restart).
-    7. Tanpa metadata -> memakai default provider (backward compatible).
+    7. Tanpa metadata & tanpa provider instance -> task FAILED (tidak ada
+       default provider dari .env; provider aktif = Provider Instance + Model).
 
 Jalankan:
     python scripts/check_model_selection.py
@@ -112,16 +113,19 @@ def _run() -> int:
 
     client = Client()
 
-    # 1) GET /api/config mengembalikan daftar provider+model dari konfigurasi.
+    # 1) GET /api/config mengembalikan daftar provider instance + model (SQLite).
     resp = client.get("/api/config")
     assert resp.status_code == 200, resp.status_code
     cfg = resp.json()
     assert "providers" in cfg and cfg["providers"], cfg
-    assert "models" in cfg and cfg["models"], cfg
-    for entry in cfg["models"]:
-        assert entry.get("provider") and entry.get("model"), entry
+    # Sumber tunggal provider aktif = Provider Instance + Model (SQLite).
+    assert "provider_instances" in cfg, cfg
+    for inst in cfg["provider_instances"]:
+        assert inst.get("id") and inst.get("provider_type"), inst
+        for m in inst.get("models") or []:
+            assert m.get("id") and m.get("model_name"), m
     print(f"[1] GET /api/config OK -> providers={cfg['providers']}")
-    print(f"    models={cfg['models']}")
+    print(f"    provider_instances={len(cfg['provider_instances'])} instance(s)")
 
     # Untuk menguji provider+model yang benar-benar dipakai, kita monkeypatch
     # get_provider agar mengembalikan provider recording sesuai nama.
@@ -134,12 +138,16 @@ def _run() -> int:
     original_get_provider = registry_mod.get_provider
     records = {}
 
-    def fake_get_provider(name=None):
-        from agent_ai.config.settings import settings
-
-        resolved = name or settings.default_provider
-        provider, record = _make_recording_provider(resolved)
-        records[resolved] = record
+    def fake_get_provider(name):
+        # Nama provider WAJIB eksplisit (tidak ada default dari .env).
+        # Meniru registry.get_provider: nama kosong -> ValueError.
+        if not name or not str(name).strip():
+            raise ValueError(
+                "Nama provider wajib diisi. Provider aktif ditentukan oleh "
+                "Provider Instance + Model (SQLite), bukan .env."
+            )
+        provider, record = _make_recording_provider(name)
+        records[name] = record
         return provider
 
     registry_mod.get_provider = fake_get_provider
@@ -215,9 +223,9 @@ def _run() -> int:
             f"provider=ollama, model={records['ollama']['model']}"
         )
 
-        # 7) Tanpa metadata -> memakai default provider (backward compatible).
-        from agent_ai.config.settings import settings
-
+        # 7) Tanpa metadata & tanpa provider instance -> task FAILED.
+        #    Tidak ada lagi default provider dari .env: provider aktif berasal
+        #    dari Provider Instance + Model (SQLite).
         records.clear()
         resp = client.post(
             "/api/tasks",
@@ -227,9 +235,9 @@ def _run() -> int:
         assert resp.status_code == 201, resp.status_code
         task3_id = resp.json()["task_id"]
         final3 = _wait_for_terminal(service, task3_id)
-        assert final3["status"] == "completed", final3
-        assert settings.default_provider in records, records
-        print(f"[7] tanpa metadata -> default provider OK -> provider={settings.default_provider}")
+        assert final3["status"] == "failed", final3
+        assert not records, f"tidak boleh ada provider dibangun tanpa pilihan: {records}"
+        print("[7] tanpa metadata -> task FAILED (tanpa default provider dari .env) OK")
     finally:
         registry_mod.get_provider = original_get_provider
 

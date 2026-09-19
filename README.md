@@ -139,7 +139,6 @@ Konfigurasi dibaca dari `.env` (via `python-dotenv`). Variabel utama:
 |----------|-----------|
 | `OLLAMA_HOST` | URL server Ollama (default `http://127.0.0.1:11434`) |
 | `OLLAMA_MODEL` | Model Ollama (default `qwen2.5-coder:7b`) |
-| `DEFAULT_PROVIDER` | Provider default (default `ollama`) |
 | `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` | Placeholder provider cloud (tahap berikutnya) |
 
 API key cloud **tidak** ditulis di source code, hanya di `.env`.

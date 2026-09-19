@@ -6,7 +6,8 @@ response terstruktur.
 
 Prinsip:
     - Agent TIDAK bergantung pada provider konkret (Ollama/DeepSeek/OpenAI).
-    - Provider dipilih lewat nama (default dari settings.default_provider).
+    - Provider dipilih lewat nama eksplisit (dari Provider Instance + Model
+      di SQLite), bukan dari .env.
     - Error provider diteruskan apa adanya (tidak disembunyikan).
 
 Belum ada: tool calling, planner, memory, Git, command execution,
@@ -18,7 +19,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from agent_ai.config.settings import settings
 from agent_ai.providers.base import (
     BaseProvider,
     GenerateOptions,
@@ -53,10 +53,9 @@ class Agent:
 
     Args:
         provider: instance BaseProvider (opsional). Bila None, provider
-            diambil dari registry berdasarkan `provider_name` atau
-            `settings.default_provider`.
+            diambil dari registry berdasarkan `provider_name`.
         provider_name: nama provider di registry (mis. "ollama", "deepseek",
-            "openai"). Bila None, gunakan settings.default_provider.
+            "openai"). WAJIB diisi bila `provider` tidak diberikan.
         options: GenerateOptions default untuk setiap pemanggilan.
     """
 
@@ -124,4 +123,5 @@ class Agent:
         return self.provider.is_available()
 
     def __repr__(self) -> str:  # pragma: no cover - bantuan debug
-        return f"<Agent provider={self._provider_name or settings.default_provider!r}>"
+        name = self._provider_name or (self._provider.name if self._provider else None)
+        return f"<Agent provider={name!r}>"

@@ -83,7 +83,9 @@ def _run() -> int:
             assert value.strip() == "", f"template tidak boleh berisi nilai untuk '{key.strip()}'"
     # Tidak boleh ada pola secret yang jelas.
     assert not re.search(r"sk-[A-Za-z0-9]{8,}", text), "template tidak boleh memuat API key nyata"
-    assert "DEFAULT_PROVIDER" in text, "template harus memuat DEFAULT_PROVIDER"
+    # Provider aktif TIDAK lagi ditentukan lewat .env (legacy DEFAULT_PROVIDER
+    # dihapus). Pemilihan provider = Provider Instance + Model (SQLite).
+    assert "DEFAULT_PROVIDER" not in text, "template tidak boleh memuat DEFAULT_PROVIDER (legacy)"
     print("[4] template environment deployment ada & tanpa credential OK -> deployment.template")
 
     # 5) script menjalankan backend & frontend tersedia.

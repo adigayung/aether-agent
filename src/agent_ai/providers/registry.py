@@ -1,15 +1,15 @@
 """Registry provider AI.
 
 Mendaftarkan provider berdasarkan nama dan mengambilnya kembali.
-Agent Core cukup memanggil `get_provider("ollama")` atau
-`get_provider(settings.default_provider)` lalu memakai `provider.generate(...)`.
+Agent Core cukup memanggil `get_provider("ollama")` lalu memakai
+`provider.generate(...)`. Nama provider WAJIB eksplisit: pemilihan provider
+aktif berasal dari Provider Instance + Model (SQLite), bukan dari .env.
 """
 
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Type
 
-from agent_ai.config.settings import settings
 from agent_ai.providers.base import BaseProvider
 from agent_ai.providers.deepseek import DeepSeekProvider
 from agent_ai.providers.ollama import OllamaProvider
@@ -61,10 +61,20 @@ registry.register(OpenRouterProvider)
 registry.register(OpenAICompatibleProvider)
 
 
-def get_provider(name: Optional[str] = None) -> BaseProvider:
-    """Ambil provider berdasarkan nama.
+def get_provider(name: str) -> BaseProvider:
+    """Ambil provider berdasarkan nama (WAJIB eksplisit).
 
-    Bila `name` None, gunakan provider default dari settings.
+    Pemilihan provider aktif berasal dari Provider Instance + Model (SQLite),
+    bukan dari .env. Tidak ada fallback ke provider default.
+
+    Raises:
+        ValueError: bila `name` kosong.
+        KeyError: bila nama provider belum terdaftar.
     """
-    return registry.get(name or settings.default_provider)
+    if not name or not str(name).strip():
+        raise ValueError(
+            "Nama provider wajib diisi. Provider aktif ditentukan oleh "
+            "Provider Instance + Model (SQLite), bukan .env."
+        )
+    return registry.get(name)
 

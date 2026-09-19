@@ -90,7 +90,7 @@ _PROVIDER_TYPES: Dict[str, ProviderTypeSpec] = {
             key="ollama",
             label="Ollama (lokal)",
             env_prefix="OLLAMA",
-            default_api_url="http://127.0.0.1:11434",
+            default_api_url="http://localhost:11434",
             requires_api_key=False,
         ),
     )

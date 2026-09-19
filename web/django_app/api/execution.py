@@ -16,13 +16,14 @@ Eksekusi dijalankan di background thread daemon (minimal, tanpa dependency
 baru). Ini BUKAN Task Queue subsystem / worker framework: hanya satu thread
 per task agar request HTTP tidak blocking. Technical debt dicatat di laporan.
 
-Sumber konfigurasi provider (dua jalur, provider-agnostic):
-    1. DEFAULT (backward compatible): ProviderRegistry AETHER (settings/.env),
-       dipilih lewat `provider_name` + `model_name`.
-    2. KONFIGURASI TERSIMPAN (SQLite): `provider_instance_id` + `model_id`.
-       Bila diisi, provider dirakit dari api_url/api_key/model instance lewat
-       `agent_ai.providers.factory` (bukan dari settings); `model_name`
-       diabaikan karena model berasal dari konfigurasi tersimpan.
+Sumber konfigurasi provider (provider-agnostic):
+    1. KONFIGURASI TERSIMPAN (SQLite): `provider_instance_id` + `model_id`.
+       Provider dirakit dari api_url/api_key/model instance lewat
+       `agent_ai.providers.factory`; `model_name` diabaikan karena model
+       berasal dari konfigurasi tersimpan. Ini sumber tunggal provider aktif.
+    2. KATALOG REGISTRY (fallback eksplisit): `provider_name` + `model_name`
+       dari ProviderRegistry AETHER. Dipakai hanya bila `provider_name`
+       diberikan eksplisit (mis. verifier); TIDAK ada default dari .env.
 
 Bila provider tidak tersedia (mis. tidak ada API key / server lokal mati),
 task ditandai FAILED dengan error jelas (tidak crash).
@@ -49,8 +50,8 @@ class TaskExecutor:
     Args:
         session_store: SessionStore AETHER (event system existing).
         provider_factory: callable `() -> BaseProvider` opsional. Bila None,
-            provider diambil dari ProviderRegistry AETHER (settings default).
-            Disediakan agar verifier dapat menyuntikkan provider fake.
+            provider diambil dari ProviderRegistry AETHER berdasarkan nama
+            eksplisit. Disediakan agar verifier dapat menyuntikkan provider fake.
         permission_manager: PermissionManager opsional (#54). Bila None,
             dibuat default (dari settings) sehingga policy tetap terpasang.
         runtime_factory: callable opsional untuk membangun AgentRuntime
@@ -99,7 +100,7 @@ class TaskExecutor:
 
         Returns:
             dict hasil `resolve_runtime_config(...)` atau None bila tidak ada
-            provider instance yang dipilih (jalur default/backward compatible).
+            provider instance yang dipilih (jalur registry eksplisit).
 
         Raises:
             LLMConfigError: instance/model tidak ditemukan atau tidak valid.
@@ -123,10 +124,11 @@ class TaskExecutor:
 
         Args:
             provider_name: nama provider eksplisit (mis. "deepseek", "ollama").
-                Bila None, memakai provider default dari settings AETHER.
+                WAJIB diisi bila `resolved_config` tidak diberikan (tidak ada
+                default dari .env).
             resolved_config: konfigurasi provider instance dari SQLite. Bila
-                diisi, provider dirakit dari api_url/api_key/model tersimpan
-                (bukan dari settings), lewat `providers.factory`.
+                diisi, provider dirakit dari api_url/api_key/model tersimpan,
+                lewat `providers.factory`.
         """
         if self._provider_factory is not None:
             return self._provider_factory()

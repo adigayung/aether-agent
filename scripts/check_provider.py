@@ -114,7 +114,9 @@ def main() -> int:
     if check_registry() != 0:
         return 1
 
-    provider_name = settings.default_provider
+    # Provider dipilih eksplisit (bukan dari .env). Pemilihan provider aktif
+    # di aplikasi berasal dari Provider Instance + Model (SQLite).
+    provider_name = "ollama"
     print("=== Verifikasi provider.generate() end-to-end ===")
     print(f"Provider : {provider_name}")
     print(f"Model    : {settings.ollama.model}")

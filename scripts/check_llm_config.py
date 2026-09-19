@@ -155,7 +155,8 @@ def main() -> int:
         ollama = svc.create_provider_instance(name="Ollama Lokal", provider_type="ollama")
         print(f"create ollama       : id={ollama.id} api_key_env={ollama.api_key_env!r}")
         assert ollama.api_key_env == ""
-        assert ollama.api_url == "http://127.0.0.1:11434"
+        # Default Base API URL Ollama (lokal, tanpa API key).
+        assert ollama.api_url == "http://localhost:11434"
 
         # Update.
         primary = svc.update_provider_instance(

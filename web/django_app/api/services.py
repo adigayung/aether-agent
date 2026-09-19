@@ -14,12 +14,12 @@ AETHER Runtime di background thread daemon (non-blocking HTTP). TIDAK ada
 background queue / worker framework / database. State task disimpan di memori
 proses. Event eksekusi memakai SessionStore AETHER (event system existing).
 
-Konfigurasi provider (dua jalur, provider-agnostic): provider instance + model
-opsional dibaca dari LLMConfigService (SQLite GLOBAL `data/aether.db`, tabel
-yang sama dengan ProjectStore) via metadata task (`provider_instance_id`,
-`model_id`). Bila kosong, jalur default (ProviderRegistry + settings) dipakai
-sehingga backward compatible. `get_config()` juga mengekspos daftar provider
-instance + model ke UI agar pilihan tidak di-hardcode di frontend.
+Konfigurasi provider (provider-agnostic): provider instance + model dibaca dari
+LLMConfigService (SQLite GLOBAL `data/aether.db`, tabel yang sama dengan
+ProjectStore) via metadata task (`provider_instance_id`, `model_id`). Sumber
+tunggal pemilihan provider aktif = Provider Instance -> Model (SQLite), BUKAN
+.env. `get_config()` juga mengekspos daftar provider instance + model ke UI
+agar pilihan tidak di-hardcode di frontend.
 """
 
 from __future__ import annotations
@@ -194,45 +194,21 @@ class GatewayService:
     # Config (dibaca dari AETHER settings; TIDAK hardcode di frontend)
     # ------------------------------------------------------------------ #
     def get_config(self) -> Dict[str, Any]:
-        """Konfigurasi provider/model/mode dari AETHER settings.
+        """Konfigurasi provider/model/mode dari AETHER.
 
         Frontend TIDAK meng-hardcode nama model/provider: semua dibaca dari
         konfigurasi AETHER yang sudah ada (provider-agnostic).
 
-        `providers` = daftar nama provider terdaftar (ProviderRegistry).
-        `models`    = daftar {provider, model} yang benar-benar tersedia dari
-                      konfigurasi AETHER (.env). Dipakai model selector UI agar
-                      pilihan provider+model dapat diteruskan ke runtime.
+        Sumber tunggal pemilihan provider aktif = Provider Instance + Model
+        (SQLite). `providers` = daftar nama provider terdaftar (ProviderRegistry,
+        hanya katalog), `provider_instances` = instance + nested model tersimpan,
+        `provider_instance_id`/`model_id` = default terpilih.
         """
         from agent_ai.config.settings import settings
         from agent_ai.providers.registry import registry
 
-        provider = settings.default_provider
-        # Model default per provider (dari settings AETHER, bukan hardcode UI).
-        model = ""
-        if provider == "ollama":
-            model = settings.ollama.model
-        elif provider == "deepseek":
-            model = settings.deepseek.model
-        elif provider == "openai":
-            model = settings.openai.model
-        elif provider == "openrouter":
-            model = settings.openrouter.model
-
-        # Daftar provider+model yang benar-benar tersedia dari konfigurasi
-        # AETHER. Sumber tunggal: settings provider (bukan mapping baru).
-        models: List[Dict[str, str]] = []
-        for name in registry.list_providers():
-            cfg = getattr(settings, name, None)
-            cfg_model = getattr(cfg, "model", "") if cfg is not None else ""
-            if cfg_model:
-                models.append({"provider": name, "model": cfg_model})
-
-        # Mode = retrieval profile AETHER (#40): minimal | balanced | deep.
-        # Dipetakan ke label user (Fast/Balanced/Deep) di frontend, bukan
-        # routing baru.
-
         # Provider instance + model dari konfigurasi LLM tersimpan (SQLite).
+        # Sumber tunggal pemilihan provider aktif: Provider Instance -> Model.
         # Frontend membaca dari sini (bukan hardcode) sehingga task dapat
         # menunjuk provider_instance_id + model_id yang benar-benar tersimpan.
         instances: List[Dict[str, Any]] = []
@@ -255,10 +231,7 @@ class GatewayService:
                 break
 
         return {
-            "provider": provider,
-            "model": model,
             "providers": registry.list_providers(),
-            "models": models,
             "provider_instances": instances,
             "provider_instance_id": default_instance_id,
             "model_id": default_model_id,

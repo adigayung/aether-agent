@@ -62,13 +62,12 @@ def _run() -> int:
     import api.services as services_mod
     from api.execution import TaskExecutor
 
-    # Provider NYATA dari konfigurasi AETHER.
+    # Provider NYATA dari konfigurasi AETHER. Provider dipilih EKSPLISIT
+    # (bukan dari .env): pemilihan provider aktif = Provider Instance + Model.
     provider_name = "deepseek"
     model_name = settings.deepseek.model
     print(f"Provider dipilih : {provider_name}")
     print(f"Model dipilih    : {model_name}")
-    print(f"Default provider : {settings.default_provider} (harus BERBEDA)")
-    assert provider_name != settings.default_provider, "test butuh provider != default"
 
     store = services_mod.InMemorySessionStore()
     executor_bridge = TaskExecutor(store)

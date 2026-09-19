@@ -11,10 +11,11 @@
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Provider default
+# Provider aktif
 # -----------------------------------------------------------------------------
-# Pilihan: ollama | deepseek | openrouter | openai
-DEFAULT_PROVIDER=ollama
+# Provider aktif TIDAK lagi ditentukan lewat .env. Pilih Provider Instance +
+# Model dari halaman Settings (tersimpan di SQLite `data/aether.db`).
+# .env HANYA menyimpan secret (API key), bukan menentukan provider aktif.
 
 # -----------------------------------------------------------------------------
 # Ollama (lokal, tanpa API key)

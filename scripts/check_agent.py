@@ -18,7 +18,6 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from agent_ai.config.settings import settings  # noqa: E402
 from agent_ai.core import Agent  # noqa: E402
 from agent_ai.providers.base import GenerateOptions  # noqa: E402
 
@@ -30,12 +29,18 @@ TASK = (
 
 def main() -> int:
     print("=== Verifikasi Agent Core -> Registry -> Ollama -> Qwen ===")
-    print(f"Default provider : {settings.default_provider}")
+    # Provider dipilih eksplisit (bukan dari .env). Pemilihan provider aktif
+    # di aplikasi berasal dari Provider Instance + Model (SQLite).
+    provider_name = "ollama"
+    print(f"Provider         : {provider_name}")
     print()
 
     # Agent tanpa hardcode provider: provider diambil dari registry
-    # berdasarkan settings.default_provider.
-    agent = Agent(options=GenerateOptions(temperature=0.2, max_tokens=256))
+    # berdasarkan nama eksplisit.
+    agent = Agent(
+        provider_name=provider_name,
+        options=GenerateOptions(temperature=0.2, max_tokens=256),
+    )
     print(f"Provider aktif   : {agent.provider_name}")
     print(f"Tersedia         : {agent.is_available()}")
     print()
