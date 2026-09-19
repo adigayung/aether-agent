@@ -16,7 +16,13 @@
 //
 // Bukan terminal mentah: observation ditampilkan sebagai ringkasan (bukan dump
 // JSON panjang). Semua event tetap berasal dari sistem yang sudah ada.
+//
+// Agent Report final (task_completed.data.result) ditampilkan UTUH di alur ini
+// tanpa truncate/ellipsis, memakai Markdown renderer yang sama dengan
+// ReportViewer (web/frontend/src/markdown.js). Report panjang mengikuti tinggi
+// container activity yang memang scrollable.
 import { computed, nextTick, ref, watch } from "vue";
+import { renderMarkdown } from "../markdown.js";
 
 const props = defineProps({
   events: { type: Array, default: () => [] },
@@ -113,9 +119,21 @@ const timeline = computed(() => {
           ts: e.ts,
         });
         break;
-      case "task_completed":
-        items.push({ key: i, kind: "status", label: "AGENT", text: "Task completed", ts: e.ts });
+      case "task_completed": {
+        // Agent Report final = data.result (isi UTUH dari log/SSE, bukan
+        // preview terpotong). Dirender penuh sebagai Markdown; tidak ada
+        // truncate/ellipsis dan tidak ada penanda "[readmore]".
+        const report = typeof d.result === "string" ? d.result : "";
+        items.push({
+          key: i,
+          kind: "status",
+          label: "AGENT",
+          text: "Task completed",
+          ts: e.ts,
+          reportHtml: report ? renderMarkdown(report) : "",
+        });
         break;
+      }
       case "task_failed":
         items.push({ key: i, kind: "status", label: "AGENT", text: "Task failed", ts: e.ts });
         break;
@@ -161,6 +179,10 @@ watch(timeline, scrollToLatest, { flush: "post" });
         <span v-else-if="item.kind === 'observation'" class="act-text">
           {{ item.tool }} → {{ item.summary }}
         </span>
+        <!-- Agent Report final: ditampilkan UTUH (tanpa truncate/ellipsis).
+             Markdown mengikuti renderer yang sama dengan ReportViewer. -->
+        <!-- eslint-disable-next-line vue/no-v-html -->
+        <div v-if="item.reportHtml" class="md act-report" v-html="item.reportHtml"></div>
       </span>
     </div>
 

@@ -1,114 +1,100 @@
 ====================================================================
-AETHER — Consultant Chat UI Fix: Task Proposal Floating / Terpotong
+AETHER — Agent Report UI Fix: tampilkan isi report UTUH (tanpa truncate)
 ====================================================================
-Scope: FRONTEND ONLY (Consultant Chat). Tidak ada perubahan logic
-Python/backend, ConsultantService, API, orchestrator, task creation,
-Task Proposal generation, maupun Project Bible.
+Scope: FRONTEND ONLY (Agent Activity / Agent Report). Tidak ada perubahan
+logic Python/backend, Agent execution, TaskExecutor, logging .aether/log,
+Report API, report generation, maupun Task lifecycle.
 
 --------------------------------------------------------------------
 1. FILE YANG DIUBAH
 --------------------------------------------------------------------
-1) web/frontend/src/components/ConsultantChat.vue
-   - Template: blok <div class="consultant-proposal"> DIPINDAHKAN dari
-     sibling .consultant-messages menjadi CHILD di dalam
-     .consultant-messages (area percakapan yang scrollable).
-   - Script/behavior: TIDAK DIUBAH (lastProposal, runTask, emit
-     "run-task", consult(), dll tetap sama).
+1) web/frontend/src/components/AgentActivity.vue
+   - import renderMarkdown dari shared renderer "../markdown.js"
+     (renderer yang SAMA dengan ReportViewer).
+   - case "task_completed": sekarang mengambil data.result (Agent Report
+     final) dan merender penuh sebagai Markdown (reportHtml). Tidak ada
+     truncate/ellipsis pada isi report.
+   - Template: menambahkan blok <div class="md act-report" v-html=...>
+     di dalam baris timeline (di dalam scroll container .act-body).
 
 2) web/frontend/src/styles.css
-   - Rule .consultant-proposal disesuaikan agar mengalir natural sebagai
-     bagian alur percakapan (menghapus max-height & overflow-y internal,
-     mengubah border-top menjadi border penuh + border-radius).
+   - Menambahkan rule .act-report (container report di timeline) + reset
+     margin elemen markdown terakhir. Tidak ada clipper/line-clamp/max-height
+     pada report; overflow ditangani container .act-body yang memang scrollable.
 
-Tidak ada file lain yang disentuh. Tidak ada perubahan backend/Python.
+Tidak ada file lain yang disentuh. Tidak ada file Python/backend yang diubah.
 
 --------------------------------------------------------------------
-2. PENYEBAB BUG
+2. PENYEBAB TRUNCATION
 --------------------------------------------------------------------
-Modal Consultant (.modal.consultant-m) adalah flex column dengan region:
-  [1] .consultant-head     (flex-shrink: 0)
-  [2] .consultant-messages (flex: 1 1 auto; overflow-y: auto)  -> SCROLLABLE
-  [3] .consultant-proposal (flex: 0 0 auto; max-height: 32%; overflow-y: auto)
-  [4] .consultant-foot     (flex-shrink: 0)                    -> composer
+Temuan inspeksi (bukan asumsi):
 
-Di template, blok Task Proposal berada SEBAGAI SIBLING dari
-.consultant-messages (bukan di dalamnya). Akibatnya:
-  a) Card tidak menjadi bagian alur pesan — ia "mengambang" sebagai panel
-     terpisah tepat di atas composer.
-  b) Card dibatasi max-height: 32% sehingga konten yang lebih panjang
-     terpotong (clipped) dan punya scrollbar sendiri yang terpisah dari
-     percakapan.
-  c) Karena posisinya terjepit antara area scroll percakapan dan composer
-     yang fixed, bagian bawah card tampak tertutup/terpotong oleh area
-     form chat dan tidak bisa di-scroll bersama percakapan.
+a) String literal "[readmore]" TIDAK ADA di seluruh codebase — baik frontend
+   (web/frontend/src) maupun backend (src, web/django_app). Diverifikasi dengan
+   search_code ("readmore", "read more", "[readmore]") dan git history
+   (`git log -S readmore` -> kosong). Jadi tidak ada kode UI yang memotong
+   report dengan penanda tersebut.
+
+b) Isi report final tersimpan UTUH di log: event task_completed memiliki
+   data.result lengkap (contoh task 94442487... = 2014 char; 0fc08d95... =
+   1376 char). Report API membaca task_completed.data.result apa adanya.
+
+c) Teks yang tampak terpotong dengan "…" pada titik penyelesaian ("AGENT —
+   Task completed") adalah pesan/commentary terakhir Agent, yang dipotong oleh
+   BACKEND menjadi 600 char + "…" di:
+       src/agent_ai/core/orchestrator.py :: _extract_commentary()
+       -> `if len(text) > 600: text = text[:600].rstrip() + "…"`
+   Sumber truncation ini ada di layer Agent execution (backend) sehingga TIDAK
+   boleh/tidak diubah sesuai batasan tugas.
+
+d) Di frontend, sebelum perbaikan, event task_completed pada Agent Activity
+   hanya merender teks label "Task completed" dan TIDAK pernah merender isi
+   report. Tidak ditemukan truncation/ellipsis/clamp pada jalur display report
+   (ReportViewer memang sudah menampilkan full + scrollable).
 
 --------------------------------------------------------------------
 3. PERBAIKAN YANG DILAKUKAN
 --------------------------------------------------------------------
-A) ConsultantChat.vue (struktur template):
-   Blok Task Proposal dipindahkan KE DALAM <div class="consultant-messages">
-   (setelah daftar pesan dan indikator "Consultant is investigating…"),
-   sehingga card menjadi item terakhir dari alur message flow di area
-   percakapan yang scrollable. Composer (.consultant-foot) tetap menjadi
-   sibling terpisah di bawah (flex-shrink: 0) — tidak berubah.
-
-B) styles.css (.consultant-proposal):
-   SEBELUM:
-     .consultant-proposal {
-       flex: 0 0 auto;
-       max-height: 32%;
-       overflow-y: auto;
-       border-top: 1px solid var(--border-soft);
-       background: rgba(139, 92, 246, 0.08);
-       padding: 10px 18px 12px;
-     }
-   SESUDAH:
-     .consultant-proposal {
-       flex: 0 0 auto;
-       border: 1px solid rgba(139, 92, 246, 0.4);
-       border-radius: 12px;
-       background: rgba(139, 92, 246, 0.08);
-       padding: 10px 12px 12px;
-     }
-   -> max-height/overflow internal dihapus agar card tumbuh sesuai isi dan
-      ikut ter-scroll bersama percakapan (overflow ditangani oleh
-      .consultant-messages yang sudah punya overflow-y: auto + min-height: 0).
-   -> border-top + padding lama (panel bawah terpisah) diubah menjadi
-      border penuh + radius agar tampil sebagai kartu di dalam alur chat.
-
-Styling inti Task Proposal TIDAK diubah: .cp-head, .cp-title,
-.cp-body, .run-task-btn, warna background violet translusen, dsb tetap.
+- Agent Report final (task_completed.data.result) kini ditampilkan UTUH di alur
+  Agent Activity pada baris "AGENT — Task completed", memakai Markdown renderer
+  bersama (web/frontend/src/markdown.js) — sama seperti ReportViewer.
+- Tidak ada truncate/ellipsis dan tidak ada "[readmore]".
+- Report panjang mengikuti tinggi container dan dapat di-scroll melalui
+  .act-body (overflow-y: auto) yang sudah ada — mekanisme scroll tidak dihapus.
+- Markdown yang sudah didukung (heading, list, code block, blockquote, hr,
+  inline) tetap dirender dengan behavior yang sama (tidak diubah).
+- Report tetap berada dalam alur Agent Activity / Task History seperti sekarang
+  (ReportViewer modal + tombol Report tidak diubah).
 
 --------------------------------------------------------------------
-4. BEHAVIOR / LOGIC TASK PROPOSAL
+4. KONFIRMASI: TIDAK ADA PERUBAHAN PYTHON/BACKEND
 --------------------------------------------------------------------
-- Card tetap muncul hanya untuk proposal terakhir (lastProposal computed).
-- Tombol "Run Task" tetap memanggil runTask() -> emit("run-task", proposal)
-  -> alur task existing di App.vue. Tidak ada perubahan.
-- Tidak ada perubahan pada pemanggilan consult(), payload, session,
-  provider/model, maupun rendering markdown.
-- Composer/form chat tetap di bawah seperti semula.
+- Tidak ada file .py yang dibuat/diubah/dihapus.
+- Tidak menyentuh: AgentRuntime, TaskExecutor, TaskState/state machine,
+  SessionStore, SSE contract, Activity/Report/Task History API, .aether/log,
+  report generation, maupun Task lifecycle.
+- Perubahan hanya pada 2 file frontend (lihat bagian 1).
 
 --------------------------------------------------------------------
-5. VALIDASI
+VALIDATION
 --------------------------------------------------------------------
-- Frontend production build via node node_modules/vite/bin/vite.js build:
-  SUCCESS — 30 modules transformed, 0 errors.
-- grep struktur: hanya 1 kemunculan .consultant-proposal di
-  ConsultantChat.vue (baris 206) dan 1 kemunculan rule di styles.css
-  (baris 2427) — tidak ada duplikasi/sisa blok lama.
-- Tidak ada perubahan pada file Python/backend.
+- Production build OK: `node node_modules/vite/bin/vite.js build`
+  -> 30 modules transformed, 0 errors.
+- Bundle output memuat reportHtml + class "md act-report" dan TIDAK memuat
+  "readmore".
+- scripts/check_workbench.py step [2] gagal karena assertion lama
+  ("Agent Workspace"/"Recent Projects") — PRE-EXISTING, tidak terkait perubahan
+  ini. Assertion step [8] (event agent_commentary/tool_called/tool_completed/
+  observation_received + label AGENT/TOOL/RESULT/OBSERVATION) tetap terpenuhi.
+- Tidak ada perubahan pada penanganan event lain (tool_called, tool_completed,
+  observation_received, task_failed, task_cancelled).
 
 --------------------------------------------------------------------
-6. CATATAN / REMAINING
+CATATAN
 --------------------------------------------------------------------
-- Tidak ada script (scripts/check_*.py) yang menguji struktur
-  ConsultantChat, sehingga validasi diarahkan ke frontend build.
-- npm tidak tersedia di subprocess AETHER (known gap) — build dijalankan
-  langsung via node.
-- Catatan terpisah (di luar scope layout): di ConsultantChat.vue masih
-  ada baris `if (data.task_proposal) lastProposal.value = data.task_proposal;`
-  yang menulis ke computed read-only (no-op + warning di dev). Redundan
-  karena lastProposal sudah diturunkan dari messages. TIDAK diubah pada
-  task ini agar tetap fokus pada perbaikan layout/scroll.
-====================================================================
+- Truncation 140 char pada summarizeObservation() (baris OBSERVATION tool)
+  sengaja TIDAK diubah: itu untuk ringkasan observasi tool, bukan isi Agent
+  Report, dan tugas meminta penyesuaian truncation "hanya untuk Agent Report".
+- Karena sumber "…" (600 char) berada di backend dan di luar batas tugas,
+  perbaikan frontend difokuskan menampilkan report final yang UTUH dari
+  task_completed.data.result (sumber isi yang lengkap).

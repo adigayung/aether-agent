@@ -2197,6 +2197,25 @@ select.input-a {
   color: var(--text-faint);
 }
 
+/* Agent Report final di dalam timeline activity: ditampilkan UTUH (tanpa
+   truncate/ellipsis). Report panjang mengikuti tinggi panel `.act-body` yang
+   sudah scrollable — tidak ada clipper/line-clamp di sini. */
+.act-report {
+  margin-top: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  overflow-wrap: anywhere;
+}
+.act-report.md p:last-child,
+.act-report.md ul:last-child,
+.act-report.md ol:last-child,
+.act-report.md .md-code:last-child,
+.act-report.md .md-quote:last-child {
+  margin-bottom: 0;
+}
+
 /* ---- Agent Report button + modal ---- */
 .block-actions {
   display: flex;
