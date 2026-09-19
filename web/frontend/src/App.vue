@@ -786,8 +786,23 @@ onBeforeUnmount(() => {
                 @click="openComposer"
                 @focus="openComposer"
               />
-              <button class="send-btn" type="button" title="Compose task" @click="openComposer">
+              <button
+                v-if="!isRunning"
+                class="send-btn"
+                type="button"
+                title="Compose task"
+                @click="openComposer"
+              >
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+              </button>
+              <button
+                v-else
+                class="stop-btn"
+                type="button"
+                title="Stop task"
+                @click="stopTask"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
               </button>
             </div>
             <div v-if="error" class="wb-error">{{ error }}</div>

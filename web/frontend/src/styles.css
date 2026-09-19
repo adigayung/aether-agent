@@ -928,6 +928,22 @@ select.input-a {
 .send-btn:hover {
   filter: brightness(1.08);
 }
+.stop-btn {
+  width: 38px;
+  height: 38px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: linear-gradient(135deg, #dc2626, #991b1b);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  flex: 0 0 auto;
+  transition: filter 0.15s ease;
+}
+.stop-btn:hover {
+  filter: brightness(1.1);
+}
 
 /* ---- Page host (tasks/projects/history/settings) ---- */
 .page-host {
