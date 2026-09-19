@@ -590,6 +590,105 @@ class GatewayService:
 
         return {"opened": True, "path": str(target)}
 
+    def reveal_file_in_explorer(self, file_path: str) -> Dict[str, Any]:
+        """Buka Windows Explorer dan highlight file tertentu.
+
+        Path harus berada di dalam active project root.
+        Backend memvalidasi path sebelum membuka Explorer.
+
+        Raises:
+            NotFoundError: bila tidak ada active project.
+            ValidationError: bila path di luar project root atau tidak ditemukan.
+        """
+        active = self.get_active_project()
+        if active is None:
+            raise NotFoundError("Tidak ada active project.")
+
+        root = active.get("root") or active.get("path")
+        if not root:
+            raise ValidationError("Active project tidak memiliki path.")
+
+        from pathlib import Path as _Path
+
+        root_resolved = _Path(root).resolve()
+        target = _Path(file_path)
+        if not target.is_absolute():
+            target = root_resolved / target
+        target = target.resolve()
+
+        # Validasi: path harus berada di dalam project root.
+        if target != root_resolved and root_resolved not in target.parents:
+            raise ValidationError(f"Path '{file_path}' berada di luar project root.")
+
+        if not target.exists():
+            raise ValidationError(f"File tidak ditemukan: {file_path}")
+
+        import os
+        import subprocess
+        import sys
+
+        try:
+            if sys.platform.startswith("win"):
+                # Buka Explorer dan highlight file menggunakan /select,
+                # yang didukung oleh Windows Explorer.
+                subprocess.Popen(
+                    ["explorer", "/select,", str(target)],  # type: ignore[attr-defined]
+                )
+            else:
+                # Non-Windows: buka folder induk.
+                parent = target.parent
+                if sys.platform == "darwin":
+                    subprocess.Popen(["open", str(parent)])
+                else:
+                    subprocess.Popen(["xdg-open", str(parent)])
+        except Exception as exc:  # noqa: BLE001
+            raise ValidationError(f"Gagal membuka Explorer: {exc}") from exc
+
+        return {"opened": True, "path": str(target)}
+
+    def delete_project_entry(self, rel_path: str, entry_type: str = "file") -> Dict[str, Any]:
+        """Hapus file atau folder dari project active.
+
+        Path harus berada di dalam active project root.
+        Untuk folder, isi folder juga dihapus secara rekursif.
+
+        Raises:
+            NotFoundError: bila tidak ada active project.
+            ValidationError: bila path di luar project root atau tidak ditemukan.
+        """
+        active = self.get_active_project()
+        if active is None:
+            raise NotFoundError("Tidak ada active project.")
+
+        root = active.get("root") or active.get("path")
+        if not root:
+            raise ValidationError("Active project tidak memiliki path.")
+
+        from pathlib import Path as _Path
+
+        root_resolved = _Path(root).resolve()
+        target = root_resolved / rel_path
+        target = target.resolve()
+
+        # Validasi: path harus berada di dalam project root.
+        if target != root_resolved and root_resolved not in target.parents:
+            raise ValidationError(f"Path '{rel_path}' berada di luar project root.")
+
+        if not target.exists():
+            raise ValidationError(f"Path tidak ditemukan: {rel_path}")
+
+        import shutil
+
+        try:
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+        except Exception as exc:  # noqa: BLE001
+            raise ValidationError(f"Gagal menghapus '{rel_path}': {exc}") from exc
+
+        return {"deleted": True, "path": str(target)}
+
     def list_project_files(self, path: str = ".") -> Dict[str, Any]:
         """Daftar file project aktif (read-only) via ListFilesTool AETHER.
 

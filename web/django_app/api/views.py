@@ -247,6 +247,41 @@ def open_in_explorer(request: HttpRequest, service: GatewayService) -> JsonRespo
     return _json_response(service.open_active_project_in_explorer())
 
 
+@csrf_exempt
+@require_http_methods(["POST"])
+@_handle
+def reveal_in_explorer(request: HttpRequest, service: GatewayService) -> JsonResponse:
+    """POST /api/reveal-in-explorer -> buka Windows Explorer highlight file.
+
+    Body: { path: absolute filesystem path }.
+    Backend memvalidasi path berada di dalam active project root.
+    """
+    body = _parse_json_body(request)
+    file_path = body.get("path")
+    if not file_path:
+        from api.services import ValidationError
+        raise ValidationError("Field 'path' wajib diisi.")
+    return _json_response(service.reveal_file_in_explorer(file_path))
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@_handle
+def delete_entry(request: HttpRequest, service: GatewayService) -> JsonResponse:
+    """POST /api/delete-entry -> hapus file atau folder dari project.
+
+    Body: { path: relative path from project root, type: "file"|"dir" }.
+    Backend memvalidasi path berada di dalam active project root.
+    """
+    body = _parse_json_body(request)
+    rel_path = body.get("path")
+    entry_type = body.get("type", "file")
+    if not rel_path:
+        from api.services import ValidationError
+        raise ValidationError("Field 'path' wajib diisi.")
+    return _json_response(service.delete_project_entry(rel_path, entry_type))
+
+
 @require_http_methods(["GET"])
 @_handle
 def files(request: HttpRequest, service: GatewayService) -> JsonResponse:
