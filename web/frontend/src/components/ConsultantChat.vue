@@ -199,17 +199,20 @@ onMounted(() => {
         </div>
 
         <div v-if="sending" class="consultant-thinking">Consultant is investigating…</div>
-      </div>
 
-      <div v-if="lastProposal" class="consultant-proposal">
-        <div class="cp-head">
-          <span class="cp-title">Task Proposal</span>
-          <button class="run-task-btn" type="button" @click="runTask">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
-            Run Task
-          </button>
+        <!-- Task Proposal adalah bagian dari message flow: ia hidup di dalam
+             area percakapan yang scrollable, bukan panel floating di atas
+             composer. Karena itu isinya bisa ikut ter-scroll sampai selesai. -->
+        <div v-if="lastProposal" class="consultant-proposal">
+          <div class="cp-head">
+            <span class="cp-title">Task Proposal</span>
+            <button class="run-task-btn" type="button" @click="runTask">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+              Run Task
+            </button>
+          </div>
+          <pre class="cp-body">{{ lastProposal }}</pre>
         </div>
-        <pre class="cp-body">{{ lastProposal }}</pre>
       </div>
 
       <div v-if="error" class="wb-error">{{ error }}</div>

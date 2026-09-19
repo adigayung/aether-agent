@@ -1,371 +1,114 @@
-AETHER CONSULTANT SYSTEM
-=======================
-Laporan implementasi faktual (bukan rencana). Semua klaim di bawah diverifikasi
-dengan menjalankan kode (scripts/check_consultant.py) dan build frontend.
+====================================================================
+AETHER — Consultant Chat UI Fix: Task Proposal Floating / Terpotong
+====================================================================
+Scope: FRONTEND ONLY (Consultant Chat). Tidak ada perubahan logic
+Python/backend, ConsultantService, API, orchestrator, task creation,
+Task Proposal generation, maupun Project Bible.
 
-1. OBJECTIVE
-------------
-Menjadikan Consultant sebagai "otak" AETHER yang TERPISAH dari Agent:
+--------------------------------------------------------------------
+1. FILE YANG DIUBAH
+--------------------------------------------------------------------
+1) web/frontend/src/components/ConsultantChat.vue
+   - Template: blok <div class="consultant-proposal"> DIPINDAHKAN dari
+     sibling .consultant-messages menjadi CHILD di dalam
+     .consultant-messages (area percakapan yang scrollable).
+   - Script/behavior: TIDAK DIUBAH (lastProposal, runTask, emit
+     "run-task", consult(), dll tetap sama).
 
-    User
-      -> Consultant (Project Intelligence + Investigation + Validation +
-                     Recommendation + Task Generator)
-      -> Task Proposal
-      -> User klik Run Task
-      -> Agent (executor yang mengubah project)
+2) web/frontend/src/styles.css
+   - Rule .consultant-proposal disesuaikan agar mengalir natural sebagai
+     bagian alur percakapan (menghapus max-height & overflow-y internal,
+     mengubah border-top menjadi border penuh + border-radius).
 
-Boundary inti:
-    CODE PROJECT   -> Consultant READ ONLY
-    PROJECT BIBLE  -> Consultant READ + UPDATE
+Tidak ada file lain yang disentuh. Tidak ada perubahan backend/Python.
 
-Sebelum task ini, Consultant hanya UI dummy di frontend (modal chat dengan
-pesan hardcode + setTimeout "respons dummy"), tanpa backend, tanpa Project
-Bible, tanpa tool, tanpa boundary.
+--------------------------------------------------------------------
+2. PENYEBAB BUG
+--------------------------------------------------------------------
+Modal Consultant (.modal.consultant-m) adalah flex column dengan region:
+  [1] .consultant-head     (flex-shrink: 0)
+  [2] .consultant-messages (flex: 1 1 auto; overflow-y: auto)  -> SCROLLABLE
+  [3] .consultant-proposal (flex: 0 0 auto; max-height: 32%; overflow-y: auto)
+  [4] .consultant-foot     (flex-shrink: 0)                    -> composer
 
-2. CURRENT CONSULTANT IMPLEMENTATION (SEBELUM)
-----------------------------------------------
-- web/frontend/src/App.vue: state `consultantOpen`, `consultantInput`,
-  `consultantMessages` (3 pesan contoh), fungsi `openConsultant`,
-  `closeConsultant`, `consultantSend` (menambah pesan dummy via setTimeout),
-  `handleConsultantKeydown`, `scrollConsultantToBottom` + 2 `watch`.
-- Modal `.consultant-m` dengan dropdown Provider/Model (binding langsung ke
-  `selectedProviderInstanceId`/`selectedModelId`), area pesan, input + send.
-- TIDAK ADA backend Consultant. TIDAK ADA reasoning/tool/Bible/boundary.
-- CSS Consultant (card + modal) sudah ada di styles.css.
+Di template, blok Task Proposal berada SEBAGAI SIBLING dari
+.consultant-messages (bukan di dalamnya). Akibatnya:
+  a) Card tidak menjadi bagian alur pesan — ia "mengambang" sebagai panel
+     terpisah tepat di atas composer.
+  b) Card dibatasi max-height: 32% sehingga konten yang lebih panjang
+     terpotong (clipped) dan punya scrollbar sendiri yang terpisah dari
+     percakapan.
+  c) Karena posisinya terjepit antara area scroll percakapan dan composer
+     yang fixed, bagian bawah card tampak tertutup/terpotong oleh area
+     form chat dan tidak bisa di-scroll bersama percakapan.
 
-3. CONSULTANT ARCHITECTURE (SESUDAH)
-------------------------------------
-Package baru `src/agent_ai/consultant/` yang MERAKIT komponen AETHER existing
-(bukan subsystem baru yang menduplikasi):
+--------------------------------------------------------------------
+3. PERBAIKAN YANG DILAKUKAN
+--------------------------------------------------------------------
+A) ConsultantChat.vue (struktur template):
+   Blok Task Proposal dipindahkan KE DALAM <div class="consultant-messages">
+   (setelah daftar pesan dan indikator "Consultant is investigating…"),
+   sehingga card menjadi item terakhir dari alur message flow di area
+   percakapan yang scrollable. Composer (.consultant-foot) tetap menjadi
+   sibling terpisah di bawah (flex-shrink: 0) — tidak berubah.
 
-    consultant/service.py  -> ConsultantService.consult(): satu giliran
-                              konsultasi. Memakai AgentOrchestrator
-                              (run_continuous_loop) + ToolExecutor + curated
-                              ToolRegistry + ProjectBrain.
-    consultant/tools.py    -> registry Consultant yang DIKURASI (read-only +
-                              update_project_bible) + guard run_command.
-    consultant/policy.py   -> PermissionManager read-only (memakai permission
-                              layer existing).
-    consultant/prompt.py   -> system prompt Consultant (peran + boundary +
-                              format Task Proposal).
-    consultant/models.py   -> ConsultantTurn / ConsultantResult (data saja).
+B) styles.css (.consultant-proposal):
+   SEBELUM:
+     .consultant-proposal {
+       flex: 0 0 auto;
+       max-height: 32%;
+       overflow-y: auto;
+       border-top: 1px solid var(--border-soft);
+       background: rgba(139, 92, 246, 0.08);
+       padding: 10px 18px 12px;
+     }
+   SESUDAH:
+     .consultant-proposal {
+       flex: 0 0 auto;
+       border: 1px solid rgba(139, 92, 246, 0.4);
+       border-radius: 12px;
+       background: rgba(139, 92, 246, 0.08);
+       padding: 10px 12px 12px;
+     }
+   -> max-height/overflow internal dihapus agar card tumbuh sesuai isi dan
+      ikut ter-scroll bersama percakapan (overflow ditangani oleh
+      .consultant-messages yang sudah punya overflow-y: auto + min-height: 0).
+   -> border-top + padding lama (panel bawah terpisah) diubah menjadi
+      border penuh + radius agar tampil sebagai kartu di dalam alur chat.
 
-Reasoning loop TIDAK dibuat baru: memakai `agent_ai.core.orchestrator`
-(continuous loop Native Tool Calling) yang sama dengan Agent, tetapi dengan
-system prompt, tool set, dan permission policy yang berbeda.
+Styling inti Task Proposal TIDAK diubah: .cp-head, .cp-title,
+.cp-body, .run-task-btn, warna background violet translusen, dsb tetap.
 
-Alur backend:
-    HTTP POST /api/consultant/consult
-      -> GatewayService.consult()
-           -> resolve root project + provider (konfigurasi LLM SQLite)
-           -> ConsultantService.consult()
-                -> AgentOrchestrator.run_continuous_loop()
-                     -> provider.generate (LLM, bebas memilih tool)
-                     -> ToolExecutor -> curated registry (permission enforced)
-                     -> ProjectBrain (Project Bible context)
-                -> reply + tool_events + task_proposal
-      -> JSON response
+--------------------------------------------------------------------
+4. BEHAVIOR / LOGIC TASK PROPOSAL
+--------------------------------------------------------------------
+- Card tetap muncul hanya untuk proposal terakhir (lastProposal computed).
+- Tombol "Run Task" tetap memanggil runTask() -> emit("run-task", proposal)
+  -> alur task existing di App.vue. Tidak ada perubahan.
+- Tidak ada perubahan pada pemanggilan consult(), payload, session,
+  provider/model, maupun rendering markdown.
+- Composer/form chat tetap di bawah seperti semula.
 
-4. PROJECT BIBLE INTEGRATION
-----------------------------
-- Baca (READ): ConsultantService membangun
-  `ProjectBrain.for_project(root, provider=...)` dan meneruskannya ke
-  AgentOrchestrator. Orchestrator menyisipkan `brain.get_context()` sebagai
-  system message ("# Project Intelligence") di awal percakapan continuous loop.
-  => Consultant SELALU membaca Project Bible sebagai konteks awal.
-  Diverifikasi: scripts/check_consultant.py [1b] memeriksa message provider
-  memuat "# Project Intelligence".
-- Update (WRITE): tool `update_project_bible` (ConsultantBibleTool) menulis ke
-  `<root>/.aether/bible/<kategori>.md` memakai `IntelligenceLearner.add_verified`
-  + `BibleStore` existing (dedupe + validasi kategori). LLM menentukan sendiri
-  kapan memakainya (tidak ada rule artificial "hanya boleh saat X").
-- Tidak ada store pengetahuan baru (tidak ada ConsultantBible/KnowledgeStore/
-  MemoryStore). Knowledge tetap di AI Project Bible existing.
+--------------------------------------------------------------------
+5. VALIDASI
+--------------------------------------------------------------------
+- Frontend production build via node node_modules/vite/bin/vite.js build:
+  SUCCESS — 30 modules transformed, 0 errors.
+- grep struktur: hanya 1 kemunculan .consultant-proposal di
+  ConsultantChat.vue (baris 206) dan 1 kemunculan rule di styles.css
+  (baris 2427) — tidak ada duplikasi/sisa blok lama.
+- Tidak ada perubahan pada file Python/backend.
 
-5. PROJECT ANALYSIS
--------------------
-Consultant dapat membaca project aktif dengan tool read-only yang sudah ada:
-list_files, read_file, search_code (memakai tools/filesystem.py existing,
-dibatasi ke root project). Tool ini adalah cara utama membaca source/workspace.
-Root project berasal dari active project (SQLite) atau project_id; fallback ke
-root workspace AETHER bila belum ada project aktif.
-
-6. INVESTIGATION / DIAGNOSTIC CAPABILITY
-----------------------------------------
-Multi-step investigation dikendalikan LLM lewat continuous loop existing:
-LLM memanggil tool -> hasil tool dikembalikan (role "tool") -> LLM lanjut ->
-... sampai LLM memberi jawaban final tanpa tool call. Tidak ada keyword planner
-deterministik. LLM bebas menentukan tool, urutan, dan kapan cukup.
-
-7. TERMINAL CAPABILITY
-----------------------
-Tool `run_command` (ConsultantRunCommandTool) mewarisi RunCommandTool existing
-(routing Windows-aware shell/native, timeout, output terstruktur). Consultant
-dapat menjalankan diagnosis/validasi: git status/diff/log, python checker,
-pytest, npm run build, dll.
-
-8. READ-ONLY PROJECT BOUNDARY
------------------------------
-Boundary berlapis (defense in depth):
-(a) Registry dikurasi: hanya list_files/read_file/search_code/run_command/
-    update_project_bible. write_file/edit_file/delete_file/move_file TIDAK
-    didaftarkan -> tidak dapat dipanggil lewat tool.
-(b) Permission policy (memakai layer existing agent_ai.permission):
-    READ_ONLY=ALLOW, WORKSPACE_WRITE=DENY, DELETE_MOVE=DENY,
-    COMMAND_EXECUTION=ALLOW, EXTERNAL_NETWORK=DENY, UNKNOWN=ALLOW (untuk tool
-    Bible yang dikurasi).
-(c) Guard command: menolak command destruktif (git commit/push/reset/clean/
-    checkout/..., del/rmdir/move/ren/copy/mkdir/..., redirect ">" di luar quote).
-Guard (c) best-effort (bukan sandbox penuh) — dicatat sebagai limitation.
-Diverifikasi: check_consultant.py [3][4][5][5b] (tidak ada file source dibuat
-saat LLM meminta write_file).
-
-9. BIBLE UPDATE BEHAVIOR
-------------------------
-Satu-satunya jalur tulis Consultant adalah `update_project_bible` ke Project
-Bible. Tidak menulis source. LLM memutuskan kapan knowledge layak disimpan
-(fakta/keputusan/pelajaran). Duplikat di-skip; knowledge lama dipertahankan.
-Diverifikasi: check_consultant.py [2].
-
-10. VALIDATION / VERIFICATION
------------------------------
-Consultant dapat menjalankan test/build/lint/checker/diagnostic via run_command.
-System prompt mewajibkan membedakan "eksekusi selesai" vs "requirement
-terverifikasi" dan menyatakan "belum terverifikasi" bila tidak dapat dibuktikan.
-Tidak ada klaim palsu: verifikasi tetap hasil tool nyata.
-
-11. RECOMMENDATION FLOW
------------------------
-Jawaban Consultant (teks markdown) memuat findings, diagnosis, rekomendasi,
-opsi, trade-off, affected files, dan dampak. Frontend merender markdown via
-renderer bersama (markdown.js). Consultant TIDAK mengimplementasikan source.
-
-12. TASK PROPOSAL FLOW
-----------------------
-System prompt meminta LLM membungkus Task Proposal dengan blok berpagar
-```task ... ```. `extract_task_proposal()` mengekstrak isi blok tersebut.
-Response API memuat field `task_proposal` (Nullable). Frontend menampilkan
-kartu "Task Proposal" + tombol Run Task. LLM yang menentukan kapan membuat
-proposal (bukan rule kaku).
-Diverifikasi: check_consultant.py [1][7].
-
-13. CONSULTANT -> AGENT FLOW
-----------------------------
-Frontend: tombol Run Task memancarkan event `run-task` dengan teks proposal ->
-App.runConsultantTask(text) -> submitTask(text) -> createTask() (endpoint
-/api/tasks existing) -> Agent Runtime existing. Consultant tidak menjalankan
-eksekusi; Agent tetap eksekutor.
-Diverifikasi: check_consultant.py [7b] (task_proposal -> create_task existing).
-
-14. TASK QUEUE INTEGRATION
---------------------------
-TIDAK membuat queue subsystem baru. AETHER existing mengeksekusi task pada
-background daemon thread per task (`api/execution.py: run_in_background`); tidak
-ada queue/worker framework. Karena itu "task masuk queue bila Agent sedang
-running" TIDAK diterapkan literal (tidak ada queue di AETHER) dan TIDAK dibuat
-queue baru sesuai instruksi. Task Proposal dikirim lewat alur task existing
-(create_task). Dicatat sebagai MISSING/limitation (lihat #24/#27).
-
-15. SESSION CONTEXT
--------------------
-ConsultantService menyimpan konteks percakapan per `session_id` (in-memory
-proses; kelas ConsultantSession). Giliran sebelumnya disertakan pada giliran
-berikutnya (build_task menyertakan riwayat, dibatasi 12 pasangan turn terakhir).
-Frontend menyimpan `session_id` dan mengirimnya pada setiap request, sehingga
-"kenapa X?" -> "bagaimana memperbaikinya?" -> "buat task" memakai investigasi
-sebelumnya tanpa mengulang dari nol.
-Diverifikasi: check_consultant.py [6].
-
-16. PROJECT LEARNING LOOP
--------------------------
-Hasil Agent terbaca kembali oleh Consultant: (a) Project Bible diperbarui oleh
-AgentRuntime (`_record_project_learning` -> brain.learn) dan oleh Consultant
-(tool update_project_bible); (b) `.aether/log/<task_id>.log` (hasil/aktivitas
-Agent) dapat dibaca Consultant lewat tool (read_file/list_files) maupun dari
-root project. Consultant hanya membaca hasil dan menyimpan knowledge relevan.
-Tidak mengubah source dari hasil Agent.
-
-17. WEB ACCESS
---------------
-AETHER memiliki FONDASI browser/web tool (`src/agent_ai/browser/`: HttpFetchTool,
-HtmlParser, BrowserToolRegistry) tetapi belum terintegrasi ke tool registry Agent
-(`build_registry` tidak mendaftarkannya) sekaligus belum diekspos ke Consultant.
-Untuk task ini web access TIDAK diaktifkan dan TIDAK dibuat tool web palsu.
-Arsitektur Consultant sudah siap menerimanya: tambahkan HttpFetchTool ke curated
-registry + ubah policy EXTERNAL_NETWORK dari DENY ke ALLOW saat capability itu
-resmi tersedia. Dicatat sebagai capability belum tersedia (lihat #24).
-
-18. FRONTEND
-------------
-- Komponen baru `web/frontend/src/components/ConsultantChat.vue` (menggantikan
-  modal dummy inline di App.vue; tidak ada UI duplikat).
-- Menampilkan conversation (markdown), daftar tool activity per pesan
-  (✓/✗ tool + target), indikator "Consultant is investigating…", kartu Task
-  Proposal + tombol Run Task, tombol New (reset sesi), error, dropdown
-  Provider/Model yang memakai state existing.
-- App.vue: import ConsultantChat, hapus logika dummy, tambah runConsultantTask.
-- `web/frontend/src/markdown.js`: renderer markdown-lite diekstrak (dipakai
-  bersama ReportViewer + ConsultantChat) — menghapus duplikasi renderer.
-- styles.css: style chat Consultant (bubble markdown, tool chip, proposal card,
-  tombol Run Task).
-- Tidak ada logic agent di frontend (verifikasi: tidak ada string Orchestrator/
-  ToolRegistry/runCommand dll).
-
-19. BACKEND / API
------------------
-- Endpoint baru: `POST /api/consultant/consult`
-  Body: message, session_id?, provider_instance_id?, model_id?, project_id?.
-  Response: session_id, reply, status, error, iterations, tool_events,
-  task_proposal.
-- GatewayService.consult() + _build_consultant_provider() (merakit provider dari
-  konfigurasi LLM SQLite existing; fallback ke provider instance enabled pertama)
-  + property consultant_service (lazy).
-- View `consultant_consult` (Django view biasa, tanpa DRF) + route di urls.py.
-- Tidak ada endpoint/queue/store duplikat. create_task existing dipakai ulang.
-
-20. EXISTING SUBSYSTEMS REUSED
-------------------------------
-- Reasoning/tool loop: agent_ai.core.orchestrator.AgentOrchestrator.
-- Tool execution: agent_ai.core.executor.ToolExecutor + agent_ai.tools.registry.
-- Tools: filesystem (list/read/search) + terminal (run_command) existing.
-- Project Knowledge: agent_ai.projects (ProjectBrain, BibleStore,
-  IntelligenceLearner, ProjectIntelligence) existing.
-- Boundary: agent_ai.permission (PermissionManager/PermissionPolicy) existing.
-- Provider: llm_config (LLMConfigService) + providers.factory existing.
-- Task creation/execution: GatewayService.create_task + api/execution existing.
-- Frontend: provider/model state existing, modal/CSS pattern existing,
-  markdown renderer (diekstrak, bukan baru).
-
-21. FILES CHANGED
------------------
-Baru (AETHER core):
-    src/agent_ai/consultant/__init__.py
-    src/agent_ai/consultant/models.py
-    src/agent_ai/consultant/prompt.py
-    src/agent_ai/consultant/policy.py
-    src/agent_ai/consultant/tools.py
-    src/agent_ai/consultant/service.py
-Baru (frontend):
-    web/frontend/src/markdown.js
-    web/frontend/src/components/ConsultantChat.vue
-Baru (verifier + laporan):
-    scripts/check_consultant.py
-    new_analisa.txt
-Diubah:
-    web/django_app/api/services.py  (property consultant_service; consult;
-                                     _build_consultant_provider; param init)
-    web/django_app/api/views.py     (view consultant_consult)
-    web/django_app/api/urls.py      (route consultant/consult)
-    web/frontend/src/api.js         (fungsi consult)
-    web/frontend/src/components/ReportViewer.vue (pakai markdown.js bersama)
-    web/frontend/src/App.vue        (integrasi ConsultantChat, hapus dummy)
-    web/frontend/src/styles.css     (style chat Consultant)
-
-22. ARCHITECTURE CHANGES
-------------------------
-- Menambah SATU capability baru (Consultant) sebagai package AETHER core +
-  satu endpoint gateway + satu komponen UI.
-- TIDAK mengubah AgentRuntime, TaskExecutor, TaskState/state machine,
-  SessionStore, SSE contract, .aether/log writer, Task History/Activity/Report
-  API, provider system, atau Task Lifecycle.
-- Agent tetap satu-satunya eksekutor; Consultant hanya reasoning (loop existing
-  dipakai ulang dengan boundary read-only).
-
-23. IMPLEMENTED
----------------
-[x] Consultant membaca Project Bible sebagai konteks awal.
-[x] Consultant memahami project via read/search/list tools.
-[x] Multi-step investigation (continuous loop, LLM-driven).
-[x] Terminal untuk diagnosis/validasi (dengan guard).
-[x] Consultant TIDAK dapat memodifikasi CODE PROJECT (registry + policy + guard).
-[x] Update Project Bible mandiri (tool update_project_bible).
-[x] Validation/verification (test/build/checker, jujur soal status verifikasi).
-[x] Architecture/knowledge gap detection (Bible vs kondisi aktual; prompt).
-[x] Recommendation (markdown).
-[x] Task Proposal (blok ```task) + ekstraksi backend.
-[x] Task Proposal -> Run Task -> Agent (create_task existing).
-[x] Session context lintas giliran.
-[x] Terpisah dari Agent secara arsitektur.
-[x] Reuse subsistem existing (tanpa duplikasi Bible/Queue/Logging/Knowledge).
-[x] Web access tidak difake.
-[x] new_analisa.txt.
-[x] Tidak ada perubahan source project oleh Consultant via execution path.
-
-24. MISSING / NOT AVAILABLE
----------------------------
-- TASK QUEUE: AETHER tidak punya queue subsystem; eksekusi per-task memakai
-  background daemon thread. Task Proposal yang dikirim saat Agent running
-  berjalan paralel (bukan antre). Tidak dibuat queue baru.
-- WEB ACCESS: fondasi browser/web tool AETHER ada (src/agent_ai/browser) tetapi
-  belum terintegrasi ke registry Agent/Consultant. Tidak diaktifkan.
-- PERSISTENSI SESSION CONSULTANT: konteks sesi in-memory (per proses). Hilang
-  saat proses Django restart (persistent knowledge tetap Project Bible).
-- UI approval/permission dialog: tidak ada (policy Consultant deterministik).
-- Markdown renderer: tabel belum didukung (sama seperti ReportViewer existing).
-
-25. LEGACY OR CONFLICTING IMPLEMENTATION
-----------------------------------------
-- Modal Consultant dummy hal-hal yang bertentangan (pesan hardcode + respons
-  dummy "Belum terhubung ke backend", state consultantMessages/consultantInput/
-  consultantMessagesRef, fungsi consultantSend/handleConsultantKeydown/
-  scrollConsultantToBottom, watch, providerOptions/modelOptions/getProviderLabel)
-  DIHAPUS dari App.vue dan digantikan ConsultantChat. Tidak ada UI Consultant
-  kedua.
-- `nextTick`/`watch` pada import App.vue dihapus karena hanya dipakai blok
-  dummy tersebut.
-- Tidak ada implementasi legacy lain yang dibiarkan bertentangan.
-
-26. VALIDATION RESULTS
-----------------------
-- python scripts/check_consultant.py: PASS (semua langkah: [1][1b][2][3][4]
-  [5][5b][6][7][7b]).
-- Frontend `vite build`: PASS (30 modul, 0 error) -> dist/assets/*.
-- SSR render App.vue (Vite --ssr): PASS (1828 bytes, memuat brand AETHER).
-- py_compile pada seluruh file Python yang diubah/dibuat: PASS.
-- python scripts/check_django_gateway.py: PASS (1-10) saat DJANGO_ALLOWED_HOSTS
-  di-set (env shell AETHER menyetelnya sehingga setdefault skrip tidak berlaku;
-  ini artefak environment, bukan regresi).
-- python scripts/check_permission_policy.py: PASS.
-- python scripts/check_terminal.py: PASS.
-- python scripts/check_aether_store.py: PASS (Task Log + Bible).
-- PRE-EXISTING (tidak terkait perubahan ini):
-  * python scripts/check_architecture.py gagal di [5]: `projects/environment.py`
-    memakai subprocess (sudah diketahui sebelumnya).
-  * python scripts/check_workbench.py gagal di [2]: assertion mengharapkan
-    string "Agent Workspace"/"Recent Projects" yang tidak ada di source
-    (sudah diketahui sebelumnya). SSR render tetap sukses.
-
-27. KNOWN LIMITATIONS
----------------------
-- Guard command (c) bersifat best-effort; tidak mencegah semua bentuk modifikasi
-  (mis. skrip python yang menulis file). Boundary utama tetap registry (tanpa
-  tool tulis) + permission policy.
-- Konteks sesi in-memory (tidak persisten setelah restart).
-- Request konsultasi bersifat sinkron (menunggu loop selesai) — untuk aplikasi
-  single-user lokal; belum streaming.
-- Biaya/langkah dibatasi max_steps=40 per giliran (safety, bukan target).
-- Provider harus tersedia (kredensial valid); bila tidak, API mengembalikan
-  ValidationError dengan pesan jelas.
-- Klasifikasi policy memakai UNKNOWN=ALLOW untuk tool Bible (registry dikurasi),
-  bukan pola umum.
-- Task Queue tidak diterapkan (lihat #14/#24).
-
-28. REMAINING WORK
-------------------
-- Integrasi web access resmi (aktifkan HttpFetchTool di registry Consultant +
-  policy EXTERNAL_NETWORK) bila capability dianggap siap.
-- Task Queue (antre di belakang Agent yang sedang running) bila diinginkan
-  (di luar scope; tidak dibuat sekarang).
-- Persistensi/streaming session konsultasi (opsional).
-- Dukungan tabel pada markdown renderer (opsional).
-
-29. FINAL ARCHITECTURE SUMMARY
-------------------------------
-Consultant = reasoning layer AETHER yang memakai loop/tool/Bible/permission
-existing dengan boundary read-only terhadap CODE PROJECT dan read+update
-terhadap PROJECT BIBLE. Ia menghasilkan Recommendation + Task Proposal; Agent
-tetap satu-satunya eksekutor (Task Proposal dikirim via alur task existing).
-Integrasi: Vue.ConsultantChat -> POST /api/consultant/consult ->
-GatewayService.consult -> ConsultantService -> AgentOrchestrator(continuous
-loop) + curated registry + ProjectBrain. Tidak ada queue/Bible/knowledge/store
-duplikat; web access tidak difake. Semua verifikasi kode di atas LULUS.
+--------------------------------------------------------------------
+6. CATATAN / REMAINING
+--------------------------------------------------------------------
+- Tidak ada script (scripts/check_*.py) yang menguji struktur
+  ConsultantChat, sehingga validasi diarahkan ke frontend build.
+- npm tidak tersedia di subprocess AETHER (known gap) — build dijalankan
+  langsung via node.
+- Catatan terpisah (di luar scope layout): di ConsultantChat.vue masih
+  ada baris `if (data.task_proposal) lastProposal.value = data.task_proposal;`
+  yang menulis ke computed read-only (no-op + warning di dev). Redundan
+  karena lastProposal sudah diturunkan dari messages. TIDAK diubah pada
+  task ini agar tetap fokus pada perbaikan layout/scroll.
+====================================================================

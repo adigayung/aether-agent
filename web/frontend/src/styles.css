@@ -2426,11 +2426,10 @@ select.input-a {
 }
 .consultant-proposal {
   flex: 0 0 auto;
-  max-height: 32%;
-  overflow-y: auto;
-  border-top: 1px solid var(--border-soft);
+  border: 1px solid rgba(139, 92, 246, 0.4);
+  border-radius: 12px;
   background: rgba(139, 92, 246, 0.08);
-  padding: 10px 18px 12px;
+  padding: 10px 12px 12px;
 }
 .cp-head {
   display: flex;
