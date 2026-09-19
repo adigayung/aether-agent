@@ -167,15 +167,20 @@ def _run() -> int:
     assert "FileExplorer" in app_src, "App harus memakai FileExplorer"
     print("[7] status/activity diperbarui OK -> status + AgentActivity")
 
-    # 8) agent activity = PURE commentary LLM (bukan terminal mentah / log tool).
+    # 8) agent activity = unified chronological timeline.
+    # Activity menampilkan commentary + tool call + tool result + observation
+    # dalam satu alur. Panel "tool log" terpisah tidak lagi diperlukan.
     activity_src = sources.get("src/components/AgentActivity.vue", "")
     assert activity_src, "AgentActivity.vue tidak ada"
-    # Activity HANYA commentary natural LLM (event agent_commentary).
-    # Technical event (tool/status/target) TIDAK boleh muncul di Activity.
-    assert "agent_commentary" in activity_src, "AgentActivity harus merender commentary LLM"
-    assert "tool_called" not in activity_src, "Activity tidak boleh menampilkan tool event"
-    assert "tool_completed" not in activity_src, "Activity tidak boleh menampilkan tool event"
-    print("[8] agent activity commentary OK -> AgentActivity.vue")
+    for evt in ("agent_commentary", "tool_called", "tool_completed", "observation_received"):
+        assert evt in activity_src, f"AgentActivity harus menampilkan event '{evt}'"
+    assert "OBSERVATION" in activity_src and "TOOL" in activity_src, (
+        "AgentActivity harus memberi label AGENT/TOOL/RESULT/OBSERVATION"
+    )
+    assert "aether — tool log" not in app_src, (
+        "Tool Log lama harus digabung ke Agent Activity (bukan panel terpisah)"
+    )
+    print("[8] unified agent activity timeline OK -> AgentActivity.vue")
 
     # 9) tidak ada agent logic di frontend.
     forbidden = (

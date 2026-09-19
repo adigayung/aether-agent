@@ -169,6 +169,39 @@ export function listTasks() {
   return request("/tasks");
 }
 
+// --- Task History / Activity / Report (membaca .aether/log/) ---------------
+// Persistent source of truth = `.aether/log/`. Endpoint di bawah HANYA
+// membaca log (read-only); tidak ada storage/subsystem kedua di frontend.
+
+// GET /api/tasks/history -> daftar task dari persistent log (newest first).
+export function listTaskHistory(projectId = null) {
+  const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+  return request(`/tasks/history${qs}`);
+}
+
+// GET /api/tasks/history/<task_id> -> ringkasan satu task dari persistent log.
+export function getTaskHistory(taskId, projectId = null) {
+  const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+  return request(`/tasks/history/${encodeURIComponent(taskId)}${qs}`);
+}
+
+// GET /api/tasks/<task_id>/activity -> chronological activity (commentary,
+// tool call, tool result, observation) dari persistent log.
+export function getTaskActivity(taskId, projectId = null, eventTypes = null) {
+  const params = new URLSearchParams();
+  if (projectId) params.set("project_id", projectId);
+  if (eventTypes && eventTypes.length) params.set("event_types", eventTypes.join(","));
+  const qs = params.toString();
+  return request(`/tasks/${encodeURIComponent(taskId)}/activity${qs ? `?${qs}` : ""}`);
+}
+
+// GET /api/tasks/<task_id>/report -> final Agent Report dari persistent log
+// (task_completed.data.result, fallback task_finished.data.result).
+export function getTaskReport(taskId, projectId = null) {
+  const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+  return request(`/tasks/${encodeURIComponent(taskId)}/report${qs}`);
+}
+
 // --- #51 SSE ---------------------------------------------------------------
 // Membuka EventSource ke /api/events (opsional filter session_id/task_id).
 // Mengembalikan EventSource agar pemanggil dapat menutupnya (disconnect).

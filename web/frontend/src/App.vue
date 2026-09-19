@@ -16,7 +16,7 @@ import AgentActivity from "./components/AgentActivity.vue";
 import TaskComposer from "./components/TaskComposer.vue";
 import ChangesPanel from "./components/ChangesPanel.vue";
 import FileExplorer from "./components/FileExplorer.vue";
-import TerminalView from "./components/TerminalView.vue";
+import ReportViewer from "./components/ReportViewer.vue";
 import SettingsView from "./components/SettingsView.vue";
 import {
   cancelTask,
@@ -29,7 +29,10 @@ import {
   getHealth,
   getLLMProviders,
   getProjects,
-  getTask,
+  getTaskActivity,
+  getTaskHistory,
+  getTaskReport,
+  listTaskHistory,
   listTasks,
   openEventStream,
   openInExplorer,
@@ -71,6 +74,8 @@ const activeNav = ref("agent");
 const health = ref(null);
 const projects = ref([]);
 const tasks = ref([]);
+// Task History (persistent .aether/log/ via History API) — newest first.
+const taskHistory = ref([]);
 const selectedProjectId = ref("");
 const submitting = ref(false);
 const error = ref("");
@@ -96,23 +101,31 @@ const selectedModelId = ref("");
 // State task/workspace (diisi dari #50 + #51).
 const task = reactive({ id: "", text: "", status: "idle" });
 const events = ref([]);
+// Activity dari persistent log (Activity API). null = pakai live events (SSE).
+const historyEvents = ref(null);
+// Final Agent Report (Report API, .aether/log/). null = belum dimuat.
+const currentReport = ref(null);
+const reportOpen = ref(false);
+const reportTaskId = ref("");
+const reportStatus = ref("");
 const changes = ref([]);
 const validation = reactive({ state: "pending" });
-const terminalLines = ref([]);
 const runtime = reactive({ phase: "", activity: "", provider: "", model: "", tool: "" });
 // Penanda refresh File Explorer (dinaikkan setelah agent selesai membuat file).
 const explorerRefresh = ref(0);
 
-// Rolling window frontend: simpan maksimal 20 item terbaru (Activity/Terminal).
-// Bukan pagination; item ke-21 menghapus item paling lama. Tidak ada history
-// tanpa batas di frontend.
-const MAX_ACTIVITY = 20;
-const MAX_TERMINAL = 20;
+// Rolling window frontend untuk feed SSE live. Bukan pagination/history tanpa
+// batas: window dibatasi, sedangkan history lengkap dibaca dari .aether/log/
+// via Activity API saat membuka task lama.
+const MAX_ACTIVITY = 500;
 
 function pushRolling(list, item, max) {
   list.push(item);
   if (list.length > max) list.splice(0, list.length - max);
 }
+
+// Event yang ditampilkan Agent Activity: live SSE atau history dari API.
+const activityEvents = computed(() => historyEvents.value || events.value);
 
 let source = null;
 
@@ -139,7 +152,7 @@ const agentStatus = computed(() => {
 const workspaceNav = computed(() => navItems.filter((i) => i.id !== "settings"));
 const settingsItem = computed(() => navItems.find((i) => i.id === "settings") || {});
 function navBadge(id) {
-  if (id === "tasks") return tasks.value.length || null;
+  if (id === "tasks" || id === "history") return taskHistory.value.length || null;
   if (id === "projects") return projects.value.length || null;
   return null;
 }
@@ -292,6 +305,13 @@ function statusTagClass(s) {
   return "status-off";
 }
 
+// Format timestamp persistent log (ISO string) untuk kolom History.
+function formatTs(raw) {
+  if (!raw) return "—";
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? String(raw) : d.toLocaleString();
+}
+
 // --- Event handling (#51) --------------------------------------------------
 // Filter tampilan Changes: file di dalam `.aether/**` adalah metadata internal
 // AETHER (Bible, log, dsb.), BUKAN perubahan project. Ini murni layer
@@ -308,6 +328,10 @@ function isAetherMetadata(path) {
 
 function handleEvent(evt) {
   if (!evt || !evt.event_type) return;
+  // Event live untuk task aktif -> tampilkan alur SSE (bukan history lama).
+  if (evt.task_id && task.id && evt.task_id === task.id) {
+    historyEvents.value = null;
+  }
   pushRolling(events.value, evt, MAX_ACTIVITY);
   const p = evt.payload || {};
 
@@ -331,26 +355,10 @@ function handleEvent(evt) {
       if (p.tool) {
         runtime.tool = p.tool;
         runtime.activity = `Running ${p.tool}`;
-        pushRolling(
-          terminalLines.value,
-          { kind: "call", tool: p.tool, target: p.target || "" },
-          MAX_TERMINAL
-        );
       }
       break;
     case "tool_completed":
-      if (p.tool)
-        pushRolling(
-          terminalLines.value,
-          {
-            kind: "result",
-            tool: p.tool,
-            target: p.target || "",
-            success: p.success !== false,
-            error: p.error || "",
-          },
-          MAX_TERMINAL
-        );
+      // Tool events tampil di Agent Activity (unified timeline).
       break;
     case "observation_received":
       // Observation mentah tidak ditampilkan (hindari dump isi file panjang).
@@ -363,10 +371,10 @@ function handleEvent(evt) {
       validation.state = p.success === false ? "err" : "ok";
       break;
     case "recovery_started":
-      pushRolling(terminalLines.value, { kind: "note", text: "recovery started" }, MAX_TERMINAL);
+      runtime.activity = "Recovery started";
       break;
     case "recovery_completed":
-      pushRolling(terminalLines.value, { kind: "note", text: "recovery completed" }, MAX_TERMINAL);
+      runtime.activity = "Recovery completed";
       break;
     case "change_detected":
       // Sembunyikan `.aether/**` di daftar Changes (metadata internal AETHER).
@@ -389,14 +397,17 @@ function handleEvent(evt) {
       // Refresh File Explorer setelah agent selesai (file baru terlihat).
       explorerRefresh.value += 1;
       playStatusSound("completed");
+      refreshTaskHistory();
       break;
     case "task_failed":
       task.status = "failed";
       playStatusSound("failed");
+      refreshTaskHistory();
       break;
     case "task_cancelled":
       task.status = "cancelled";
       playStatusSound("cancelled");
+      refreshTaskHistory();
       break;
     default:
       break;
@@ -417,7 +428,8 @@ function connectStream() {
 function resetWorkspace() {
   events.value = [];
   changes.value = [];
-  terminalLines.value = [];
+  historyEvents.value = null;
+  currentReport.value = null;
   validation.state = "pending";
   runtime.phase = "";
   runtime.activity = "";
@@ -433,6 +445,16 @@ async function refreshTasks() {
     tasks.value = data.tasks || [];
   } catch {
     // Endpoint list mungkin belum tersedia; UI tetap aman.
+  }
+}
+
+// Task History dari persistent log (.aether/log/ via History API), newest first.
+async function refreshTaskHistory() {
+  try {
+    const data = await listTaskHistory(selectedProjectId.value || null);
+    taskHistory.value = data.tasks || [];
+  } catch {
+    // Endpoint history mungkin belum tersedia; UI tetap aman.
   }
 }
 
@@ -480,18 +502,44 @@ async function stopTask() {
   }
 }
 
-async function selectTask(taskId) {
+// Buka task dari persistent log (History/Activity/Report API). Berfungsi untuk
+// task lama walau SessionStore sudah kosong / proses sudah restart.
+async function openHistoryTask(taskId) {
+  error.value = "";
+  const projectId = selectedProjectId.value || null;
   try {
-    const record = await getTask(taskId);
-    task.id = record.task_id;
-    task.text = record.task;
-    task.status = record.status || "prepared";
-    if (record.project_id) selectedProjectId.value = record.project_id;
-    resetWorkspace();
+    const info = await getTaskHistory(taskId, projectId);
+    task.id = info.task_id || taskId;
+    task.text = info.task || "";
+    task.status = info.status || "incomplete";
+    // Activity (chronological) dari persistent log.
+    const activity = await getTaskActivity(taskId, projectId);
+    historyEvents.value = activity.events || [];
+    // Report final (bila ada) dari persistent log.
+    try {
+      const report = await getTaskReport(taskId, projectId);
+      currentReport.value = report.report ?? null;
+    } catch {
+      currentReport.value = null;
+    }
     activeNav.value = "agent";
-    connectStream();
   } catch (e) {
-    error.value = e.message || "Failed to load task.";
+    error.value = e.message || "Failed to load task history.";
+  }
+}
+
+// Buka Report viewer untuk sebuah task (Report API -> .aether/log/).
+async function openReport(taskId) {
+  error.value = "";
+  if (!taskId) return;
+  try {
+    const data = await getTaskReport(taskId, selectedProjectId.value || null);
+    reportTaskId.value = data.task_id || taskId;
+    reportStatus.value = data.status || "";
+    currentReport.value = data.report ?? null;
+    reportOpen.value = true;
+  } catch (e) {
+    error.value = e.message || "Failed to load report.";
   }
 }
 
@@ -594,6 +642,7 @@ async function enterWorkbench() {
     projects.value = [];
   }
   await refreshTasks();
+  await refreshTaskHistory();
   connectStream();
 }
 
@@ -791,7 +840,19 @@ onBeforeUnmount(() => {
           <section class="block">
             <div class="block-head">
               <div class="block-title">Latest Task</div>
-              <span class="tag" :class="taskTag.cls">{{ taskTag.label }}</span>
+              <div class="block-actions">
+                <button
+                  v-if="task.id"
+                  class="report-btn"
+                  type="button"
+                  title="View Agent Report"
+                  @click="openReport(task.id)"
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h4"/></svg>
+                  Report
+                </button>
+                <span class="tag" :class="taskTag.cls">{{ taskTag.label }}</span>
+              </div>
             </div>
             <div class="task-card">
               <div class="task-top">
@@ -827,25 +888,16 @@ onBeforeUnmount(() => {
             </div>
           </section>
 
-          <!-- Activity: commentary Agent -->
+          <!-- Agent Activity: unified chronological timeline (commentary,
+               tool call, tool result, observation). Live dari SSE; history
+               dari Activity API/persistent log saat membuka task lama. -->
           <section class="block">
             <div class="term">
               <div class="term-head">
                 <span class="tl r"></span><span class="tl y"></span><span class="tl g"></span>
                 <span class="tt">aether — agent activity</span>
               </div>
-              <AgentActivity :events="events" :status="task.status" />
-            </div>
-          </section>
-
-          <!-- Terminal / tool output (hanya bila ada output). -->
-          <section v-if="terminalLines.length" class="block">
-            <div class="term">
-              <div class="term-head">
-                <span class="tl r"></span><span class="tl y"></span><span class="tl g"></span>
-                <span class="tt">aether — tool log</span>
-              </div>
-              <TerminalView :lines="terminalLines" />
+              <AgentActivity :events="activityEvents" :status="task.status" />
             </div>
           </section>
 
@@ -902,34 +954,40 @@ onBeforeUnmount(() => {
             <p>{{ pageDesc }}</p>
           </div>
 
-          <!-- Tasks / History -->
+          <!-- Tasks / History (persistent .aether/log/ via History API) -->
           <section v-if="activeNav === 'tasks' || activeNav === 'history'" class="panel">
             <div class="panel-head">
               <div>
-                <div class="title">Tasks</div>
-                <div class="desc">{{ tasks.length }} task(s)</div>
+                <div class="title">{{ activeNav === 'history' ? 'History' : 'Tasks' }}</div>
+                <div class="desc">{{ taskHistory.length }} task(s) from persistent log</div>
               </div>
             </div>
-            <div v-if="!tasks.length" class="panel-body"><div class="wb-empty">No tasks yet.</div></div>
+            <div v-if="!taskHistory.length" class="panel-body"><div class="wb-empty">No tasks yet.</div></div>
             <table v-else class="aether-table">
               <thead>
                 <tr>
-                  <th style="width: 70%">Task</th>
-                  <th style="width: 30%">Status</th>
+                  <th style="width: 52%">Task</th>
+                  <th style="width: 18%">Status</th>
+                  <th style="width: 18%">Updated</th>
+                  <th style="width: 12%"></th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="t in tasks" :key="t.task_id" class="clickable" @click="selectTask(t.task_id)">
+                <tr v-for="t in taskHistory" :key="t.task_id" class="clickable" @click="openHistoryTask(t.task_id)">
                   <td>
                     <div class="cell-name">
                       <span class="avatar">T</span>
                       <div>
-                        <div class="name">{{ t.task }}</div>
+                        <div class="name">{{ t.task || "(no prompt)" }}</div>
                         <div class="meta">{{ t.task_id }}</div>
                       </div>
                     </div>
                   </td>
                   <td><span class="status-tag" :class="statusTagClass(t.status)">{{ t.status }}</span></td>
+                  <td><span class="mono meta">{{ formatTs(t.last_timestamp) }}</span></td>
+                  <td class="row-actions">
+                    <button class="report-btn" type="button" title="View Agent Report" @click.stop="openReport(t.task_id)">Report</button>
+                  </td>
                 </tr>
               </tbody>
             </table>
@@ -1062,5 +1120,14 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
+
+    <!-- ===================== AGENT REPORT MODAL ===================== -->
+    <ReportViewer
+      v-if="reportOpen"
+      :task-id="reportTaskId"
+      :status="reportStatus"
+      :report="currentReport"
+      @close="reportOpen = false"
+    />
   </div>
 </template>

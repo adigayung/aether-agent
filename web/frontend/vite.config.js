@@ -8,6 +8,13 @@ export default defineConfig({
   plugins: [vue()],
   server: {
     port: 5173,
+    // Izinkan dev server menyajikan asset di luar root frontend (yaitu
+    // <repo-root>/assets/**) yang di-import oleh audioRegistry.js, agar
+    // sound notification juga berfungsi saat `npm run dev`. Production build
+    // tidak butuh ini (Vite menyalin asset ke dist/assets/).
+    fs: {
+      allow: ["../.."],
+    },
     proxy: {
       "/api": {
         target: "http://127.0.0.1:8000",
