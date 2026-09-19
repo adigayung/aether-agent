@@ -35,6 +35,7 @@ import {
   openInExplorer,
   setActiveProject,
 } from "./api.js";
+import { playStatusSound, resetAudioTracker } from "./audioRegistry.js";
 
 // Navigasi berorientasi user (bukan subsystem internal AETHER).
 // `icon` = path SVG (stroke) inline — tanpa dependency icon baru.
@@ -387,12 +388,15 @@ function handleEvent(evt) {
       runtime.activity = "";
       // Refresh File Explorer setelah agent selesai (file baru terlihat).
       explorerRefresh.value += 1;
+      playStatusSound("completed");
       break;
     case "task_failed":
       task.status = "failed";
+      playStatusSound("failed");
       break;
     case "task_cancelled":
       task.status = "cancelled";
+      playStatusSound("cancelled");
       break;
     default:
       break;
@@ -454,6 +458,7 @@ async function submitTask(text) {
     task.id = record.task_id;
     task.text = record.task;
     task.status = record.status || "prepared";
+    resetAudioTracker();
     resetWorkspace();
     await refreshTasks();
     connectStream();
