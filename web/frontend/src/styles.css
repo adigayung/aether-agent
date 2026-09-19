@@ -1536,12 +1536,14 @@ select.input-a {
   display: flex;
   flex-direction: column;
   background: linear-gradient(180deg, var(--bg-elev), #14111f);
+  overflow: hidden;
 }
 .composer-body {
   padding: 18px 18px 0;
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
+  overflow: hidden;
 }
 .composer-text {
   width: 100%;
@@ -1575,32 +1577,41 @@ select.input-a {
   margin-top: 16px;
   border-top: 1px solid var(--border-soft);
   background: rgba(0, 0, 0, 0.18);
+  flex-shrink: 0;
 }
 .composer-selects {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
 }
 .composer-select {
   display: flex;
   align-items: center;
   gap: 7px;
+  min-width: 0;
+  flex: 1 1 0;
 }
 .composer-select .cs-label {
   font-size: 11px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-faint);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .composer-select .input-a {
-  width: auto;
+  width: 100%;
   padding: 7px 11px;
   font-size: 12.5px;
+  max-height: 220px;
+  overflow-y: auto;
 }
 .composer-actions {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-shrink: 0;
 }
 
 /* ===================================================================== */
