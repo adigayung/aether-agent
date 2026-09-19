@@ -202,6 +202,22 @@ export function getTaskReport(taskId, projectId = null) {
   return request(`/tasks/${encodeURIComponent(taskId)}/report${qs}`);
 }
 
+// --- Consultant (AETHER reasoning layer) -----------------------------------
+// POST /api/consultant/consult -> satu giliran konsultasi. Backend menjalankan
+// reasoning/tool/boundary/bible memakai subsistem AETHER yang sudah ada.
+// Response memuat reply, tool_events, dan task_proposal (bila ada).
+export function consult(
+  message,
+  { sessionId = null, providerInstanceId = null, modelId = null, projectId = null } = {}
+) {
+  const body = { message };
+  if (sessionId) body.session_id = sessionId;
+  if (providerInstanceId) body.provider_instance_id = providerInstanceId;
+  if (modelId) body.model_id = modelId;
+  if (projectId) body.project_id = projectId;
+  return request("/consultant/consult", { method: "POST", body: JSON.stringify(body) });
+}
+
 // --- #51 SSE ---------------------------------------------------------------
 // Membuka EventSource ke /api/events (opsional filter session_id/task_id).
 // Mengembalikan EventSource agar pemanggil dapat menutupnya (disconnect).

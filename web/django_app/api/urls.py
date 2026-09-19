@@ -53,5 +53,7 @@ urlpatterns = [
     path("tasks/<str:task_id>/activity", views.task_activity, name="task_activity"),
     # Report API (final Agent Report per task)
     path("tasks/<str:task_id>/report", views.task_report, name="task_report"),
+    # Consultant API (AETHER reasoning layer, read-only terhadap CODE PROJECT)
+    path("consultant/consult", views.consultant_consult, name="consultant_consult"),
     path("events", views.events, name="events"),
 ]

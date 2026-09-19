@@ -137,6 +137,7 @@ class GatewayService:
         auto_execute: bool = True,
         project_store: Optional[ProjectStore] = None,
         llm_config_service: Optional[Any] = None,
+        consultant_service: Optional[Any] = None,
     ) -> None:
         self.projects = project_registry or ProjectRegistry()
         self.preparation = task_preparation or TaskPreparation()
@@ -154,6 +155,9 @@ class GatewayService:
         # Konfigurasi LLM tersimpan (SQLite) — provider instance + model.
         # Lazy agar jalur read-only tetap ringan. Database GLOBAL AETHER.
         self._llm_config_service = llm_config_service
+        # Consultant (AETHER reasoning layer, read-only terhadap CODE PROJECT).
+        # Lazy agar jalur read-only tetap ringan; verifier dapat menyuntikkan.
+        self._consultant_service = consultant_service
         self._tasks: Dict[str, TaskRecord] = {}
         # PreparedTask asli (bukan ringkasan) untuk diteruskan ke runtime.
         self._prepared: Dict[str, Any] = {}
@@ -182,6 +186,21 @@ class GatewayService:
 
             self._llm_config_service = LLMConfigService()
         return self._llm_config_service
+
+    @property
+    def consultant_service(self) -> Any:
+        """ConsultantService AETHER (lazy).
+
+        Consultant adalah reasoning layer (bukan Agent eksekutor): memakai loop
+        & tool AETHER yang sudah ada dengan boundary read-only terhadap CODE
+        PROJECT dan read+update terhadap Project Bible. Dibuat lazy agar jalur
+        read-only gateway tetap ringan.
+        """
+        if self._consultant_service is None:
+            from agent_ai.consultant import ConsultantService
+
+            self._consultant_service = ConsultantService()
+        return self._consultant_service
 
     # ------------------------------------------------------------------ #
     # Health
@@ -1245,6 +1264,109 @@ class GatewayService:
                 payload={"reason": "user_requested"},
             )
         return self.get_task(task_id)
+
+    # ------------------------------------------------------------------ #
+    # Consultant (AETHER reasoning layer — read-only terhadap CODE PROJECT)
+    # ------------------------------------------------------------------ #
+    def consult(
+        self,
+        message: str,
+        *,
+        session_id: Optional[str] = None,
+        provider_instance_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        provider: Optional[Any] = None,
+        root: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Jalankan satu giliran konsultasi Consultant.
+
+        Consultant memakai loop & tool AETHER yang sudah ada (read-only terhadap
+        CODE PROJECT, read+update terhadap Project Bible). Hasilnya dapat memuat
+        Task Proposal yang siap dikirim ke Agent lewat alur task existing.
+
+        Args:
+            message: pertanyaan/permintaan user (wajib).
+            session_id: id sesi konsultasi (konteks lintas giliran).
+            provider_instance_id/model_id: pilihan provider+model dari konfigurasi
+                LLM tersimpan (SQLite). Bila kosong, dipakai provider instance
+                enabled pertama.
+            project_id: project terkait (opsional; default active project).
+            provider: override provider (khusus verifier; tidak dari HTTP).
+            root: override root project (khusus verifier; tidak dari HTTP).
+
+        Returns:
+            Dict hasil konsultasi: session_id, reply, status, error, iterations,
+            tool_events, task_proposal.
+
+        Raises:
+            ValidationError: message kosong / provider tidak tersedia.
+        """
+        if not message or not str(message).strip():
+            raise ValidationError("Field 'message' wajib diisi dan tidak boleh kosong.")
+
+        if root is None:
+            root = self._resolve_workspace_root(project_id)
+        if not root:
+            # Fallback ke root workspace AETHER (repo tempat backend berjalan)
+            # agar Consultant tetap dapat menganalisis project AETHER sendiri
+            # walau belum ada project aktif.
+            from pathlib import Path as _Path
+
+            root = str(_Path(__file__).resolve().parents[3])
+
+        if provider is None:
+            provider = self._build_consultant_provider(provider_instance_id, model_id)
+
+        result = self.consultant_service.consult(
+            str(message).strip(),
+            provider=provider,
+            root=root,
+            session_id=session_id,
+        )
+        return result.to_dict()
+
+    def _build_consultant_provider(
+        self,
+        provider_instance_id: Optional[str],
+        model_id: Optional[str],
+    ) -> Any:
+        """Bangun provider Consultant dari konfigurasi LLM tersimpan (SQLite).
+
+        Bila provider instance tidak dipilih, dipakai instance enabled pertama.
+        Error konfigurasi dipetakan menjadi ValidationError dengan pesan jelas.
+        """
+        from agent_ai.providers.base import ProviderError
+        from agent_ai.providers.factory import build_provider_from_config
+
+        instance_id = provider_instance_id
+        if not instance_id:
+            try:
+                for inst in self.list_llm_providers():
+                    if inst.get("enabled") is not False:
+                        instance_id = inst.get("id")
+                        break
+            except Exception as exc:  # noqa: BLE001 - konfigurasi LLM gagal dibaca
+                raise ValidationError(
+                    f"Tidak dapat membaca konfigurasi LLM: {exc}"
+                ) from exc
+        if not instance_id:
+            raise ValidationError(
+                "Tidak ada Provider Instance yang dikonfigurasi untuk Consultant. "
+                "Tambahkan provider di Settings terlebih dahulu."
+            )
+
+        try:
+            resolved = self.llm_config_service.resolve_runtime_config(
+                instance_id, model_id=model_id, include_api_key=True
+            )
+        except Exception as exc:  # noqa: BLE001 - konfigurasi provider error
+            raise ValidationError(str(exc)) from exc
+
+        try:
+            return build_provider_from_config(resolved)
+        except ProviderError as exc:
+            raise ValidationError(str(exc)) from exc
 
     # ------------------------------------------------------------------ #
     # Events (memakai SessionStore AETHER; tanpa event model kedua)

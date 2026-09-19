@@ -437,6 +437,38 @@ def task_report(request: HttpRequest, service: GatewayService, task_id: str) -> 
     return _json_response(service.get_task_report(task_id, project_id=project_id))
 
 
+# ---------------------------------------------------------------------------
+# Consultant API (AETHER reasoning layer — read-only terhadap CODE PROJECT)
+# ---------------------------------------------------------------------------
+@csrf_exempt
+@require_http_methods(["POST"])
+@_handle
+def consultant_consult(request: HttpRequest, service: GatewayService) -> JsonResponse:
+    """POST /api/consultant/consult -> satu giliran konsultasi Consultant.
+
+    Body JSON:
+        message (wajib)         : pertanyaan/permintaan user.
+        session_id (opsional)   : id sesi untuk konteks lintas giliran.
+        provider_instance_id    : pilihan provider dari konfigurasi LLM (SQLite).
+        model_id (opsional)     : pilihan model.
+        project_id (opsional)   : project terkait (default active project).
+
+    Consultant memakai loop & tool AETHER yang sudah ada (read-only terhadap
+    CODE PROJECT, read+update terhadap Project Bible). Response memuat reply,
+    tool_events, dan task_proposal (bila Consultant menghasilkan Task Proposal).
+    """
+    body = _parse_json_body(request)
+    return _json_response(
+        service.consult(
+            message=body.get("message"),
+            session_id=body.get("session_id") or None,
+            provider_instance_id=body.get("provider_instance_id") or None,
+            model_id=body.get("model_id") or None,
+            project_id=body.get("project_id") or None,
+        )
+    )
+
+
 @require_http_methods(["GET"])
 def events(request: HttpRequest) -> StreamingHttpResponse:
     """GET /api/events -> SSE stream event AETHER (server -> client).
