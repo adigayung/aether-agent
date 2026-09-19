@@ -23,6 +23,7 @@
   --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   /* Token tambahan dipakai komponen AETHER (Launcher/Composer/Pages). */
   --bg-deep: #0e0c17;
+  --bg-card: #1a1728;
   --accent-dim: #6d3ff0;
   --accent-soft: #241d3a;
   --radius: 14px;
@@ -889,6 +890,7 @@ button {
   font-family: var(--mono);
   font-size: 12px;
   animation: ctxFadeIn 0.12s ease;
+  opacity: 1;
 }
 @keyframes ctxFadeIn {
   from {
