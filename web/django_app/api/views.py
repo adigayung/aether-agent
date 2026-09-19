@@ -455,6 +455,9 @@ def consultant_consult(request: HttpRequest, service: GatewayService) -> JsonRes
         provider_instance_id    : pilihan provider dari konfigurasi LLM (SQLite).
         model_id (opsional)     : pilihan model.
         project_id (opsional)   : project terkait (default active project).
+        images (opsional)       : daftar gambar multimodal. Setiap item:
+            {"data": "<base64>", "mime_type": "image/png", "filename": opsional}.
+            Diteruskan ke Consultant untuk diproses modul vision existing.
 
     Consultant memakai loop & tool AETHER yang sudah ada (read-only terhadap
     CODE PROJECT, read+update terhadap Project Bible). Response memuat reply,
@@ -469,6 +472,7 @@ def consultant_consult(request: HttpRequest, service: GatewayService) -> JsonRes
             model_id=body.get("model_id") or None,
             project_id=body.get("project_id") or None,
             mode=body.get("mode") or None,
+            images=body.get("images") or None,
         )
     )
 

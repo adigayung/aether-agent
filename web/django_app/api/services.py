@@ -41,6 +41,11 @@ from agent_ai.tasks.models import new_task_id
 from api.project_store import ProjectStore
 
 
+# Batas ukuran gambar Consultant (per gambar, estimasi decoded bytes). Bounded
+# agar payload base64 tidak membengkakkan request/response (anti OOM).
+_MAX_CONSULT_IMAGE_BYTES = 8_000_000
+
+
 class GatewayError(Exception):
     """Base error gateway (dipetakan ke HTTP oleh views)."""
 
@@ -1313,6 +1318,7 @@ class GatewayService:
         model_id: Optional[str] = None,
         project_id: Optional[str] = None,
         mode: Optional[str] = None,
+        images: Optional[List[Dict[str, Any]]] = None,
         provider: Optional[Any] = None,
         root: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -1331,6 +1337,10 @@ class GatewayService:
             project_id: project terkait (opsional; default active project).
             mode: mode Consultant ("quick" | "investigate"; default "quick").
                 Mengontrol tool yang benar-benar tersedia bagi LLM.
+            images: daftar gambar opsional (multimodal) untuk pesan user.
+                Setiap item: {"data": "<base64>", "mime_type": "image/png",
+                "filename": opsional}. Diteruskan ke ConsultantService yang
+                memprosesnya lewat modul vision existing.
             provider: override provider (khusus verifier; tidak dari HTTP).
             root: override root project (khusus verifier; tidak dari HTTP).
 
@@ -1339,10 +1349,13 @@ class GatewayService:
             tool_events, task_proposal.
 
         Raises:
-            ValidationError: message kosong / provider tidak tersedia.
+            ValidationError: message kosong / provider tidak tersedia / gambar
+                tidak valid.
         """
         if not message or not str(message).strip():
             raise ValidationError("Field 'message' wajib diisi dan tidak boleh kosong.")
+
+        normalized_images = self._normalize_consult_images(images)
 
         if root is None:
             root = self._resolve_workspace_root(project_id)
@@ -1357,14 +1370,73 @@ class GatewayService:
         if provider is None:
             provider = self._build_consultant_provider(provider_instance_id, model_id)
 
-        result = self.consultant_service.consult(
-            str(message).strip(),
-            provider=provider,
-            root=root,
-            session_id=session_id,
-            mode=mode,
-        )
+        try:
+            result = self.consultant_service.consult(
+                str(message).strip(),
+                provider=provider,
+                root=root,
+                session_id=session_id,
+                mode=mode,
+                images=normalized_images,
+            )
+        except ValidationError:
+            raise
+        except ValueError as exc:
+            # Payload gambar tidak valid / format tidak didukung -> pesan jelas.
+            raise ValidationError(str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 - map error vision ke ValidationError
+            from agent_ai.vision.models import VisionError
+
+            if isinstance(exc, VisionError):
+                raise ValidationError(f"Gambar tidak dapat diproses: {exc}") from exc
+            raise
         return result.to_dict()
+
+    def _normalize_consult_images(
+        self, images: Optional[Any]
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Validasi & normalisasi daftar gambar dari request Consultant.
+
+        Bentuk yang diterima: list of {"data": "<base64>", "mime_type": str,
+        "filename": opsional}. Dibatasi jumlah/ukuran agar aman.
+
+        Returns:
+            List gambar tervalidasi, atau None bila tidak ada.
+
+        Raises:
+            ValidationError: bentuk tidak valid / terlalu banyak / terlalu besar.
+        """
+        if images is None:
+            return None
+        if not isinstance(images, list):
+            raise ValidationError("Field 'images' harus berupa array.")
+        if not images:
+            return None
+        max_images = 8
+        if len(images) > max_images:
+            raise ValidationError(f"Jumlah gambar maksimum {max_images}.")
+        max_bytes = _MAX_CONSULT_IMAGE_BYTES
+        normalized: List[Dict[str, Any]] = []
+        for index, item in enumerate(images):
+            if not isinstance(item, dict):
+                raise ValidationError(f"Gambar[{index}] harus berupa object.")
+            data = item.get("data")
+            if not data or not isinstance(data, str):
+                raise ValidationError(f"Gambar[{index}].data (base64) wajib diisi.")
+            # Estimasi ukuran decoded (base64 -> ~3/4 panjang).
+            approx_bytes = (len(data) * 3) // 4
+            if approx_bytes > max_bytes:
+                raise ValidationError(
+                    f"Gambar[{index}] terlalu besar (>{max_bytes} bytes)."
+                )
+            entry: Dict[str, Any] = {
+                "data": data,
+                "mime_type": str(item.get("mime_type") or "").strip(),
+            }
+            if item.get("filename"):
+                entry["filename"] = str(item["filename"])
+            normalized.append(entry)
+        return normalized
 
     def _build_consultant_provider(
         self,

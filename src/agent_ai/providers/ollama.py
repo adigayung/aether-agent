@@ -70,6 +70,9 @@ class OllamaProvider(BaseProvider):
         # ditolak HTTP 400 ("Value looks like object, but can't find closing
         # '}' symbol"). Isolasi khusus Ollama; provider lain tidak terpengaruh.
         chat_messages = self._normalize_tool_call_arguments(chat_messages)
+        # Multimodal: konversi content part image internal -> field `images`
+        # (list base64) pada pesan Ollama. Pesan text-only tidak berubah.
+        chat_messages = [self._to_ollama_message(m) for m in chat_messages]
 
         payload: Dict[str, Any] = {
             "model": opts.model or self.config.model,
@@ -95,6 +98,40 @@ class OllamaProvider(BaseProvider):
             payload["options"] = gen_options
 
         return payload
+
+    @staticmethod
+    def _to_ollama_message(message: Dict[str, Any]) -> Dict[str, Any]:
+        """Konversi pesan internal -> format Ollama (multimodal-safe).
+
+        Pesan text-only (tanpa `parts` image) diteruskan apa adanya.
+
+        Pesan dengan part image internal
+        ({"type": "image", "mime_type":..., "encoding":"base64", "data":...})
+        dikonversi menjadi field ``images`` (list base64) sesuai format
+        multimodal Ollama. Part non-image diabaikan. ``content`` tetap teks.
+        """
+        parts = message.get("parts")
+        if not parts:
+            return message
+        images: List[str] = []
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "image" and part.get("data"):
+                images.append(str(part["data"]))
+        result = dict(message)
+        result.pop("parts", None)
+        if isinstance(result.get("content"), list):
+            # content list (bentuk OpenAI) -> teks gabungan untuk Ollama.
+            text_parts = [
+                str(b.get("text", ""))
+                for b in result["content"]
+                if isinstance(b, dict) and b.get("type") == "text"
+            ]
+            result["content"] = "\n".join(t for t in text_parts if t)
+        if images:
+            result["images"] = images
+        return result
 
     @staticmethod
     def _normalize_tool_call_arguments(

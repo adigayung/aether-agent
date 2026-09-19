@@ -250,6 +250,11 @@ class ChatMessage:
         tool_calls: daftar ToolCall pada pesan assistant (bila ada).
         name: nama opsional (mis. nama tool pada pesan tool).
         tool_call_id: id ToolCall yang dijawab pesan role "tool".
+        parts: content blocks tambahan (mis. image) untuk pesan multimodal.
+            Format internal AETHER provider-agnostic
+            ({"type": "image", "mime_type":..., "encoding":"base64", "data":...}).
+            Kosong (default) = pesan text-only seperti sebelumnya; provider
+            adapter yang menerjemahkan ke format API masing-masing.
     """
 
     role: str
@@ -257,6 +262,7 @@ class ChatMessage:
     tool_calls: Optional[List[ToolCall]] = None
     name: Optional[str] = None
     tool_call_id: Optional[str] = None
+    parts: Optional[List[Dict[str, Any]]] = None
 
     def __post_init__(self) -> None:
         if isinstance(self.role, ChatRole):
@@ -289,13 +295,18 @@ class ChatMessage:
         Mengikuti skema OpenAI Chat Completions:
             - assistant + tool_calls -> sertakan "tool_calls" (content boleh None).
             - tool -> sertakan "tool_call_id" (dan "name" bila ada).
+
+        Bila pesan membawa `parts` (mis. image), field `parts` disertakan apa
+        adanya (format internal AETHER); provider adapter yang mengonversinya
+        ke content blocks format API masing-masing. Pesan text-only tidak
+        berubah (tanpa field `parts`).
         """
         message: Dict[str, Any] = {"role": self.role}
 
         if self.role == ChatRole.ASSISTANT.value and self.tool_calls:
             message["content"] = self.content
             message["tool_calls"] = [tc.to_provider_dict() for tc in self.tool_calls]
-            return message
+            return self._with_parts(message)
 
         if self.role == ChatRole.TOOL.value:
             message["content"] = self.content if self.content is not None else ""
@@ -307,6 +318,12 @@ class ChatMessage:
         message["content"] = self.content if self.content is not None else ""
         if self.name is not None:
             message["name"] = self.name
+        return self._with_parts(message)
+
+    def _with_parts(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Sertakan `parts` multimodal bila ada (additive, text-only tidak berubah)."""
+        if self.parts:
+            message["parts"] = [dict(p) for p in self.parts]
         return message
 
     def to_dict(self) -> Dict[str, Any]:
@@ -321,6 +338,8 @@ class ChatMessage:
             data["name"] = self.name
         if self.tool_call_id is not None:
             data["tool_call_id"] = self.tool_call_id
+        if self.parts:
+            data["parts"] = [dict(p) for p in self.parts]
         return data
 
     def __repr__(self) -> str:  # pragma: no cover - bantuan debug

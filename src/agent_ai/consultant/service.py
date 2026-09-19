@@ -58,6 +58,51 @@ def extract_task_proposal(text: Optional[str]) -> Optional[str]:
     return body or None
 
 
+def _build_image_parts(images: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
+    """Proses gambar user -> content parts provider-agnostic (ADDITIVE).
+
+    Memakai modul vision existing (ImagePreprocessor) TANPA menulis ulang
+    logika image. Setiap item input: {"data": "<base64>", "mime_type": ...,
+    "filename": opsional}. Base64 di-decode, dipreprocess (resize/kompresi
+    bounded), lalu dibungkus menjadi content part image AETHER
+    ({"type": "image", "mime_type":..., "encoding":"base64", "data":...}).
+
+    Args:
+        images: daftar gambar (base64). None/kosong -> None (text-only).
+
+    Returns:
+        List content part image, atau None bila tidak ada image.
+
+    Raises:
+        UnsupportedImageFormatError / InvalidImageError: gambar tidak valid.
+        ValueError: payload gambar tidak berbentuk dict / data tidak valid.
+    """
+    if not images:
+        return None
+
+    import base64
+    import binascii
+
+    from agent_ai.vision.preprocessing import ImagePreprocessor
+
+    preprocessor = ImagePreprocessor()
+    parts: List[Dict[str, Any]] = []
+    for index, item in enumerate(images):
+        if not isinstance(item, dict):
+            raise ValueError(f"Gambar[{index}] harus berupa object.")
+        raw = item.get("data")
+        if not raw:
+            raise ValueError(f"Gambar[{index}] tidak punya data.")
+        mime = str(item.get("mime_type") or "").strip()
+        try:
+            data = base64.b64decode(raw, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError(f"Gambar[{index}] bukan base64 yang valid: {exc}") from exc
+        processed = preprocessor.process(data, mime_type=mime)
+        parts.append(dict(processed.payload))
+    return parts or None
+
+
 class ConsultantSession:
     """Konteks satu sesi konsultasi (percakapan lintas giliran)."""
 
@@ -139,6 +184,7 @@ class ConsultantService:
         session_id: Optional[str] = None,
         max_steps: Optional[int] = None,
         mode: Optional[str] = None,
+        images: Optional[List[Dict[str, Any]]] = None,
     ) -> ConsultantResult:
         """Jalankan satu giliran konsultasi dan kembalikan hasilnya.
 
@@ -153,9 +199,19 @@ class ConsultantService:
             mode: mode Consultant ("quick" | "investigate"). Default "quick".
                 Mode menentukan tool yang benar-benar tersedia bagi LLM dan
                 instruksi prompt (bukan sekadar prompt saja).
+            images: daftar gambar opsional untuk pesan user (multimodal).
+                Setiap item: {"data": "<base64>", "mime_type": "image/png",
+                "filename": opsional}. Diproses lewat modul vision existing
+                (ImagePreprocessor) menjadi payload provider-agnostic, lalu
+                dilampirkan pada pesan user (content parts). Kosong/None =
+                perilaku text-only tidak berubah.
 
         Returns:
             ConsultantResult.
+
+        Raises:
+            ValueError: message kosong / provider kosong.
+            UnsupportedImageFormatError / InvalidImageError: gambar tidak valid.
         """
         if not message or not str(message).strip():
             raise ValueError("Pesan konsultasi ('message') wajib diisi.")
@@ -215,8 +271,11 @@ class ConsultantService:
         )
 
         task_text = session.build_task(str(message).strip())
+        user_parts = _build_image_parts(images)
         result = orchestrator.run_continuous_loop(
-            task_text, max_steps=max(1, int(max_steps or self.max_steps))
+            task_text,
+            max_steps=max(1, int(max_steps or self.max_steps)),
+            user_parts=user_parts,
         )
 
         reply = (result.result or "").strip()

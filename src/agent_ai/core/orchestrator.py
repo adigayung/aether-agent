@@ -1037,6 +1037,7 @@ class AgentOrchestrator:
         system_prompt: Optional[str] = None,
         max_steps: int = _CONTINUOUS_SAFETY_MAX_STEPS,
         options: Optional[GenerateOptions] = None,
+        user_parts: Optional[List[Dict[str, Any]]] = None,
     ) -> OrchestratorResult:
         """Jalankan SATU percakapan kontinu sampai LLM memberi jawaban final.
 
@@ -1063,6 +1064,9 @@ class AgentOrchestrator:
             max_steps: emergency safety guard terhadap runaway loop. Nilai
                 default TINGGI dan bukan limit behavior agent.
             options: override GenerateOptions (default: options loop).
+            user_parts: content blocks opsional untuk pesan user awal (mis.
+                image, format internal AETHER provider-agnostic). Kosong
+                (default) = perilaku text-only tidak berubah.
 
         Returns:
             OrchestratorResult (status DONE/FAILED, result, steps).
@@ -1083,7 +1087,7 @@ class AgentOrchestrator:
         brain_context = self._brain_context_message()
         if brain_context is not None:
             history.append_system_message(brain_context.content)
-        history.append_user_message(task)
+        history.append_user_message(task, parts=user_parts)
 
         tools = self._tool_definitions()
         provider_error = False

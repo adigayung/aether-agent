@@ -207,7 +207,9 @@ export function getTaskReport(taskId, projectId = null) {
 // POST /api/consultant/consult -> satu giliran konsultasi. Backend menjalankan
 // reasoning/tool/boundary/bible memakai subsistem AETHER yang sudah ada.
 // `mode` ("quick" | "investigate", default "quick") menentukan tool yang benar-
-// benar tersedia bagi LLM. Response memuat reply, tool_events, task_proposal.
+// benar tersedia bagi LLM. `images` (opsional) = daftar gambar multimodal
+// ({data: base64, mime_type, filename?}). Response memuat reply, tool_events,
+// task_proposal.
 export function consult(
   message,
   {
@@ -216,6 +218,7 @@ export function consult(
     modelId = null,
     projectId = null,
     mode = "quick",
+    images = null,
   } = {}
 ) {
   const body = { message };
@@ -224,6 +227,7 @@ export function consult(
   if (modelId) body.model_id = modelId;
   if (projectId) body.project_id = projectId;
   if (mode) body.mode = mode;
+  if (images && images.length) body.images = images;
   return request("/consultant/consult", { method: "POST", body: JSON.stringify(body) });
 }
 

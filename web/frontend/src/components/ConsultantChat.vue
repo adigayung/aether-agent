@@ -31,6 +31,12 @@ const error = ref("");
 const sessionId = ref("");
 const scroller = ref(null);
 const composer = ref(null);
+const fileInput = ref(null);
+
+// Gambar terlampir (belum dikirim): [{ name, mimeType, dataUrl, base64 }].
+// Dimaksimalkan 8 gambar agar konsisten dengan batas backend.
+const MAX_ATTACHMENTS = 8;
+const attachments = ref([]);
 
 // Tinggi maksimum composer (px). Di atas nilai ini textarea scroll internal
 // agar footer tidak memanjang tanpa batas.
@@ -113,12 +119,63 @@ function summarizeTools(events) {
   }));
 }
 
+// --- Attach image (multimodal) ---------------------------------------------
+const ACCEPTED_TYPES = ["image/jpeg", "image/png", "image/webp"];
+
+function triggerAttach() {
+  if (sending.value) return;
+  const el = fileInput.value;
+  if (el) el.click();
+}
+
+function onFilesPicked(e) {
+  const files = Array.from(e.target.files || []);
+  e.target.value = "";
+  for (const file of files) {
+    if (attachments.value.length >= MAX_ATTACHMENTS) {
+      error.value = `Maksimum ${MAX_ATTACHMENTS} gambar per pesan.`;
+      break;
+    }
+    if (!ACCEPTED_TYPES.includes(file.type)) {
+      error.value = `Format tidak didukung: ${file.type || "unknown"} (pakai JPEG/PNG/WebP).`;
+      continue;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result || "");
+      const comma = dataUrl.indexOf(",");
+      const base64 = comma >= 0 ? dataUrl.slice(comma + 1) : "";
+      if (!base64) return;
+      attachments.value.push({
+        name: file.name || "image",
+        mimeType: file.type,
+        dataUrl,
+        base64,
+      });
+    };
+    reader.onerror = () => {
+      error.value = `Gagal membaca gambar: ${file.name}`;
+    };
+    reader.readAsDataURL(file);
+  }
+}
+
+function removeAttachment(index) {
+  attachments.value.splice(index, 1);
+}
+
 async function send() {
   const text = input.value.trim();
-  if (!text || sending.value) return;
+  const pending = attachments.value.slice();
+  if ((!text && !pending.length) || sending.value) return;
   error.value = "";
-  messages.value.push({ role: "user", text });
+  messages.value.push({
+    role: "user",
+    text,
+    images: pending.map((a) => a.dataUrl),
+  });
   input.value = "";
+  attachments.value = [];
   resetComposer();
   sending.value = true;
   scrollToBottom();
@@ -128,6 +185,13 @@ async function send() {
       providerInstanceId: props.providerInstanceId || null,
       modelId: props.modelId || null,
       mode: mode.value,
+      images: pending.length
+        ? pending.map((a) => ({
+            data: a.base64,
+            mime_type: a.mimeType,
+            filename: a.name,
+          }))
+        : null,
     });
     sessionId.value = data.session_id || sessionId.value;
     messages.value.push({
@@ -176,6 +240,7 @@ function runTask() {
 function startNewSession() {
   sessionId.value = "";
   messages.value = [];
+  attachments.value = [];
   error.value = "";
 }
 
@@ -256,6 +321,15 @@ onMounted(() => {
       <div class="consultant-messages" ref="scroller">
         <div v-for="(msg, i) in messages" :key="i" class="cmsg" :class="msg.role">
           <span class="crole">{{ msg.role === "assistant" ? "AETHER Consultant" : "You" }}</span>
+          <div v-if="msg.role === 'user' && msg.images && msg.images.length" class="cmsg-images">
+            <img
+              v-for="(src, ii) in msg.images"
+              :key="ii"
+              :src="src"
+              class="cmsg-thumb"
+              alt="attachment"
+            />
+          </div>
           <div v-if="msg.role === 'user'" class="ctext">{{ msg.text }}</div>
           <!-- eslint-disable-next-line vue/no-v-html -->
           <div v-else class="consultant-md md" :class="{ failed: msg.failed }" v-html="renderMarkdown(msg.text)"></div>
@@ -286,19 +360,52 @@ onMounted(() => {
       <div v-if="error" class="wb-error">{{ error }}</div>
 
       <div class="consultant-foot">
-        <textarea
-          ref="composer"
-          v-model="input"
-          class="input-a"
-          rows="1"
-          :placeholder="inputPlaceholder"
-          :disabled="sending"
-          @input="autoGrow"
-          @keydown="onKeydown"
-        ></textarea>
-        <button class="send-btn" type="button" title="Send" :disabled="sending || !input.trim()" @click="send">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
-        </button>
+        <!-- Preview gambar terlampir (belum dikirim). -->
+        <div v-if="attachments.length" class="attach-strip">
+          <div v-for="(a, ai) in attachments" :key="ai" class="attach-item">
+            <img :src="a.dataUrl" class="attach-thumb" :alt="a.name" />
+            <button
+              type="button"
+              class="attach-remove"
+              title="Remove image"
+              @click="removeAttachment(ai)"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="attach-row">
+          <input
+            ref="fileInput"
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            multiple
+            class="attach-input"
+            @change="onFilesPicked"
+          />
+          <button
+            type="button"
+            class="attach-btn"
+            title="Attach image (JPEG/PNG/WebP)"
+            :disabled="sending"
+            @click="triggerAttach"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+          </button>
+          <textarea
+            ref="composer"
+            v-model="input"
+            class="input-a"
+            rows="1"
+            :placeholder="inputPlaceholder"
+            :disabled="sending"
+            @input="autoGrow"
+            @keydown="onKeydown"
+          ></textarea>
+          <button class="send-btn" type="button" title="Send" :disabled="sending || (!input.trim() && !attachments.length)" @click="send">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+          </button>
+        </div>
       </div>
     </div>
   </div>

@@ -104,6 +104,7 @@ class OpenAICompatibleProvider(BaseProvider):
         """Bangun payload untuk endpoint /chat/completions."""
         opts = options or GenerateOptions()
         chat_messages = self._build_messages(prompt, messages)
+        chat_messages = [self._to_openai_message(m) for m in chat_messages]
 
         payload: Dict[str, Any] = {
             "model": opts.model or self.config.model,
@@ -124,6 +125,67 @@ class OpenAICompatibleProvider(BaseProvider):
 
         payload.update(opts.extra or {})
         return payload
+
+    # ------------------------------------------------------------------ #
+    # Multimodal (image content parts) -> format OpenAI-compatible
+    # ------------------------------------------------------------------ #
+    @classmethod
+    def _to_openai_message(cls, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Konversi pesan internal -> format OpenAI (text-only ATAU multimodal).
+
+        Pesan text-only (``parts`` kosong) diteruskan apa adanya (content tetap
+        string), sehingga perilaku request tanpa image TIDAK berubah.
+
+        Pesan dengan ``parts`` image dikonversi menjadi content blocks:
+            [{"type": "text", "text": <content>},
+             {"type": "image_url", "image_url": {"url": "data:<mime>;base64,<data>"}}]
+        Part yang tidak dikenali (bukan image) diabaikan; bagian teks tetap ada.
+        """
+        parts = message.get("parts")
+        if not parts:
+            return message
+        blocks: List[Dict[str, Any]] = []
+        text = message.get("content")
+        if isinstance(text, str) and text.strip():
+            blocks.append({"type": "text", "text": text})
+        for part in parts:
+            converted = cls._to_openai_content_part(part)
+            if converted is not None:
+                blocks.append(converted)
+        if not blocks:
+            return message
+        result = dict(message)
+        result["content"] = blocks
+        result.pop("parts", None)
+        return result
+
+    @staticmethod
+    def _to_openai_content_part(part: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Konversi satu content part internal -> content part OpenAI.
+
+        Mendukung payload vision provider-agnostic:
+            {"type": "image", "mime_type": "image/png",
+             "encoding": "base64", "data": "<base64>"}
+        -> {"type": "image_url", "image_url": {"url": "data:image/png;base64,<data>"}}
+
+        Returns:
+            Content part OpenAI, atau None bila part tidak didukung.
+        """
+        if not isinstance(part, dict):
+            return None
+        if part.get("type") == "text":
+            return {"type": "text", "text": str(part.get("text", ""))}
+        if part.get("type") != "image":
+            return None
+        data = part.get("data")
+        mime = part.get("mime_type") or "image/png"
+        encoding = part.get("encoding") or "base64"
+        if not data:
+            return None
+        url = part.get("url")
+        if not url:
+            url = f"data:{mime};{encoding},{data}"
+        return {"type": "image_url", "image_url": {"url": url}}
 
     @staticmethod
     def _to_openai_tool(tool: ToolDefinition) -> Dict[str, Any]:

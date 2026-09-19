@@ -71,13 +71,28 @@ class ProviderResponseError(ProviderError):
 
 @dataclass
 class Message:
-    """Representasi satu pesan dalam percakapan (format netral/agnostik)."""
+    """Representasi satu pesan dalam percakapan (format netral/agnostik).
+
+    Attributes:
+        role: "system" | "user" | "assistant".
+        content: teks pesan (jalur text-only, perilaku lama tidak berubah).
+        parts: content blocks tambahan (mis. image) untuk pesan multimodal.
+            Format internal AETHER, provider-agnostic: list dict dengan
+            ``{"type": "image", "mime_type": ..., "encoding": "base64",
+            "data": ...}`` (lihat ``agent_ai.vision.preprocessing``). Provider
+            adapter yang menerjemahkan ke format API masing-masing. Kosong
+            (default) = pesan text-only seperti sebelumnya.
+    """
 
     role: str  # "system" | "user" | "assistant"
     content: str
+    parts: Optional[List[Dict[str, Any]]] = None
 
-    def to_dict(self) -> Dict[str, str]:
-        return {"role": self.role, "content": self.content}
+    def to_dict(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {"role": self.role, "content": self.content}
+        if self.parts:
+            data["parts"] = [dict(p) for p in self.parts]
+        return data
 
 
 @dataclass

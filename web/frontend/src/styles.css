@@ -1107,12 +1107,18 @@ button {
 
 .consultant-foot {
   display: flex;
-  align-items: flex-end;
-  gap: 10px;
+  flex-direction: column;
+  gap: 8px;
   padding: 12px 18px;
   border-top: 1px solid var(--border-soft);
   background: rgba(0, 0, 0, 0.18);
   flex-shrink: 0;
+}
+.consultant-foot .attach-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  width: 100%;
 }
 .consultant-foot .input-a {
   flex: 1 1 auto;
@@ -1125,6 +1131,84 @@ button {
   max-height: 140px;
   overflow-y: hidden;
   font-family: inherit;
+}
+
+/* Attach image (Consultant multimodal) */
+.attach-input {
+  display: none;
+}
+.attach-btn {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: #14111f;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.attach-btn:hover:not(:disabled) {
+  background: #1b1730;
+  color: #b0d4f0;
+  border-color: rgba(139, 92, 246, 0.5);
+}
+.attach-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.attach-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.attach-item {
+  position: relative;
+  width: 54px;
+  height: 54px;
+  border-radius: 9px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: #0e0c17;
+}
+.attach-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.attach-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  border: none;
+  background: rgba(0, 0, 0, 0.65);
+  color: #ffffff;
+  cursor: pointer;
+  padding: 0;
+}
+.attach-remove:hover {
+  background: #dc2626;
+}
+.cmsg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 6px;
+}
+.cmsg-thumb {
+  max-width: 180px;
+  max-height: 140px;
+  border-radius: 8px;
+  border: 1px solid var(--border-soft);
+  display: block;
 }
 
 .agent-input {

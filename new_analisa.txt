@@ -1,164 +1,240 @@
 ================================================================================
-AETHER — CONSULTANT CHAT UX FIX (Multi-line Composer, Wider Modal, Bigger Font,
-             In-session Chat Persistence)
-Mode: Frontend-only. Tidak ada file Python/backend yang diubah.
+AETHER — CONSULTANT VISION / MULTIMODAL IMAGE SUPPORT
+(Provider content-parts + Consultant image attach)
+Mode: ADDITIVE. Tidak ada arsitektur stabil yang di-rewrite.
 ================================================================================
 
 --------------------------------------------------------------------------------
-1. LATAR BELAKANG / MASALAH
+RINGKASAN
 --------------------------------------------------------------------------------
-Keluhan user: "Consultant chat tidak nyaman dipakai". Tiga akar masalah:
+Tujuan: mengaktifkan kemampuan vision untuk AETHER Consultant dengan risiko
+minimal:
+  (1) menambah dukungan pesan multimodal (image content-parts) pada layer provider
+      yang SUDAH ADA, dan
+  (2) memungkinkan user melampirkan/mengirim image di chat AETHER Consultant,
+      sehingga image diteruskan ke LLM dan Consultant dapat "melihat"-nya.
 
-1) Composer TIDAK bisa multi-line.
-   - Sebelum: <input type="text" v-model="input" class="input-a">
-   - Handler onKeydown: Enter (tanpa Shift) => e.preventDefault() + send()
-   - Akibat: Enter selalu mengirim, tidak bisa membuat baris baru.
-
-2) Modal sempit & teks kecil.
-   - .modal.consultant-m { max-width: 720px }
-   - .ctext = 13px, .consultant-md = 13px, .consultant-foot .input-a = 13px
-   - .crole = 10.5px, .cs-label/.cm-label/.cm-hint = 11px
-
-3) Riwayat chat HILANG saat modal ditutup lalu dibuka kembali.
-   - Di App.vue modal dirender dengan v-if="consultantOpen".
-   - v-if = unmount saat close => state messages (ref di dalam
-     ConsultantChat.vue) ikut hancur.
+Hasil: SELESAI. Image dikirim sebagai content-parts format OpenAI-compatible
+(image_url dengan data URL base64) untuk provider OpenAI-compatible (OpenRouter,
+DeepSeek, OpenAI, dsb.), dan sebagai field `images` untuk Ollama. Pesan text-only
+berperilaku persis seperti sebelumnya (backward compatible). Modul vision existing
+(ImagePreprocessor) dipakai apa adanya untuk memproses/resize/kompresi gambar.
 
 --------------------------------------------------------------------------------
-2. LOKASI KODE YANG DIINSPEKSI (VERIFIED)
+1. OBSERVATION (kondisi awal, terverifikasi dari source)
 --------------------------------------------------------------------------------
-- web/frontend/src/components/ConsultantChat.vue  (composer, keydown, state)
-- web/frontend/src/App.vue                          (pola mount modal, line ~1036)
-- web/frontend/src/styles.css                       (.consultant-m, .ctext,
-                                                     .consultant-md, .crole,
-                                                     .consultant-foot .input-a,
-                                                     .cs-label/.cm-label/.cm-hint)
-
-Fondasi layout yang SUDAH BENAR dan TIDAK diubah:
-- .consultant-messages { flex: 1 1 auto; min-height: 0; overflow-y: auto }
-- .consultant-foot    { flex-shrink: 0 }  (sibling dari .consultant-messages)
-- .consultant-proposal berada DI DALAM .consultant-messages.
-
---------------------------------------------------------------------------------
-3. AKAR MASALAH (ROOT CAUSE)
---------------------------------------------------------------------------------
-A. Composer single-line  : <input type="text"> tidak bisa newline; Enter di-preventDefault.
-B. Ruang & teks kecil    : max-width 720px; seluruh font percakapan/input 13px.
-C. Chat hilang           : v-if pada <ConsultantChat> meng-unmount komponen saat
-                           modal ditutup => ref 'messages' di dalam komponen reset.
-
---------------------------------------------------------------------------------
-4. PERUBAHAN YANG DILAKUKAN
---------------------------------------------------------------------------------
-### A. Composer multi-line (ConsultantChat.vue)
-- <input type="text"> diganti <textarea rows="1" class="input-a"> dengan:
-    ref="composer", v-model="input", @input="autoGrow", @keydown="onKeydown".
-- Ditambah logika auto-grow:
-    const COMPOSER_MAX_HEIGHT = 140;
-    function autoGrow() {
-      el.style.height = "auto";
-      el.style.height = Math.min(el.scrollHeight, 140) + "px";
-      el.style.overflowY = el.scrollHeight > 140 ? "auto" : "hidden";
-    }
-- Ditambah resetComposer(): setelah mengirim, tinggi textarea dikembalikan ke 1 baris.
-- Keyboard (KEPUTUSAN TERKUNCI):
-    Enter biasa  = baris baru (default textarea, TIDAK di-preventDefault).
-    Shift+Enter  = kirim (preventDefault + send()).
-
-### B. Lebar modal & ruang ketik (styles.css)
-- .modal.consultant-m : max-width 720px -> 860px (width: 90vw tetap, margin tetap).
-- .consultant-foot    : align-items: center -> flex-end (tombol send sejajar bawah
-  saat textarea tumbuh).
-- .consultant-foot .input-a : padding 9px 13px -> 11px 15px; font-size 13px -> 14px;
-  line-height 1.5; resize: none; min-height: 42px; max-height: 140px;
-  overflow-y: hidden; font-family: inherit.
-
-### C. Ukuran teks (proporsional, tetap AETHER-like)
-- .ctext        : 13px / 1.55 -> 14px / 1.6
-- .consultant-md: 13px / 1.55 -> 14px / 1.6
-- .crole        : 10.5px -> 11.5px
-- .cs-label     : 11px -> 12px
-- .cm-label     : 11px -> 12px
-- .cm-hint      : 11px -> 12px
-
-### D. Persistensi chat selama sesi browser (App.vue)
-- <ConsultantChat v-if="consultantOpen" ...>  ->  v-show="consultantOpen".
-- v-show menjaga komponen tetap ter-mount (hanya display: none saat tertutup),
-  sehingga ref 'messages' dan sesi Consultant tetap hidup selama sesi browser
-  (close/open modal tanpa reload).
-- Ditambahkan komentar penjelas pada markup.
-- CATATAN: scope mengikuti instruksi = cukup selama SESI (bukan lintas reload).
-  Solusi ini MURNI FRONTEND (hanya ganti v-if -> v-show); tidak perlu backend.
-
-### E. Kebersihan minor
-- Assignment redundan ke computed read-only `lastProposal.value = ...` di send()
-  DIPERIKSA: sudah tidak ada di source (no-op, tidak perlu diubah).
+- src/agent_ai/vision/ LENGKAP dan provider-agnostic:
+    * input.py       : ImageInputLoader (deteksi MIME magic-bytes; boundary path).
+    * preprocessing.py: ImagePreprocessor.process() -> ProcessedImage +
+                        _build_payload() => {"type":"image","mime_type":...,
+                        "encoding":"base64","data":...} (payload internal AETHER).
+    * policy.py      : VisionPolicy + VISION_REQUIRED_CAPABILITIES (VISION+MULTIMODAL).
+    * models.py      : ImageInput/ProcessedImage/VisionRequest/VisionConfig.
+  Satu-satunya konsumen sebelumnya: scripts/check_vision.py.
+- src/agent_ai/providers/base.py: Message = {role, content:str} -> TEXT-ONLY.
+- src/agent_ai/providers/openai_compatible.py: _build_payload mengirim messages
+  text-only; literal 'image_url' = 0 hasil di repo.
+- src/agent_ai/core/types.py: ChatMessage.content = Optional[str] (text-only).
+- src/agent_ai/consultant/service.py: consult(message, provider, root, session_id,
+  max_steps, mode) -> memanggil orchestrator.run_continuous_loop(task_text).
+- web/django_app/api/{services.py,views.py}: consultant_consult menerima JSON
+  (message/session_id/provider_instance_id/model_id/project_id/mode).
+- web/frontend/src/{api.js, components/ConsultantChat.vue}: consult() text-only;
+  composer = <textarea> (sudah auto-grow dari perbaikan sebelumnya).
 
 --------------------------------------------------------------------------------
-5. FILE YANG BERUBAH
+2. PROVIDER LAYER — Message content-parts (fondasi, ADDITIVE)
 --------------------------------------------------------------------------------
-- web/frontend/src/components/ConsultantChat.vue   (composer textarea + auto-grow
-                                                     + keydown Shift+Enter)
-- web/frontend/src/App.vue                          (v-if -> v-show pada
-                                                     <ConsultantChat>)
-- web/frontend/src/styles.css                       (lebar modal, font, styling
-                                                     textarea composer)
-(git status --porcelain: hanya 3 file frontend ini yang modified.)
+File: src/agent_ai/providers/base.py
+- Message menambah field opsional: parts: Optional[List[Dict[str, Any]]] = None.
+  Format internal AETHER provider-agnostic:
+    {"type":"image","mime_type":...,"encoding":"base64","data":...}
+  to_dict() menyertakan `parts` HANYA bila ada (text-only tidak berubah).
+
+File: src/agent_ai/providers/openai_compatible.py
+- _build_payload kini melewatkan setiap pesan melalui _to_openai_message().
+- _to_openai_message(): pesan tanpa parts -> diteruskan APA ADANYA (content tetap
+  string; perilaku request text-only identik dengan sebelumnya).
+  Pesan dengan parts image -> content diubah menjadi content blocks:
+    [{"type":"text","text":<content>},
+     {"type":"image_url","image_url":{"url":"data:<mime>;base64,<data>"}}]
+- _to_openai_content_part(): konversi satu part internal -> content part OpenAI.
+  Part {"type":"audio"} dsb. diabaikan; bagian teks tetap dipertahankan.
+- Streaming: provider ini TIDAK memakai jalur streaming (semua request via
+  requests.post non-stream). Tidak perlu fallback streaming khusus image.
+
+File: src/agent_ai/providers/ollama.py (degradasi aman, additive)
+- _to_ollama_message(): part image internal -> field `images` (list base64)
+  sesuai format multimodal Ollama; content list (bentuk OpenAI) -> teks gabungan.
+  Pesan text-only diteruskan apa adanya.
+
+Keputusan: format OpenAI-compatible `image_url` dipakai karena semua provider
+cloud AETHER (OpenRouter/DeepSeek/OpenAI) dulunya memakai skema OpenAI; Ollama
+diberi adapter terpisah agar tetap benar bila dipakai untuk vision.
 
 --------------------------------------------------------------------------------
-6. YANG TIDAK DIUBAH (SESUAI CONSTRAINT)
+3. CORE PIPELINE — membawa parts tanpa mengubah kontrak tool/loop
 --------------------------------------------------------------------------------
-- Tidak ada perubahan file Python/backend (consultant/, services.py, views.py,
-  urls.py, orchestrator, api.js, dll). VERIFIED via git status.
-- Struktur modal dipertahankan: .consultant-proposal tetap di dalam
-  .consultant-messages; .consultant-foot tetap sibling dengan flex-shrink: 0;
-  overflow tetap dimiliki .consultant-messages.
-- Fitur Consultant dipertahankan: mode selector (Quick/Investigate), Task Proposal,
-  Run Task, provider/model selection, tool activity.
-- Alur backend (provider/model, session_id, Project Bible, API) tidak disentuh.
-- Tidak ada refactor besar / unrelated change.
+File: src/agent_ai/core/types.py
+- ChatMessage menambah field opsional: parts (content blocks image).
+- to_provider_dict() menyertakan `parts` (via _with_parts()) bila ada; pesan
+  text-only tidak berubah (tanpa field `parts`).
+- to_dict() menyertakan `parts` bila ada (untuk audit/debug).
+
+File: src/agent_ai/core/history.py
+- append_user_message(content, parts=None): menerima parts opsional.
+
+File: src/agent_ai/core/orchestrator.py
+- run_continuous_loop(task, ..., user_parts=None): parameter ADDITIVE.
+  user_parts diteruskan ke history.append_user_message(task, parts=user_parts).
+  Tidak ada perubahan pada keputusan completion, tool-calling, cancel, dan
+  jalur legacy run(). Semua pemanggil lama (tanpa user_parts) berperilaku sama.
+
+CATATAN BOUNDARY: core/ TIDAK meng-import vision (diverifikasi search: 0 hasil).
+Konversi payload vision -> content blocks terjadi di provider adapter; core hanya
+membawa struktur `parts` provider-agnostic.
 
 --------------------------------------------------------------------------------
-7. VALIDASI
+4. CONSULTANT PIPELINE — images diproses modul vision existing
 --------------------------------------------------------------------------------
-- Build produksi:
-    cd web/frontend
-    node node_modules/vite/bin/vite.js build
-  HASIL: OK — 30 modules transformed, 0 error, built in ~1.15s.
-  (npm tidak tersedia di subprocess AETHER — dipakai node langsung ke vite.js.)
-
-- Inspeksi bundle CSS hasil build (dist/assets/index-*.css) — TERVERIFIKASI
-  mengandung nilai baru: "max-width:860px", "resize:none",
-  ".consultant-foot{align-items:flex-end...}", ".consultant-foot .input-a{...
-  font-size:14px...max-height:140px...}", ".ctext{font-size:14px...}",
-  ".consultant-md{font-size:14px...}", ".crole{font-size:11.5px}".
-
-- Inspeksi struktur render: tidak ada UI/interaction test otomatis tersedia;
-  validasi dilakukan via build + pembacaan bundle + pemeriksaan source.
-
-MAPPING KE ACCEPTANCE CRITERIA:
-1. Enter = baris baru .................. DONE (textarea default; keydown hanya
-                                          intercept Shift+Enter).
-2. Shift+Enter = kirim ................. DONE.
-3. Textarea auto-grow + scroll @140px .. DONE (autoGrow + max-height 140px).
-4. Modal ~860px & responsif 90vw ....... DONE.
-5. Font percakapan & input ~14px ....... DONE (.ctext/.consultant-md/input = 14px).
-6. Chat tetap ada setelah close/open .... DONE (v-show, tidak unmount).
-7. Task Proposal + Run Task + mode + provider/model tetap ........ DONE (tidak disentuh).
-8. Build sukses 0 error ................ DONE (30 modules, 0 error).
-9. Tidak ada file Python/backend berubah DONE (git status: hanya 3 file frontend).
-10. Ringkasan ke new_analisa.txt ....... DONE (dokumen ini).
+File: src/agent_ai/consultant/service.py
+- consult(..., images=None): parameter ADDITIVE.
+- _build_image_parts(images): modul vision existing dipakai APA ADANYA:
+    * decode base64 (validate=True) -> bytes,
+    * ImagePreprocessor().process(data, mime_type=mime) -> resize/kompresi bounded,
+    * kembalikan payload provider-agnostic ProcessedImage.payload sebagai part.
+  Tidak ada logika image baru/duplikat; tidak ada provider baru/loop baru.
+- Images dilampirkan sebagai parts pada pesan user awal lewat
+  orchestrator.run_continuous_loop(..., user_parts=...).
+- Tanpa images -> user_parts=None -> perilaku text-only tidak berubah.
+- Error vision (InvalidImageError/UnsupportedImageFormatError) diteruskan sebagai
+  exception jelas (bukan silent-fail).
 
 --------------------------------------------------------------------------------
-8. CATATAN / REMAINING
+5. API LAYER — field `images` opsional (JSON base64, minimal)
 --------------------------------------------------------------------------------
-- Persistensi dibatasi selama sesi browser (sesuai scope). Lintas reload/restart
-  TIDAK termasuk dan tetap memerlukan perubahan backend bila dikerjakan nanti —
-  tidak dilakukan pada task ini.
-- Tidak ada automated UI/interaction test; regresi layout hanya tertangkap lewat
-  build + review source.
-- Perilaku layout proposal (di dalam .consultant-messages) sengaja tidak diubah
-  agar tidak menimbulkan regresi scroll.
-================================================================================
-Status: SELESAI — frontend-only, build hijau, tanpa perubahan backend.
-================================================================================
+File: web/django_app/api/views.py (consultant_consult)
+- Meneruskan body.get("images") ke service.consult(images=...).
+
+File: web/django_app/api/services.py (GatewayService.consult + _normalize_consult_images)
+- consult(..., images=None): ADDITIVE.
+- _normalize_consult_images(): validasi bentuk (list of dict), batas 8 gambar,
+  batas ukuran per gambar (_MAX_CONSULT_IMAGE_BYTES = 8_000_000 estimasi decoded).
+  Bentuk item: {"data": <base64>, "mime_type": <str>, "filename": opsional}.
+- Error dipetakan ke ValidationError (HTTP 400) dengan pesan jelas:
+    * images bukan array -> 400,
+    * gambar invalid / format tak didukung (VisionError/ValueError) -> 400.
+- Varian JSON base64 dipilih (tanpa multipart, tanpa endpoint/sistem baru).
+
+--------------------------------------------------------------------------------
+6. FRONTEND — attach image di chat Consultant
+--------------------------------------------------------------------------------
+File: web/frontend/src/api.js
+- consult(message, {..., images}) -> mengirim body.images bila ada (tidak dikirim
+  bila kosong -> backward compatible).
+
+File: web/frontend/src/components/ConsultantChat.vue
+- Tambah tombol attach (`.attach-btn`, ikon paperclip SVG) di composer.
+- <input type="file" accept="image/jpeg,image/png,image/webp" multiple> tersembunyi.
+- onFilesPicked(): validasi tipe (jpeg/png/webp), batas 8 gambar, baca via
+  FileReader.readAsDataURL -> simpan {name, mimeType, dataUrl, base64}.
+- Preview thumbnail (`.attach-strip`/`.attach-item`/`.attach-thumb`) + tombol
+  hapus per gambar (`.attach-remove`) + removeAttachment(index).
+- send(): mengirim images bersama pesan berikutnya; pesan user menyimpan
+  msg.images (dataUrl) agar bubble user menampilkan thumbnail yang terkirim.
+- startNewSession(): membersihkan attachments.
+- Struktur modal DIPERTAHANKAN: .consultant-messages tetap scroll container,
+  .consultant-proposal tetap di dalamnya, mode selector/provider/model/Run Task/
+  tool activity tidak berubah. Composer kini punya baris preview + baris input.
+
+File: web/frontend/src/styles.css
+- .consultant-foot -> flex column (preview di atas, baris input di bawah);
+  .consultant-foot .attach-row -> flex row (attach-btn + textarea + send-btn).
+- Kelas baru: .attach-input, .attach-btn, .attach-strip, .attach-item,
+  .attach-thumb, .attach-remove, .cmsg-images, .cmsg-thumb (gaya AETHER dark,
+  compact). Tidak mengubah mekanisme scroll modal.
+
+--------------------------------------------------------------------------------
+7. FILES CHANGED
+--------------------------------------------------------------------------------
+src/agent_ai/providers/base.py
+src/agent_ai/providers/openai_compatible.py
+src/agent_ai/providers/ollama.py
+src/agent_ai/core/types.py
+src/agent_ai/core/history.py
+src/agent_ai/core/orchestrator.py
+src/agent_ai/consultant/service.py
+web/django_app/api/services.py
+web/django_app/api/views.py
+web/frontend/src/api.js
+web/frontend/src/components/ConsultantChat.vue
+web/frontend/src/styles.css
+scripts/check_consultant_vision.py   (baru, verifier)
+new_analisa.txt                      (file ini)
+
+TIDAK disentuh: AgentOrchestrator logic/completion, run_continuous_loop semantics
+(hanya param additive), ToolRegistry, PermissionPolicy, TaskState/state machine,
+SessionStore/SSE, .aether/log, Project Bible store, AgentRuntime.
+
+--------------------------------------------------------------------------------
+8. VALIDATION
+--------------------------------------------------------------------------------
+- py_compile semua file Python yang diubah: OK.
+- python scripts/check_consultant_vision.py : SELURUH LULUS
+    [1]  text-only payload tidak berubah
+    [1b] image content-part -> image_url data URL
+    [1c] part tak didukung diabaikan
+    [2]  ChatMessage/ConversationHistory membawa parts
+    [3]  run_continuous_loop meneruskan user_parts
+    [4]  ConsultantService memproses image + lampirkan ke pesan user
+    [5]  consult tanpa image tetap text-only
+    [5b] gambar tidak valid ditolak jelas (InvalidImageError)
+    [6]  Gateway meneruskan images
+    [6b/6c] validasi images + backward compatible
+    [7]  frontend attach image (api.js + ConsultantChat.vue)
+- python scripts/check_consultant.py : LULUS (1..7, termasuk mode & boundary).
+- python scripts/check_vision.py     : LULUS (1..15, boundary & provider-agnostic).
+- python scripts/check_conversation_history.py : LULUS.
+- python scripts/check_continuous_loop.py      : LULUS.
+- python scripts/check_orchestrator.py         : LULUS.
+- python scripts/check_provider_tools.py       : LULUS.
+- python scripts/check_session.py              : LULUS.
+- python scripts/check_task_lifecycle.py       : LULUS.
+- python scripts/check_executor.py             : LULUS.
+- python scripts/check_streaming.py            : LULUS (dengan DJANGO_ALLOWED_HOSTS).
+- python scripts/check_django_gateway.py       : LULUS (dengan DJANGO_ALLOWED_HOSTS).
+- Frontend build: `node node_modules/vite/bin/vite.js build` dari web/frontend
+  -> 30 modules transformed, 0 errors. (npm tidak tersedia di subprocess AETHER.)
+
+Pre-existing (BUKAN akibat perubahan ini; diverifikasi via `git stash`):
+- check_provider.py gagal: DeepSeek dianggap tersedia padahal API key kosong
+  (state credential/.env) — gagal identik pada HEAD tanpa perubahan.
+- check_workbench.py step [2] gagal pada assertion lama "Agent Workspace".
+- check_architecture.py item [5] gagal pada projects/environment.py (subprocess
+  probing). Item [1..4] LULUS.
+- check_ollama_native_tools.py SKIP (server Ollama tidak berjalan).
+
+--------------------------------------------------------------------------------
+9. ARCHITECTURE IMPACT
+--------------------------------------------------------------------------------
+- ADDITIVE. Tidak ada provider/service/loop/routing/store baru.
+- Consultant tetap memakai loop & provider yang sama (run_continuous_loop).
+- Modul vision existing dipakai apa adanya (tanpa duplikasi logika image).
+- Kontrak tool & PermissionPolicy Consultant tidak berubah.
+- core/ tidak bergantung ke vision; src/agent_ai tidak bergantung ke Django;
+  gateway hanya meneruskan data.
+- Pemetaan format: internal AETHER `parts` -> OpenAI `image_url` data URL
+  (cloud/OpenAI-compatible) dan -> Ollama `images` (list base64).
+
+--------------------------------------------------------------------------------
+10. REMAINING WORK / CATATAN
+--------------------------------------------------------------------------------
+- Routing capability: ModelCapability.VISION/MULTIMODAL TIDAK dipakai untuk
+  memvalidasi/memilih model pada jalur consult (routing model tidak diubah sesuai
+  constraint). Bila model non-vision dipakai, provider akan mengembalikan error
+  HTTP (dipetakan ke ProviderAPIError) dengan pesan yang dapat dibaca user —
+  bukan silent-fail. Validasi capability-aware dapat ditambahkan di iterasi lain.
+- Batas gambar: maksimum 8 gambar per pesan, estimasi 8 MB per gambar (decoded).
+- Persistensi gambar tidak disimpan ke .aether/log (hanya ada di payload request
+  dan di state chat frontend selama sesi browser).
+- Web access Consultant tetap belum tersedia (tidak diubah di task ini).

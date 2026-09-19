@@ -82,9 +82,19 @@ class ConversationHistory:
         """Tambahkan pesan system (instruksi/konteks)."""
         return self.append_message(ChatMessage(role=ChatRole.SYSTEM.value, content=content))
 
-    def append_user_message(self, content: str) -> ChatMessage:
-        """Tambahkan pesan user (permintaan/observasi manusia)."""
-        return self.append_message(ChatMessage(role=ChatRole.USER.value, content=content))
+    def append_user_message(
+        self, content: str, parts: Optional[List[Dict[str, Any]]] = None
+    ) -> ChatMessage:
+        """Tambahkan pesan user (permintaan/observasi manusia).
+
+        Args:
+            content: teks pesan user.
+            parts: content blocks opsional (mis. image, format internal AETHER).
+                Kosong (default) = pesan text-only seperti sebelumnya.
+        """
+        return self.append_message(
+            ChatMessage(role=ChatRole.USER.value, content=content, parts=parts)
+        )
 
     def append_assistant_message(
         self,
