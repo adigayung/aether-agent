@@ -156,6 +156,51 @@ function closeComposer() {
   composerOpen.value = false;
 }
 
+// Consultant Chat modal.
+const consultantOpen = ref(false);
+const consultantInput = ref("");
+const consultantMessages = ref([
+  { role: "assistant", text: "Halo! Saya AETHER Consultant. Ada yang bisa saya bantu?" },
+  { role: "user", text: "Hai, apa kabar?" },
+  { role: "assistant", text: "Kabarmu baik! Saya siap membantu. Silakan tanyakan apa saja tentang project AETHER ini." },
+]);
+
+function openConsultant() {
+  consultantOpen.value = true;
+}
+function closeConsultant() {
+  consultantOpen.value = false;
+}
+
+// Provider Instance + Model helpers (same logic as TaskComposer).
+const providerOptions = computed(() =>
+  (llmProviders.value || []).filter((p) => p.enabled !== false)
+);
+const modelOptions = computed(() => {
+  const inst = providerOptions.value.find((p) => p.id === selectedProviderInstanceId.value);
+  if (!inst) return [];
+  return (inst.models || []).filter((m) => m.enabled !== false);
+});
+function getProviderLabel(p) {
+  const type = p.provider_label || p.provider_type || "";
+  return type ? `${p.name} (${type})` : p.name;
+}
+
+function consultantSend() {
+  const text = consultantInput.value.trim();
+  if (!text) return;
+  consultantMessages.value.push({ role: "user", text });
+  consultantInput.value = "";
+  // Dummy bot response.
+  setTimeout(() => {
+    consultantMessages.value.push({ role: "assistant", text: "Terima kasih! Ini adalah respons dummy dari AETHER Consultant. (Belum terhubung ke backend.)" });
+  }, 500);
+}
+
+function handleConsultantKeydown(e) {
+  if (e.key === "Enter") consultantSend();
+}
+
 // Dot warna Agent di sidebar.
 const agentDotClass = computed(() => {
   const c = agentStatus.value.cls;
@@ -672,6 +717,15 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
+      <!-- AETHER Consultant card -->
+      <div class="consultant-card" @click="openConsultant">
+        <svg class="ci" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a4 4 0 0 1 4 4c0 1.95-1.4 3.58-3.25 3.93L12 22l-.75-12.07A4.001 4.001 0 0 1 12 2z"/><circle cx="12" cy="6" r="1.5" fill="currentColor" stroke="none"/><path d="M9 14l-3 3 3 3M15 14l3 3-3 3"/></svg>
+        <div class="ci-body">
+          <div class="ci-title">AETHER Consultant</div>
+          <div class="ci-sub">Chat with the AI assistant</div>
+        </div>
+      </div>
+
       <div class="side-foot">
         <div class="sys-row">
           <span class="k"><span class="dot" :class="connected ? '' : 'err'"></span> System</span>
@@ -932,6 +986,57 @@ onBeforeUnmount(() => {
           @update:model-id="selectedModelId = $event"
           @update:mode="selectedMode = $event"
         />
+      </div>
+    </div>
+
+    <!-- ===================== CONSULTANT CHAT MODAL ===================== -->
+    <div v-if="consultantOpen" class="modal-backdrop" @click.self="closeConsultant">
+      <div class="modal consultant-m" role="dialog" aria-modal="true">
+        <div class="consultant-head">
+          <div class="consultant-title">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a4 4 0 0 1 4 4c0 1.95-1.4 3.58-3.25 3.93L12 22l-.75-12.07A4.001 4.001 0 0 1 12 2z"/><circle cx="12" cy="6" r="1.5" fill="currentColor" stroke="none"/><path d="M9 14l-3 3 3 3M15 14l3 3-3 3"/></svg>
+            AETHER Consultant
+          </div>
+          <div class="consultant-selects">
+            <label class="composer-select">
+              <span class="cs-label">Provider</span>
+              <select class="input-a" :value="selectedProviderInstanceId" @change="selectedProviderInstanceId = $event.target.value">
+                <option v-if="!providerOptions.length" value="">No provider instance</option>
+                <option v-for="p in providerOptions" :key="p.id" :value="p.id">
+                  {{ getProviderLabel(p) }}
+                </option>
+              </select>
+            </label>
+            <label class="composer-select">
+              <span class="cs-label">Model</span>
+              <select class="input-a" :value="selectedModelId" @change="selectedModelId = $event.target.value">
+                <option v-if="!modelOptions.length" value="">No model</option>
+                <option v-for="m in modelOptions" :key="m.id" :value="m.id">
+                  {{ m.model_name }}
+                </option>
+              </select>
+            </label>
+          </div>
+          <button class="close-x" type="button" title="Close" @click="closeConsultant">×</button>
+        </div>
+        <div class="consultant-messages">
+          <div v-for="(msg, i) in consultantMessages" :key="i" class="cmsg" :class="msg.role">
+            <span class="crole">{{ msg.role === 'assistant' ? 'AETHER' : 'You' }}</span>
+            <span class="ctext">{{ msg.text }}</span>
+          </div>
+        </div>
+        <div class="consultant-foot">
+          <input
+            v-model="consultantInput"
+            class="input-a"
+            type="text"
+            placeholder="Type a message…"
+            @keydown="handleConsultantKeydown"
+          />
+          <button class="send-btn" type="button" title="Send" @click="consultantSend">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+          </button>
+        </div>
       </div>
     </div>
   </div>
