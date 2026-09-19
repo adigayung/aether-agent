@@ -360,6 +360,83 @@ def cancel_task(request: HttpRequest, service: GatewayService, task_id: str) -> 
     return _json_response(service.cancel_task(task_id))
 
 
+# ---------------------------------------------------------------------------
+# Task History API (reads .aether/log/ persistent store)
+# ---------------------------------------------------------------------------
+@require_http_methods(["GET"])
+@_handle
+def task_history(request: HttpRequest, service: GatewayService) -> JsonResponse:
+    """GET /api/tasks/history -> daftar semua task dari .aether/log/.
+
+    Query params (opsional):
+        project_id: filter berdasarkan project (bila ada).
+
+    Mengembalikan daftar task terurut terbaru ke terlama.
+    Setiap task berisi: task_id, first_timestamp, last_timestamp, status, task.
+    """
+    project_id = request.GET.get("project_id") or None
+    return _json_response({"tasks": service.list_task_history(project_id=project_id)})
+
+
+@require_http_methods(["GET"])
+@_handle
+def task_history_detail(request: HttpRequest, service: GatewayService, task_id: str) -> JsonResponse:
+    """GET /api/tasks/history/<task_id> -> ringkasan task dari .aether/log/.
+
+    Mengembalikan info task: task_id, first/last timestamp, status, prompt.
+    """
+    project_id = request.GET.get("project_id") or None
+    return _json_response(service.get_task_history(task_id, project_id=project_id))
+
+
+# ---------------------------------------------------------------------------
+# Activity API (chronological events per task)
+# ---------------------------------------------------------------------------
+@require_http_methods(["GET"])
+@_handle
+def task_activity(request: HttpRequest, service: GatewayService, task_id: str) -> JsonResponse:
+    """GET /api/tasks/<task_id>/activity -> chronological activity satu task.
+
+    Query params (opsional):
+        event_types: daftar tipe event dipisah koma (opsional).
+            Bila tidak diisi, semua event diambil (termasuk tool activity).
+        project_id: project terkait (opsional).
+
+    Mengembalikan daftar event terurut chronological berdasarkan timestamp.
+    Event yang relevan: task_requested, task_started, agent_commentary,
+    tool_called, tool_completed, observation_received, task_completed,
+    task_failed, task_cancelled, task_finished, bible_update, dan lainnya.
+    """
+    project_id = request.GET.get("project_id") or None
+    event_types_param = request.GET.get("event_types") or None
+    event_types = (
+        [e.strip() for e in event_types_param.split(",") if e.strip()]
+        if event_types_param
+        else None
+    )
+    return _json_response(
+        {"task_id": task_id, "events": service.get_task_activity(task_id, project_id=project_id, event_types=event_types)}
+    )
+
+
+# ---------------------------------------------------------------------------
+# Report API (final Agent Report per task)
+# ---------------------------------------------------------------------------
+@require_http_methods(["GET"])
+@_handle
+def task_report(request: HttpRequest, service: GatewayService, task_id: str) -> JsonResponse:
+    """GET /api/tasks/<task_id>/report -> final Agent Report dari .aether/log/.
+
+    Source utama: task_completed.data.result.
+    Fallback: task_finished.data.result.
+
+    Query params (opsional):
+        project_id: project terkait (opsional).
+    """
+    project_id = request.GET.get("project_id") or None
+    return _json_response(service.get_task_report(task_id, project_id=project_id))
+
+
 @require_http_methods(["GET"])
 def events(request: HttpRequest) -> StreamingHttpResponse:
     """GET /api/events -> SSE stream event AETHER (server -> client).

@@ -964,6 +964,258 @@ class GatewayService:
         with self._lock:
             return [r.to_dict() for r in self._tasks.values()]
 
+    # ------------------------------------------------------------------ #
+    # Task History (from .aether/log/ persistent store)
+    # ------------------------------------------------------------------ #
+    def list_task_history(self, project_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Daftar semua task dari .aether/log/ (persistent source of truth).
+
+        Membaca file log task dan mengembalikan ringkasan terurut
+        terbaru -> terlama berdasarkan `last_timestamp` dari isi log
+        (BUKAN nama file / UUID / urutan filesystem).
+
+        Pencarian mencakup seluruh candidate root (project_id/active project,
+        AETHER workspace, project terdaftar) lalu di-dedupe per task_id.
+
+        Args:
+            project_id: project terkait (opsional).
+
+        Returns:
+            Daftar task info terurut terbaru ke terlama.
+        """
+        from agent_ai.projects.aether_store import AetherProjectStore, TaskLogReader
+
+        by_task: Dict[str, Dict[str, Any]] = {}
+        for root in self._candidate_log_roots(project_id):
+            try:
+                store = AetherProjectStore(root)
+                log_paths = store.list_task_logs()
+            except Exception:  # noqa: BLE001 - satu root rusak tidak mengganggu root lain
+                continue
+            for log_path in log_paths:
+                task_id = log_path.stem  # nama file tanpa .log = identitas task
+                try:
+                    info = TaskLogReader(store, task_id=task_id).get_task_info()
+                except Exception:  # noqa: BLE001 - satu task rusak tidak mengganggu yang lain
+                    continue
+                if info is None:
+                    continue
+                existing = by_task.get(task_id)
+                if existing is None or (info.get("last_timestamp") or "") > (
+                    existing.get("last_timestamp") or ""
+                ):
+                    by_task[task_id] = info
+
+        tasks = list(by_task.values())
+        tasks.sort(key=lambda t: t.get("last_timestamp") or "", reverse=True)
+        return tasks
+
+    def get_task_history(self, task_id: str, project_id: Optional[str] = None) -> Dict[str, Any]:
+        """Ambil ringkasan task spesifik dari .aether/log/.
+
+        Args:
+            task_id: identifier task.
+            project_id: project terkait (opsional).
+
+        Returns:
+            Task info dict (status "incomplete" bila log belum punya event).
+
+        Raises:
+            NotFoundError: bila file log task benar-benar tidak ditemukan.
+        """
+        reader = self._reader_for_task(task_id, project_id)
+        if reader is None:
+            raise NotFoundError(f"Task '{task_id}' tidak ditemukan di log.")
+        info = reader.get_task_info()
+        if info is None:
+            # File log ada tetapi belum berisi event yang bisa diringkas:
+            # task tetap dianggap ada (jangan salah jadi "tidak ditemukan").
+            return {
+                "task_id": task_id,
+                "first_timestamp": None,
+                "last_timestamp": None,
+                "status": "incomplete",
+                "task": "",
+                "result": None,
+                "error": None,
+            }
+        return info
+
+    # ------------------------------------------------------------------ #
+    # Activity API (chronological events per task)
+    # ------------------------------------------------------------------ #
+    def get_task_activity(
+        self,
+        task_id: str,
+        project_id: Optional[str] = None,
+        event_types: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Ambil seluruh chronological activity satu Task dari .aether/log/.
+
+        Source: .aether/log/<task_id>.log
+
+        Args:
+            task_id: identifier task.
+            project_id: project terkait (opsional).
+            event_types: daftar tipe event yang relevan (opsional).
+                Bila None, semua event diambil (termasuk tool activity).
+
+        Returns:
+            Daftar event terurut chronological berdasarkan timestamp.
+
+        Raises:
+            NotFoundError: bila file log task benar-benar tidak ditemukan.
+        """
+        reader = self._reader_for_task(task_id, project_id)
+        if reader is None:
+            raise NotFoundError(f"Task '{task_id}' tidak ditemukan di log.")
+        # Seluruh event dikembalikan (termasuk tool_called / tool_completed /
+        # observation_received), bukan hanya agent_commentary.
+        return reader.get_activity(event_types=event_types)
+
+    # ------------------------------------------------------------------ #
+    # Report API
+    # ------------------------------------------------------------------ #
+    def get_task_report(self, task_id: str, project_id: Optional[str] = None) -> Dict[str, Any]:
+        """Ambil final Agent Report dari .aether/log/.
+
+        Source utama: task_completed.data.result.
+        Fallback: task_finished.data.result.
+
+        Args:
+            task_id: identifier task.
+            project_id: project terkait (opsional).
+
+        Returns:
+            Dict dengan task_id, status, dan report (teks final).
+            `report` bernilai None bila log ada tetapi tidak punya
+            `task_completed`/`task_finished` dengan result.
+
+        Raises:
+            NotFoundError: bila file log task tidak ditemukan.
+        """
+        reader = self._reader_for_task(task_id, project_id)
+        if reader is None:
+            raise NotFoundError(f"Task '{task_id}' tidak ditemukan di log.")
+        info = reader.get_task_info() or {}
+        return {
+            "task_id": task_id,
+            "status": info.get("status", "unknown"),
+            "report": reader.get_report(),
+        }
+
+    def _resolve_project_root(self, project_id: Optional[str]) -> Optional[str]:
+        """Tentukan project root untuk membaca .aether/log/.
+
+        Prioritas: project_id dari parameter -> active project dari store.
+        """
+        if project_id:
+            meta = self.project_store.get_project(project_id)
+            if meta is not None:
+                return meta.get("path") or meta.get("root")
+        active_id = self.project_store.get_active_project_id()
+        if active_id:
+            meta = self.project_store.get_project(active_id)
+            if meta is not None:
+                return meta.get("path") or meta.get("root")
+        return None
+
+    def _candidate_log_roots(self, project_id: Optional[str] = None) -> List[str]:
+        """Kandidat root tempat `.aether/log/` dicari (terurut & unik).
+
+        Log task bersifat project-local, tetapi satu task_id bisa berada di
+        root yang berbeda dari active project (mis. AETHER workspace tempat
+        proses ini berjalan). Karena itu reader mencari beberapa kandidat:
+            1. project_id eksplisit (bila diberikan),
+            2. active project (bila ada),
+            3. AETHER workspace/repo root tempat backend berjalan,
+            4. seluruh project yang terdaftar di launcher.
+        """
+        from pathlib import Path as _Path
+
+        roots: List[str] = []
+
+        def _add(value: Optional[str]) -> None:
+            if not value:
+                return
+            normalized = str(value)
+            if normalized not in roots:
+                roots.append(normalized)
+
+        _add(self._resolve_project_root(project_id))
+        try:
+            # api/services.py -> api/ -> django_app/ -> web/ -> repo root
+            _add(str(_Path(__file__).resolve().parents[3]))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            for meta in self.project_store.list_projects():
+                _add(meta.get("path") or meta.get("root"))
+        except Exception:  # noqa: BLE001
+            pass
+        return roots
+
+    def _find_log_file(
+        self,
+        task_id: str,
+        root: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> Optional[Path]:
+        """Cari file log task di `.aether/log/` berdasarkan task_id.
+
+        Bila `root` diberikan, hanya root tersebut yang dicari (kompatibel
+        dengan pemanggilan lama). Bila `root` None, pencarian dilakukan di
+        seluruh candidate root (`_candidate_log_roots`). Exact match
+        `<task_id>.log` dicoba lebih dulu, lalu prefix match (mengakomodasi
+        task_id yang dinormalisasi oleh `safe_task_id`).
+
+        Nama file `<task_id>.log` adalah identitas persistent Task; pencarian
+        TIDAK mensyaratkan metadata `project_id`/`task_id` ada di dalam event.
+
+        Returns:
+            Path file log jika ditemukan, None bila tidak ada.
+        """
+        from pathlib import Path as _Path
+        from agent_ai.projects.aether_store import safe_task_id
+
+        safe_id = safe_task_id(task_id)
+        if not safe_id:
+            return None
+        candidates = [root] if root else self._candidate_log_roots(project_id)
+        for candidate in candidates:
+            if not candidate:
+                continue
+            log_dir = _Path(candidate) / ".aether" / "log"
+            if not log_dir.exists():
+                continue
+            exact = log_dir / f"{safe_id}.log"
+            if exact.is_file():
+                return exact
+            for f in sorted(log_dir.glob("*.log")):
+                if f.stem.startswith(safe_id):
+                    return f
+        return None
+
+    def _reader_for_task(self, task_id: str, project_id: Optional[str] = None) -> Optional[Any]:
+        """Buat TaskLogReader yang terikat ke file log yang benar-benar ada.
+
+        Root diturunkan dari path file (`<root>/.aether/log/<task_id>.log`)
+        sehingga reader membaca file yang sama persis dengan hasil
+        `_find_log_file()`. Tidak ada validasi kedua terhadap isi event yang
+        bisa membuat task valid dianggap tidak ditemukan.
+
+        Returns:
+            TaskLogReader, atau None bila file log tidak ditemukan.
+        """
+        from agent_ai.projects.aether_store import AetherProjectStore, TaskLogReader
+
+        log_file = self._find_log_file(task_id, project_id=project_id)
+        if log_file is None:
+            return None
+        # <root>/.aether/log/<task_id>.log -> root = parents[2] dari file dir.
+        store = AetherProjectStore(log_file.parent.parent.parent)
+        return TaskLogReader(store, task_id=log_file.stem)
+
     def cancel_task(self, task_id: str) -> Dict[str, Any]:
         """Minta penghentian task: tandai CANCELLED + emit event AETHER.
 

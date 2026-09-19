@@ -42,7 +42,16 @@ urlpatterns = [
     path("delete-entry", views.delete_entry, name="delete_entry"),
     path("files", views.files, name="files"),
     path("tasks", views.tasks, name="tasks"),
+    # Task History (reads .aether/log/ persistent store).
+    # PENTING: route literal "tasks/history" HARUS mendahului
+    # "tasks/<str:task_id>" agar tidak di-shadow (task_id="history").
+    path("tasks/history", views.task_history, name="task_history"),
+    path("tasks/history/<str:task_id>", views.task_history_detail, name="task_history_detail"),
     path("tasks/<str:task_id>", views.get_task, name="get_task"),
     path("tasks/<str:task_id>/cancel", views.cancel_task, name="cancel_task"),
+    # Activity API (chronological events per task)
+    path("tasks/<str:task_id>/activity", views.task_activity, name="task_activity"),
+    # Report API (final Agent Report per task)
+    path("tasks/<str:task_id>/report", views.task_report, name="task_report"),
     path("events", views.events, name="events"),
 ]

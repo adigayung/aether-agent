@@ -175,6 +175,24 @@ class AetherProjectStore:
     def __repr__(self) -> str:  # pragma: no cover - bantuan debug
         return f"<AetherProjectStore root={self.root}>"
 
+    # ------------------------------------------------------------------ #
+    # Task Log Discovery
+    # ------------------------------------------------------------------ #
+    def list_task_logs(self) -> List[Path]:
+        """Daftar semua file log task di `.aether/log/`.
+
+        Returns:
+            Daftar Path file .log, terurut terbaru ke terlama
+            (berdasarkan mtime file).
+        """
+        if not self.log_dir.exists():
+            return []
+        return sorted(
+            [p for p in self.log_dir.glob("*.log") if p.is_file()],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+
 
 class TaskLog:
     """Writer log task project-local (append-only JSON Lines, best-effort).
@@ -432,3 +450,135 @@ def _parse_confidence(value: Optional[str]) -> float:
 
 #: Alias lama agar pemanggil dapat memakai nama yang lebih deskriptif.
 AetherTaskLog = TaskLog
+
+
+class TaskLogReader:
+    """Reader log task project-local (read-only, JSON Lines).
+
+    Membaca file `.aether/log/<task_id>.log` yang sudah ada.
+    Tidak menulis atau memodifikasi log apa pun.
+
+    Args:
+        root: root project target (string atau Path).
+        task_id: identifier task.
+    """
+
+    def __init__(self, root: Union[str, Path, AetherProjectStore], task_id: Any = None) -> None:
+        self.store = root if isinstance(root, AetherProjectStore) else AetherProjectStore(root)
+        self.task_id = safe_task_id(task_id) or new_task_id()
+        self.path = self.store.log_path(self.task_id)
+
+    def _read_lines(self) -> List[str]:
+        """Baca semua baris dari file log (best-effort, toleran terhadap error)."""
+        if not self.path.exists():
+            return []
+        try:
+            text = self.path.read_text(encoding="utf-8")
+            return [line for line in text.splitlines() if line.strip()]
+        except OSError:
+            return []
+
+    def load_events(self) -> List[Dict[str, Any]]:
+        """Baca semua event dari log task, parse JSON, abaikan baris rusak.
+
+        Returns:
+            Daftar event terurut chronological (sesuai urutan penulisan).
+            Setiap event adalah dict dengan kunci: timestamp, task_id, event, data.
+            Baris yang tidak valid secara JSON dilewati tanpa merusak event lain.
+        """
+        events: List[Dict[str, Any]] = []
+        for line in self._read_lines():
+            try:
+                event = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(event, dict):
+                continue
+            events.append(event)
+        return events
+
+    def get_task_info(self) -> Optional[Dict[str, Any]]:
+        """Ambil ringkasan task dari log (task_id, first/last timestamp, status, prompt).
+
+        Returns:
+            Dict dengan task_id, first_timestamp, last_timestamp, status, task (prompt).
+            None bila log tidak ditemukan atau kosong.
+        """
+        events = self.load_events()
+        if not events:
+            return None
+
+        first_ts = events[0].get("timestamp")
+        last_ts = events[-1].get("timestamp")
+
+        # Cari status terminal dan prompt.
+        status = "incomplete"
+        prompt = ""
+        result = None
+        error = None
+
+        for ev in events:
+            evt = ev.get("event", "")
+            data = ev.get("data", {}) or {}
+            if evt == "task_requested":
+                prompt = data.get("prompt", "")
+            elif evt == "task_completed":
+                status = "completed"
+                result = data.get("result")
+            elif evt == "task_failed":
+                status = "failed"
+                error = data.get("error")
+            elif evt == "task_cancelled":
+                status = "cancelled"
+            elif evt == "task_finished":
+                # task_finished bisa jadi fallback status; gunakan bila belum ada status terminal.
+                if status not in ("completed", "failed", "cancelled"):
+                    status = data.get("status", "incomplete")
+                    if data.get("result") is not None and result is None:
+                        result = data.get("result")
+                    if data.get("error") is not None and error is None:
+                        error = data.get("error")
+
+        return {
+            "task_id": self.task_id,
+            "first_timestamp": first_ts,
+            "last_timestamp": last_ts,
+            "status": status,
+            "task": prompt,
+            "result": result,
+            "error": error,
+        }
+
+    def get_activity(self, event_types: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """Ambil seluruh activity chronological untuk task ini.
+
+        Args:
+            event_types: daftar tipe event yang relevan untuk activity.
+                Bila None, semua event termasuk tool activity ikut diambil.
+
+        Returns:
+            Daftar event terurut chronological berdasarkan timestamp.
+        """
+        events = self.load_events()
+        if event_types is not None:
+            events = [e for e in events if e.get("event") in event_types]
+        return events
+
+    def get_report(self) -> Optional[str]:
+        """Ambil final Agent Report dari task_completed atau task_finished.
+
+        Source utama: task_completed.data.result.
+        Fallback: task_finished.data.result.
+
+        Returns:
+            Teks report final atau None bila tidak ditemukan.
+        """
+        events = self.load_events()
+        for ev in reversed(events):
+            evt = ev.get("event", "")
+            data = ev.get("data", {}) or {}
+            if evt == "task_completed" and "result" in data:
+                return data["result"]
+            if evt == "task_finished" and "result" in data:
+                return data["result"]
+        return None
