@@ -286,6 +286,24 @@ button {
   color: #c4b5fd;
 }
 
+/* Chip status colors for Task chip */
+.chip.ready {
+  border-color: rgba(34, 211, 238, 0.35);
+  color: #67e8f9;
+}
+.chip.running {
+  border-color: rgba(96, 165, 250, 0.4);
+  color: #93c5fd;
+}
+.chip.completed {
+  border-color: rgba(52, 211, 153, 0.35);
+  color: #6ee7b7;
+}
+.chip.failed {
+  border-color: rgba(248, 113, 113, 0.35);
+  color: #fca5a5;
+}
+
 /* ---- Workspace body grid ---- */
 .ws-body {
   flex: 1 1 auto;

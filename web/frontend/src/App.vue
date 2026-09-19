@@ -701,7 +701,7 @@ onBeforeUnmount(() => {
           >
         </div>
         <div class="ws-meta">
-          <span class="chip">Task: <span class="mono">{{ agentStatus.label }}</span></span>
+          <span class="chip" :class="agentStatus.cls">Task: <span class="mono">{{ agentStatus.label }}</span></span>
           <span class="chip">Changes: <span class="mono">{{ changes.length }}</span></span>
           <span class="chip" :class="{ accent: connected }">
             <span class="dot" :class="connected ? '' : 'err'"></span>{{ connected ? "live" : "offline" }}
