@@ -10,7 +10,7 @@
 // Layout 3 area: Sidebar | Agent Workbench | Changes/File Explorer.
 // Bootstrap 5 dipakai untuk layout/spacing/form/button/dropdown/responsive.
 
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import ProjectLauncher from "./components/ProjectLauncher.vue";
 import AgentActivity from "./components/AgentActivity.vue";
 import TaskComposer from "./components/TaskComposer.vue";
@@ -164,6 +164,7 @@ const consultantMessages = ref([
   { role: "user", text: "Hai, apa kabar?" },
   { role: "assistant", text: "Kabarmu baik! Saya siap membantu. Silakan tanyakan apa saja tentang project AETHER ini." },
 ]);
+const consultantMessagesRef = ref(null);
 
 function openConsultant() {
   consultantOpen.value = true;
@@ -171,6 +172,21 @@ function openConsultant() {
 function closeConsultant() {
   consultantOpen.value = false;
 }
+
+function scrollConsultantToBottom() {
+  nextTick(() => {
+    const el = consultantMessagesRef.value;
+    if (el) el.scrollTop = el.scrollHeight;
+  });
+}
+
+watch(consultantOpen, (open) => {
+  if (open) scrollConsultantToBottom();
+});
+
+watch(consultantMessages, () => {
+  if (consultantOpen.value) scrollConsultantToBottom();
+}, { deep: true });
 
 // Provider Instance + Model helpers (same logic as TaskComposer).
 const providerOptions = computed(() =>
@@ -1017,9 +1033,11 @@ onBeforeUnmount(() => {
               </select>
             </label>
           </div>
-          <button class="close-x" type="button" title="Close" @click="closeConsultant">×</button>
+          <button class="close-x" type="button" title="Close" @click="closeConsultant">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
         </div>
-        <div class="consultant-messages">
+        <div class="consultant-messages" ref="consultantMessagesRef">
           <div v-for="(msg, i) in consultantMessages" :key="i" class="cmsg" :class="msg.role">
             <span class="crole">{{ msg.role === 'assistant' ? 'AETHER' : 'You' }}</span>
             <span class="ctext">{{ msg.text }}</span>

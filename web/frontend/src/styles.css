@@ -922,13 +922,16 @@ button {
 
 /* ---- Consultant modal ---- */
 .modal.consultant-m {
-  max-width: 560px;
+  max-width: 720px;
   max-height: calc(100vh - 100px);
+  width: 90vw;
   padding: 0;
   display: flex;
   flex-direction: column;
   background: linear-gradient(180deg, var(--bg-elev), #14111f);
   overflow: hidden;
+  border-radius: 14px;
+  margin: 50px auto;
 }
 
 .consultant-head {
@@ -979,6 +982,25 @@ button {
   overflow-y: auto;
 }
 
+.close-x {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #b0d4f0;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  flex: 0 0 auto;
+  transition: background 0.15s ease, color 0.15s ease;
+  padding: 0;
+}
+.close-x:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+
 .consultant-messages {
   flex: 1 1 auto;
   min-height: 0;
@@ -1005,17 +1027,17 @@ button {
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--text-faint);
+  color: #b0d4f0;
   margin-bottom: 2px;
 }
 .cmsg.user .crole {
-  color: var(--accent-2);
+  color: #b0d4f0;
   text-align: right;
 }
 .ctext {
   font-size: 13px;
   line-height: 1.55;
-  color: var(--text-dim);
+  color: #ffffff;
   padding: 9px 13px;
   border-radius: 12px;
   background: var(--bg-panel);
@@ -1024,9 +1046,9 @@ button {
   word-break: break-word;
 }
 .cmsg.user .ctext {
-  background: rgba(139, 92, 246, 0.16);
-  border-color: rgba(139, 92, 246, 0.3);
-  color: var(--text);
+  background: rgba(139, 92, 246, 0.22);
+  border-color: rgba(139, 92, 246, 0.4);
+  color: #ffffff;
 }
 
 .consultant-foot {
