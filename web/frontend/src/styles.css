@@ -1333,6 +1333,22 @@ select.input-a {
 .stop-btn:hover {
   filter: brightness(1.1);
 }
+/* Agent Input saat task berjalan: tombol memperlebar untuk menampilkan label
+   "Running…" sebagai feedback status (aksi klik tetap Stop task). */
+.stop-btn-run {
+  width: auto;
+  padding: 0 12px;
+  gap: 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.2px;
+}
+.stop-btn-run .stop-label {
+  white-space: nowrap;
+}
 
 /* ---- Page host (tasks/projects/history/settings) ---- */
 .page-host {
@@ -2711,5 +2727,10 @@ select.input-a {
 }
 .run-task-btn:hover {
   filter: brightness(1.08);
+}
+.run-task-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+  filter: none;
 }
 

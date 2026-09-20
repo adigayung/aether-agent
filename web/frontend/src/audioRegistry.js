@@ -18,38 +18,50 @@
 //   3. add an entry to SOUNDS (and, if needed, STATUS_TO_SOUND)
 // No playback logic inside any component has to change.
 
+import startSound from "../../../assets/audio/start.wav";
 import succeedSound from "../../../assets/audio/succeed.wav";
 import failedSound from "../../../assets/audio/failed.wav";
 import stopSound from "../../../assets/audio/stop.wav";
 
 // Sound registry: logical sound name -> resolved asset URL.
 export const SOUNDS = Object.freeze({
+  start: startSound,
   succeed: succeedSound,
   failed: failedSound,
   stop: stopSound,
 });
 
-// Actual AETHER terminal task status -> logical sound name.
+// Actual AETHER task status -> logical sound name.
 // Statuses verified against the running code (see new_analisa.txt):
+//   task_started    -> gateway/runtime          -> task.status "running"
 //   task_completed  -> runtime._lifecycle_finalize -> task.status "completed"
 //   task_failed     -> runtime._lifecycle_finalize -> task.status "failed"
 //   task_cancelled  -> gateway cancel_task         -> task.status "cancelled"
+//
+// `running` is the ONLY non-terminal status mapped here: it marks the real
+// transition from idle -> running, so `start.wav` plays as feedback that the
+// task has ACTUALLY begun (not when the user clicks Run Task). Every other
+// mapped key is a terminal outcome.
 const STATUS_TO_SOUND = Object.freeze({
+  running: "start",
   completed: "succeed",
   failed: "failed",
   cancelled: "stop",
 });
 
-// Deduplication — one playback per terminal transition.
-// The last terminal status that produced a sound is remembered; repeating the
-// same terminal status (e.g. duplicate SSE delivery of "completed") does NOT
-// replay. `resetAudioTracker()` is called when a new task starts, so the next
-// terminal transition is allowed to play again. This is intentionally NOT a
-// state machine: it is a single "last transition" marker.
+// Deduplication — one playback per real status transition.
+// The last status that produced a sound is remembered; repeating the same
+// status (e.g. duplicate SSE delivery of "running" or "completed") does NOT
+// replay. Distinct transitions still play: running -> start, then completed ->
+// succeed, then a new task -> start again. `resetAudioTracker()` is called when
+// a new task is created, so the next "running" transition is allowed to play.
+// This is intentionally NOT a state machine: it is a single "last transition"
+// marker.
 let lastPlayedStatus = null;
 
 /**
- * Play the sound registered for a terminal AETHER task status.
+ * Play the sound registered for a real AETHER task status transition
+ * (non-terminal `running` -> start; terminal completed/failed/cancelled).
  *
  * No-op for unknown / non-terminal statuses, and for a terminal status that
  * was already played (deduplication). Triggered only by real terminal task

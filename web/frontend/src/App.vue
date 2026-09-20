@@ -298,6 +298,10 @@ function handleEvent(evt) {
     case "task_started":
       task.status = "running";
       runtime.activity = "Starting task";
+      // Audio feedback HANYA saat task BENAR-BENAR mulai berjalan (transisi
+      // status nyata), bukan saat user klik Run Task/Send. Dedup di
+      // audioRegistry mencegah dobel-putar bila event running diterima ulang.
+      playStatusSound("running");
       break;
     case "phase_changed":
       if (p.phase) {
@@ -888,12 +892,13 @@ onBeforeUnmount(() => {
               </button>
               <button
                 v-else
-                class="stop-btn"
+                class="stop-btn stop-btn-run"
                 type="button"
                 title="Stop task"
                 @click="stopTask"
               >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+                <span class="stop-label">Running…</span>
               </button>
             </div>
             <div v-if="error" class="wb-error">{{ error }}</div>
@@ -1040,6 +1045,7 @@ onBeforeUnmount(() => {
       :providers="llmProviders"
       :provider-instance-id="selectedProviderInstanceId"
       :model-id="selectedModelId"
+      :running="isRunning"
       @close="closeConsultant"
       @update:provider-instance-id="selectedProviderInstanceId = $event"
       @update:model-id="selectedModelId = $event"

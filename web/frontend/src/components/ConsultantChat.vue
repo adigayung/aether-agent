@@ -15,6 +15,10 @@ const props = defineProps({
   providers: { type: Array, default: () => [] },
   providerInstanceId: { type: String, default: "" },
   modelId: { type: String, default: "" },
+  // Status task Agent yang sedang berjalan (dari App.vue, sumber tunggal).
+  // Dipakai untuk men-disable "Run Task" + label "Running…" selama task
+  // berjalan, agar tidak ada double-submit dari Task Proposal yang sama.
+  running: { type: Boolean, default: false },
 });
 
 const emit = defineEmits([
@@ -233,7 +237,7 @@ const lastProposal = computed(() => {
 });
 
 function runTask() {
-  if (!lastProposal.value) return;
+  if (!lastProposal.value || props.running) return;
   emit("run-task", lastProposal.value);
 }
 
@@ -348,9 +352,9 @@ onMounted(() => {
         <div v-if="lastProposal" class="consultant-proposal">
           <div class="cp-head">
             <span class="cp-title">Task Proposal</span>
-            <button class="run-task-btn" type="button" @click="runTask">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
-              Run Task
+            <button class="run-task-btn" type="button" :disabled="running" @click="runTask">
+              <svg v-if="!running" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+              {{ running ? "Running…" : "Run Task" }}
             </button>
           </div>
           <pre class="cp-body">{{ lastProposal }}</pre>

@@ -150,3 +150,94 @@ STATUS AKHIR
 - Verifikasi: `python scripts/check_workbench.py` -> 12/12 LULUS.
 - Frontend-only: `git diff --numstat -- src web/django_app web/frontend/src/...`
   KOSONG (tidak ada perubahan Python/backend/komponen).
+
+=======================================================================
+TASK: UX feedback saat task berjalan (Run Task / Send disabled + 'Running...',
+      audio start.wav saat task BENAR-BENAR mulai running).
+MODE: Implementasi. Frontend-only. Tidak ada perubahan backend/API/Python.
+=======================================================================
+
+FILES CHANGED
+-------------
+1. web/frontend/src/audioRegistry.js
+2. web/frontend/src/App.vue
+3. web/frontend/src/components/ConsultantChat.vue
+4. web/frontend/src/styles.css
+
+(assets/audio/start.wav sudah ada di disk; untracked di git, hanya di-import Vite.)
+
+APPROACH / ROOT CAUSE
+---------------------
+- Sebelumnya tidak ada indikator bahwa task sedang berjalan pada tombol
+  "Run Task" (Consultant) maupun tombol Send (Agent Input), sehingga user bisa
+  klik berulang (risiko double-submit).
+- Audio feedback "start" belum terdaftar; STATUS_TO_SOUND hanya memuat status
+  terminal (completed/failed/cancelled), tanpa transisi non-terminal "running".
+- Sumber status running TUNGGAL yang sudah ada adalah computed `isRunning` di
+  App.vue (dipakai toggle send/stop button). Dipakai ulang; tidak ada state
+  machine baru.
+
+FIX
+---
+1. audioRegistry.js
+   - import startSound dari assets/audio/start.wav (relatif; Vite menghash ->
+     /assets/start-<hash>.wav, disajikan Django dari dist).
+   - SOUNDS += start.
+   - STATUS_TO_SOUND += running: "start" (transisi nyata idle -> running).
+   - Deduplication memakai marker `lastPlayedStatus` yang sudah ada: satu
+     playback per transisi nyata; "running" berulang (duplikat SSE) tidak
+     replay, dan setelah resetAudioTracker() (dipanggil di submitTask saat task
+     baru dibuat) transisi running berikutnya boleh diputar lagi.
+2. App.vue
+   - handleEvent case "task_started": tambah playStatusSound("running") tepat
+     saat transisi status ke running (BUKAN saat klik).
+   - Teruskan :running="isRunning" ke <ConsultantChat> (single source of truth).
+   - Agent Input: tombol saat running kini kelas "stop-btn stop-btn-run" dengan
+     ikon stop + label "Running...". Tombol Send (idle) tidak lagi tampil saat
+     running (kondisi v-if/v-else yang sudah ada), sehingga Send efektif
+     disabled + ada label Running...; aksi klik tetap Stop task (tidak
+     menghilangkan kapabilitas stop yang sudah ada).
+3. ConsultantChat.vue
+   - Tambah prop `running: { type: Boolean, default: false }`.
+   - runTask(): guard `if (!lastProposal.value || props.running) return;`
+     (anti double-submit).
+   - Template .run-task-btn: `:disabled="running"`, ikon disembunyikan saat
+     running, label dinamis `{{ running ? "Running..." : "Run Task" }}`.
+   - Struktur modal TIDAK berubah: .consultant-messages tetap scroll owner,
+     .consultant-foot tetap sibling flex-shrink:0, .consultant-proposal tetap di
+     dalam .consultant-messages.
+4. styles.css
+   - .run-task-btn:disabled { cursor:not-allowed; opacity:.6; filter:none }.
+   - .stop-btn-run { width:auto; padding:0 12px; gap:7px; inline-flex; font 12px;
+     font-weight:650 } + .stop-btn-run .stop-label { white-space:nowrap } agar
+     label "Running..." proporsional dengan send/stop btn dan tema AETHER.
+
+VALIDATION
+----------
+- Build produksi dari web/frontend:
+  `node node_modules/vite/bin/vite.js build` -> sukses, 31 modules, 0 error.
+  (Naik dari 30 -> 31 karena import asset start.wav.)
+- Bundle dist memuat:
+  * dist/assets/start-CeRQShPN.wav (emit baru)
+  * STATUS_TO_SOUND {running:"start",completed:"succeed",failed:"failed",cancelled:"stop"}
+  * SOUNDS {start, succeed, failed, stop}
+  * App.vue: wi("running") pada case task_started
+  * ConsultantChat: prop running, disabled:e.running, label Running...
+  * Agent Input: class "stop-btn stop-btn-run" + label Running...
+- git status: hanya 4 file frontend berubah + assets/audio/start.wav (untracked).
+  TIDAK ada file Python/backend yang berubah.
+
+BACKEND UNCHANGED
+-----------------
+Tidak menyentuh Agent execution, ConsultantService, API, orchestrator, task
+creation, logging (.aether/log), SessionStore/SSE, maupun Task lifecycle.
+
+CATATAN / REMAINING WORK
+------------------------
+- Audio diputar sekali per transisi nyata ke running (dedup berbasis
+  lastPlayedStatus). Berlaku untuk KEDUA entry point (Consultant Run Task &
+  Agent Input) karena keduanya memicu SSE task_started yang sama.
+- Reset label/disabled mengikuti transisi terminal (completed/failed/cancelled)
+  yang sudah men-set task.status sehingga isRunning kembali false.
+- Verifikasi interaktif di browser (klik nyata, audio) belum dijalankan;
+  validasi berbasis build + inspeksi bundle/source.
