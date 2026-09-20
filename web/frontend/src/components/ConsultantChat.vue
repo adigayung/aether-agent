@@ -135,6 +135,36 @@ function assistantText(msg) {
   return stripTaskProposal(msg.text);
 }
 
+// --- Copy pesan -------------------------------------------------------------
+// Salin isi bubble ke clipboard. Untuk assistant: salin teks yang SAMA dengan
+// yang tampil di bubble (tanpa blok fenced Task Proposal), bukan teks mentah
+// yang memuat ```task. Untuk user: salin teks pesan apa adanya.
+// Indeks pesan yang baru saja disalin, untuk feedback "Copied" sementara.
+const copiedIndex = ref(-1);
+let copiedTimer = null;
+
+function messageCopyText(msg) {
+  if (!msg) return "";
+  if (msg.role === "assistant") return assistantText(msg);
+  return msg.text || "";
+}
+
+async function copyMessage(msg, index) {
+  const text = messageCopyText(msg);
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (e) {
+    return;
+  }
+  copiedIndex.value = index;
+  if (copiedTimer) clearTimeout(copiedTimer);
+  copiedTimer = setTimeout(() => {
+    copiedIndex.value = -1;
+    copiedTimer = null;
+  }, 1400);
+}
+
 watch(messages, scrollToBottom, { deep: true });
 
 function summarizeTools(events) {
@@ -353,6 +383,22 @@ onMounted(() => {
             <span v-for="(t, ti) in msg.tools" :key="ti" class="consultant-tool" :class="t.success ? 'ok' : 'err'">
               {{ t.success ? "✓" : "✗" }} {{ t.tool }}<template v-if="t.target"> {{ t.target }}</template>
             </span>
+          </div>
+          <!-- Tombol copy: di bawah-kiri setiap card/bubble pesan. Menyalin teks
+               bubble apa adanya (assistant: tanpa blok Task Proposal). -->
+          <div class="cmsg-actions">
+            <button
+              type="button"
+              class="copy-btn"
+              :class="{ copied: copiedIndex === i }"
+              :title="copiedIndex === i ? 'Copied' : 'Copy message'"
+              :aria-label="copiedIndex === i ? 'Copied' : 'Copy message'"
+              @click="copyMessage(msg, i)"
+            >
+              <svg v-if="copiedIndex === i" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+              <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <span class="copy-label">{{ copiedIndex === i ? "Copied" : "Copy" }}</span>
+            </button>
           </div>
           <!-- Task Proposal mengalir sebagai bagian dari message flow: ia
                dirender inline di dalam pesan yang menghasilkannya (bukan selalu

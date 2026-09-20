@@ -159,3 +159,101 @@ Frontend build: `node node_modules/vite/bin/vite.js build` (dari web/frontend)
 - CancellationToken tetap satu-satunya primitif cancellation.
 - .aether/log tidak dihapus/diubah; SessionStore/SSE tidak diubah.
 - Provider/model system tidak diubah.
+
+===============================================================================
+=== FITUR: TOMBOL COPY DI SETIAP PESAN CONSULTANT CHAT ===
+===============================================================================
+
+Tujuan: menambah tombol "Copy" di SETIAP card/bubble pesan pada Consultant Chat
+(user maupun assistant), diposisikan di BAWAH-KIRI bubble.
+
+--------------------------------------------------------------------------------
+1. FILE YANG DIUBAH
+--------------------------------------------------------------------------------
+Frontend (frontend-only, tidak menyentuh backend/Python):
+- web/frontend/src/components/ConsultantChat.vue
+- web/frontend/src/styles.css
+
+Tidak ada perubahan pada: consultant/, services.py, views.py, api.js,
+orchestrator, Project Bible, atau backend lainnya.
+
+--------------------------------------------------------------------------------
+2. VERIFIKASI SUMBER (INVESTIGATE)
+--------------------------------------------------------------------------------
+- Pesan dirender via v-for atas `messages` di ConsultantChat.vue.
+  * User      : { role: "user", text, images }
+  * Assistant : { role: "assistant", text, tools, taskProposal, failed }
+- Bubble user  -> .cmsg.user  berisi .ctext (teks apa adanya: msg.text).
+- Bubble assistant -> .cmsg berisi .consultant-md (render Markdown) ATAU .ctext,
+  yang isinya = assistantText(msg) = stripTaskProposal(msg.text).
+  => Teks assistant yang tampil SUDAH di-strip dari blok fenced ```task
+     (Task Proposal ditampilkan terpisah di .consultant-proposal). Maka copy
+     untuk assistant WAJIB memakai assistantText(msg), bukan msg.text mentah,
+     agar yang disalin = yang benar-benar terlihat di bubble.
+- API clipboard existing: navigator.clipboard.writeText(...).catch(() => {})
+  (pola sama dipakai FileExplorer.vue ctxCopyPath/ctxCopyFullPath).
+- Belum ada tombol copy pada bubble (dikonfirmasi).
+
+--------------------------------------------------------------------------------
+3. IMPLEMENTASI
+--------------------------------------------------------------------------------
+ConsultantChat.vue (script):
+- messageCopyText(msg): assistant -> assistantText(msg); user -> msg.text.
+- copyMessage(msg, index): await navigator.clipboard.writeText(text);
+  set copiedIndex=index lalu reset ke -1 setelah 1400ms (feedback "Copied"),
+  dengan clearTimeout agar tidak ada timer ganda.
+- copiedIndex = ref(-1) sebagai penanda pesan yang baru disalin; timer
+  disimpan pada variabel lokal (copiedTimer).
+
+ConsultantChat.vue (template):
+- Ditambahkan blok .cmsg-actions berisi <button class="copy-btn"> sebagai anak
+  TERAKHIR dari .cmsg (setelah konten pesan, tools, proposal, selects),
+  sehingga muncul di BAWAH-KIRI setiap bubble (kedua role).
+- Ikon SVG copy (dua rect tumpang tindih) saat idle; ikon centang saat
+  copiedIndex === i. Label teks "Copy" / "Copied".
+- title & aria-label dinamis ("Copy message" / "Copied").
+
+styles.css:
+- .cmsg-actions { display:flex; justify-content:flex-start; margin-top:1px }
+  => tombol menempel kiri-bawah bubble.
+- .copy-btn (flex inline, padding 3px 9px, radius 7px, warna --text-faint,
+  transition halus).
+- .copy-btn:hover (bg rgba(255,255,255,.06), warna #cdb9f5, border border-soft).
+- .copy-btn.copied (warna hijau #6ee7b7 + border hijau lembut).
+- .copy-label (font-weight 600, letter-spacing .02em).
+Gaya konsisten dengan tema AETHER (dark, compact, non-neon).
+
+--------------------------------------------------------------------------------
+4. PERILAKU
+--------------------------------------------------------------------------------
+- Klik "Copy" pada bubble user   -> menyalin teks pesan user.
+- Klik "Copy" pada bubble AETHER -> menyalin teks yang tampil (tanpa blok
+  fenced Task Proposal), bukan teks mentah.
+- Setelah klik, label berubah menjadi "Copied" (ikon centang) selama ~1.4s lalu
+  kembali normal.
+- Bila clipboard API gagal (mis. izin browser), fungsi return tanpa error UI.
+
+--------------------------------------------------------------------------------
+5. VALIDASI
+--------------------------------------------------------------------------------
+- Build produksi: `node node_modules/vite/bin/vite.js build` (dari web/frontend)
+  -> 32 modules, 0 errors.
+- Bundle JS (dist/assets/index-*.js) memuat: "copy-btn", navigator.clipboard
+  .writeText, label "Copied"/"Copy".
+- Bundle CSS (dist/assets/index-*.css) memuat: .cmsg-actions, .copy-btn,
+  .copy-btn:hover, .copy-btn.copied, .copy-label.
+- git status: HANYA web/frontend/src/components/ConsultantChat.vue dan
+  web/frontend/src/styles.css (plus new_analisa.txt). Tidak ada file
+  backend/Python/API yang berubah.
+
+--------------------------------------------------------------------------------
+6. KONFIRMASI BOUNDARY
+--------------------------------------------------------------------------------
+- Frontend-only. Tidak ada perubahan backend/Python, API, task execution,
+  logging, SessionStore/SSE, orchestrator, atau Project Bible.
+- Kontrak layout modal TIDAK diubah: .consultant-messages tetap scroll owner,
+  .consultant-foot tetap sibling flex-shrink:0, .consultant-proposal tetap di
+  dalam .consultant-messages.
+- Fitur existing TIDAK diubah: mode Quick/Investigate, dropdown provider/model,
+  attach image, Run Task, keyboard Enter=newline / Shift+Enter=send, auto-scroll.
+- Tanpa dependensi baru; memakai navigator.clipboard bawaan browser.
