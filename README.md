@@ -90,6 +90,40 @@ host tambahan. Untuk menjalankan backend di host/port lain:
 .\scripts\run_backend.ps1 -BindHost 0.0.0.0 -Port 8000
 ```
 
+## Instalasi cepat (run.bat)
+
+`run.bat` di root repo adalah launcher **self-bootstrapping**: deteksi folder
+AETHER -> `git clone` bila belum ada -> siapkan venv + dependency + `.env` +
+frontend production build -> jalankan di `http://127.0.0.1:8000/` (satu proses,
+idempotent). Logika instalasinya ada di `scripts/install_aether.py`
+(**stdlib-only**, tanpa dependency tambahan).
+
+Menguji alur instalasi **tanpa mengunduh atau mengubah apa pun** (dry-run
+offline) — berguna di lingkungan tanpa koneksi:
+
+```bat
+set AETHER_SIMULATE=1
+run.bat
+```
+
+Atau langsung lewat installer:
+
+```powershell
+# Cetak rencana per-langkah (SKIP / AKAN) + ringkasan langkah butuh koneksi vs LOKAL
+python scripts\install_aether.py --simulate
+python scripts\install_aether.py --simulate --root D:\folder\kosong
+
+# Verifikasi offline (tanpa network, tanpa mutasi working tree)
+python scripts\check_installer.py
+```
+
+Mode simulasi **tidak** menjalankan `git clone`/`pip install`/`npm install`/
+`vite build`/`runserver` dan tidak menulis/menyalin file. Set
+`AETHER_NONINTERACTIVE=1` untuk mencegah `pause` pada konteks otomatis.
+Catatan: langkah build frontend memerlukan **Node.js** (npm hanya dipakai bila
+`web/frontend/node_modules` belum ada); AETHER tidak meng-install Node
+otomatis.
+
 ## Deployment
 
 Deployment dasar (tanpa container/orchestrator):

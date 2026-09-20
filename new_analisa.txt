@@ -292,3 +292,168 @@ BATAS / CATATAN
   - Verifikasi klik interaktif di browser tidak dilakukan di lingkungan ini;
     validasi = build + verifier statis + SSR probe.
 ===========================================================================
+
+===========================================================================
+AETHER INSTALLER — MODE SIMULASI (DRY-RUN OFFLINE) + VERIFIER OFFLINE
+Tujuan: alur first-run (run.bat + scripts/install_aether.py) dapat diuji dan
+        diverifikasi TANPA unduhan (git clone / pip install / npm install)
+        dan TANPA mutasi apa pun (tidak menulis/menyalin file).
+Status: FIXED + VERIFIED (offline < 1s; backend/core/frontend TIDAK disentuh)
+===========================================================================
+
+1. FILE YANG DIUBAH
+---------------------------------------------------------------------------
+  M run.bat
+      - Deteksi mode simulasi (gate): aktif bila env AETHER_SIMULATE diset
+        ATAU AETHER_ARGS memuat "--simulate" (findstr /i = case-insensitive).
+      - Jalur simulasi TIDAK menjalankan `git clone`; mencetak
+        "[AETHER] [SIMULATE] clone dilewati: <REPO_URL> -> <INSTALL_DIR>".
+      - Installer selalu dipanggil dengan `--simulate` (SIM_ARGS) saat gate aktif.
+      - Subroutine baru `:simulate_no_root` (folder AETHER belum ada +
+        simulasi): panggil `install_aether.py --simulate --root <INSTALL_DIR>`
+        atau lewati dengan pesan informatif (tanpa error) bila installer belum ada.
+      - Subroutine baru `:detect_python` (dipakai jalur normal & jalur simulasi;
+        perilaku jalur normal tidak berubah).
+      - :fail TIDAK lagi `pause` bila SIMULATE aktif atau AETHER_NONINTERACTIVE
+        diset (anti-hang di konteks otomatis); `pause` tetap ada untuk
+        double-click manusia pada mode nyata.
+      - Header komentar: dokumentasi mode simulasi + AETHER_NONINTERACTIVE.
+
+  ?? scripts/check_installer.py (BARU, verifier offline deterministik)
+      - [1] --simulate root nyata: exit 0, < 5s, semua label langkah +
+        RINGKASAN (butuh koneksi vs LOKAL) + pernyataan "tidak ada perubahan".
+      - [2] --simulate --root <tempdir kosong>: exit 0, melaporkan clone
+        (butuh koneksi, tidak dijalankan), dan tempdir TETAP KOSONG.
+      - [3] --skip-frontend / --rebuild-frontend / --host / --port / --SIMULATE
+        (kapital) tetap berfungsi lewat jalur simulasi.
+      - [4] Anti-network/mutasi: `subprocess.run` TIDAK PERNAH dipanggil
+        (monkeypatch + assert), `launch()`/_open_browser_later() diblokir & assert.
+      - [5] --check tetap exit 0 & cepat (tanpa regresi).
+      - [6] Assertion struktural run.bat: gate simulasi ada SEBELUM satu-satunya
+        baris perintah `git clone`, "clone dilewati" ada, :fail melewati `pause`.
+      - [7] Boundary: `git diff --name-only -- src web/django_app` kosong.
+
+  ?? scripts/install_aether.py (BARU/di-extend dari sesi sebelumnya)
+      - Flag baru `--simulate` (store_true) + fungsi `run_simulation(...)`.
+      - Helper read-only baru: `_aether_markers()`, `looks_like_aether()`,
+        `port_in_use()` (socket connect_ex), `deps_stamp_state()` (tanpa proses).
+      - `_normalize_argv()`: toleransi kapitalisasi `--SIMULATE` (yang bisa
+        datang dari gate run.bat yang case-insensitive).
+      - `main()`: cabang simulasi dijalankan SEBELUM validasi marker, sehingga
+        root yang belum ada (belum di-clone) tetap dapat disimulasikan.
+      - Import baru: `socket` (stdlib). Installer tetap stdlib-only.
+
+  M README.md
+      - Bagian baru "Instalasi cepat (run.bat)": alur self-bootstrapping,
+        cara menjalankan dry-run (AETHER_SIMULATE=1 / --simulate), verifier
+        offline, catatan Node.js wajib untuk build frontend.
+
+  M new_analisa.txt (bagian ini)
+
+Konfirmasi scope:
+  $ git status --porcelain
+      M README.md
+      M run.bat
+      ?? scripts/check_installer.py
+      ?? scripts/install_aether.py
+  $ git diff --stat -- src web/django_app web/frontend
+      (kosong) -> Agent core/reasoning, tool registry/policy, provider,
+                  queue/scheduler, .aether/log, SessionStore/SSE, API task
+                  execution, dan frontend TIDAK berubah.
+
+2. SEMANTIK MODE SIMULASI (`--simulate`)
+---------------------------------------------------------------------------
+DILARANG & TERBUKTI TIDAK DIJALANKAN:
+  - `git clone`, `python -m venv`, `pip install`, `npm install`, `vite build`,
+    `manage.py runserver`; membuka browser; menulis/menyalin file (termasuk .env).
+  Implementasi: `run_simulation()` hanya memakai operasi read-only —
+  `shutil.which`, `Path.exists`, `sys.version_info`, dan cek port via
+  `socket.connect_ex` — sehingga TIDAK ADA panggilan `subprocess.run` sama
+  sekali (dibuktikan oleh check [4]).
+
+URUTAN RENCANA + PENANDA STATE per langkah:
+  [DETEKSI]   root, marker AETHER, versi Python, git/node/npm
+  [CLONE]     SKIP (instalasi sudah ada) | "root belum ada; langkah pertama =
+              git clone <REPO_URL> -> <root> (butuh koneksi, tidak dijalankan)"
+  [VENV]      SKIP (sudah ada) | AKAN: `<sys.executable> -m venv <root>\venv` (LOKAL)
+  [DEPS]      SKIP (stamp cocok) | AKAN: `pip install -r requirements.txt` (koneksi)
+  [ENV]       SKIP (.env ada) | AKAN: salin deployment.template -> .env (LOKAL)
+  [FRONTEND]  SKIP (dist/index.html ada) | AKAN: `npm install` (koneksi) +
+              `node node_modules/vite/bin/vite.js build` (LOKAL)
+  [LAUNCH]    AKAN: `<python> manage.py runserver <host>:<port>` (LOKAL, BLOCKING)
+              + info/WARNING status port
+  RINGKASAN:  "<n> langkah butuh koneksi, <n> langkah LOKAL, <n> langkah SKIP"
+              + "Tidak ada perubahan file / unduhan yang dilakukan (dry-run murni)."
+
+Semantik exit code: 0 bila simulasi selesai (langkah "butuh koneksi" hanya
+informasi, bukan kegagalan); non-zero hanya bila argumen/root tidak dapat
+diproses.  Flag `--check`, `--skip-frontend`, `--rebuild-frontend`, `--host`,
+`--port` tetap dihormati di jalur simulasi (tercermin di rencana).
+
+3. LANGKAH NETWORK vs LOKAL (hasil klasifikasi)
+---------------------------------------------------------------------------
+  BUTUH KONEKSI (3 titik, semua dilaporkan & dilewati di mode simulasi):
+    - `git clone <REPO_URL> <INSTALL_DIR>`  (dieksekusi run.bat, bukan installer)
+    - `pip install -r requirements.txt`     (installer: install_deps)
+    - `npm install` di web/frontend         (installer: ensure_frontend,
+                                             hanya bila node_modules belum ada)
+  LOKAL / TANPA KONEKSI:
+    - deteksi marker folder & state instalasi
+    - `python -m venv <root>\venv`
+    - salin `deployment.template` -> `.env`
+    - `node node_modules/vite/bin/vite.js build` (butuh node_modules yang ada)
+    - `python manage.py runserver <host>:<port>` (BLOCKING; entry backend tetap
+      web/django_app/manage.py)
+
+4. HASIL VERIFIKASI (OFFLINE, TANPA MUTASI)
+---------------------------------------------------------------------------
+  a) `python scripts/install_aether.py --simulate` (root saat ini)
+       -> exit 0, ~0.10s; output: [DETEKSI] marker DITEMUKAN (pyproject.toml,
+          web/django_app/manage.py, web/frontend/package.json), [CLONE] SKIP,
+          [VENV] SKIP, [DEPS] SKIP, [ENV] SKIP, [FRONTEND] SKIP,
+          [LAUNCH] AKAN runserver 127.0.0.1:8000 + WARNING "port 8000 sedang
+          dipakai" (benar: gateway AETHER lain sedang LISTENING di 8000),
+          RINGKASAN 0 koneksi / 1 LOKAL / 5 SKIP + pernyataan tanpa perubahan.
+  b) `python scripts/install_aether.py --simulate --root dummy_test\sim_root_probe`
+       -> exit 0, ~0.11s; [CLONE] "root belum ada ... (butuh koneksi, tidak
+          dijalankan)", [VENV] AKAN (LOKAL), [DEPS]/[ENV]/[FRONTEND]/[LAUNCH]
+          "TIDAK DAPAT DILANJUTKAN" (root kosong); folder tetap KOSONG
+          (`dir /b` tidak menampilkan apa pun) -> bukti tanpa mutasi.
+  c) `cmd /c "set AETHER_SIMULATE=1&& run.bat"` -> exit 0, ~0.21s,
+       "[AETHER] [SIMULATE] Dry-run aktif", clone TIDAK dijalankan, TIDAK
+       menggantung (tanpa `pause`).
+  d) `cmd /c "set AETHER_ARGS=--SIMULATE&& run.bat"` -> gate case-insensitive
+       aktif; setelah normalisasi `--SIMULATE` -> `--simulate` di installer,
+       exit 0 (sebelum normalisasi argparse menolak "unrecognized arguments").
+  e) run.bat di folder TANPA instalasi AETHER (AETHER_INSTALL_DIR=target_root,
+       AETHER_SIMULATE=1) -> "[SIMULATE] clone dilewati ..." lalu installer
+       dijalankan `--simulate --root target_root` -> exit 0, tanpa hang.
+  f) `python scripts/check_installer.py` -> SEMUA LULUS:
+       [1]..[7] OK, ditutup "[OK] Installer simulation OK".
+  g) `python scripts/install_aether.py --check` -> exit 0, ~0.03s (tanpa regresi).
+  h) `python scripts/install_aether.py --no-launch` (jalur NYATA, idempotent)
+       -> exit 0, ~0.28s: "Virtual environment OK", "Dependency runtime sudah
+          terpasang (skip)", ".env ditemukan (tidak diubah)", "Frontend
+          production build sudah ada (skip)", "Setup selesai (--no-launch)".
+          -> mode nyata tidak berubah perilakunya & tidak memicu network.
+  i) `python scripts/check_packaging.py` -> 8/8 OK (README + packaging tetap valid).
+  j) `git status --porcelain -- src web/django_app web/frontend` -> kosong.
+
+5. BATAS / CATATAN
+---------------------------------------------------------------------------
+  - Verifikasi jalur LAUNCH nyata TIDAK dilakukan (dan tidak boleh) dengan
+    menahan `runserver` di foreground via run_command — itu penyebab hang
+    permanen (grandchild memegang pipe). Mode simulasi sengaja tidak pernah
+    blocking dan tidak menyentuh server.
+  - Mode simulasi TIDAK memverifikasi import dependency secara nyata (tidak
+    menjalankan probe `python -c "import django, ..."`); status DEPS hanya dari
+    stamp hash requirements.txt (dinyatakan eksplisit di output).
+  - Artefak uji yang DIBUAT sesi ini (dummy_test/sim_root_probe,
+    dummy_test/sim_bat_probe) sudah dihapus. Artefak uji lama
+    (dummy_test/inst_probe, dummy_test/_t_strip.bat, dummy_test/queue_sched_tmp,
+    file stray `$null`) tetap dibiarkan — menunggu keputusan user.
+  - `run.bat` dan `scripts/install_aether.py` masih belum di-commit (menunggu
+    keputusan user), termasuk perubahan README pada task ini.
+  - Installer tetap stdlib-only; tidak ada dependency baru; tidak ada command
+    Unix (Windows-only).
+===========================================================================
