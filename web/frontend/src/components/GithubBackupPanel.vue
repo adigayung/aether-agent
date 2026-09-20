@@ -273,7 +273,7 @@ watch(
               class="gb-input"
               type="password"
               autocomplete="new-password"
-              :placeholder="config.credential_set ? '•••••••• (tersimpan, terenkripsi)' : 'ghp_…'"
+              :placeholder="config.credential_set ? '•••••••• (tersimpan, terenkripsi)' : 'github_pat_…'"
             />
           </label>
           <label class="gb-field">
