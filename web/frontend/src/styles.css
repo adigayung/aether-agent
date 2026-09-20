@@ -1135,15 +1135,14 @@ button {
   flex: 1 1 auto;
   min-width: 0;
 }
-/* Varian inline: dirender sebagai bagian alur pesan di dalam
-   .consultant-messages (di bawah card Task Proposal), bukan di header. */
+/* Varian inline: menyatu DI DALAM card Task Proposal (bukan bar terpisah di
+   dalam .consultant-messages). Sejajar kiri tombol Run Task pada .cp-foot. */
 .consultant-selects.inline {
-  flex: 0 0 auto;
-  width: 100%;
-  padding: 8px 10px;
-  border: 1px solid var(--border-soft);
-  border-radius: 10px;
-  background: rgba(0, 0, 0, 0.16);
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 .consultant-select {
   display: flex;
@@ -1236,13 +1235,23 @@ button {
   border-color: rgba(139, 92, 246, 0.55);
   color: #f3eefb;
 }
+/* Teks di dalam bubble user (dipisah dari tombol copy agar rapi). */
+.ctext-body {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* Body markdown bubble assistant (tombol copy ikut di dalam card). */
+.consultant-md .md-body {
+  min-width: 0;
+}
 
-/* --- Copy button (bawah-kiri tiap bubble pesan) --- */
+/* --- Copy button (DI DALAM card pesan, sudut kiri bawah bubble) --- */
 .cmsg-actions {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  margin-top: 1px;
+  margin-top: 8px;
 }
 .copy-btn {
   display: inline-flex;
@@ -2837,16 +2846,20 @@ select.input-a {
   border-radius: 8px;
   padding: 10px 12px;
 }
-/* Tombol Run Task berada DI BAWAH seluruh isi card (title -> body -> button). */
+/* Footer card Task Proposal: Provider/Model (KIRI) sejajar dengan tombol
+   Run Task (KANAN) dalam satu baris. */
 .cp-foot {
   display: flex;
-  justify-content: flex-end;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
   margin-top: 10px;
 }
 .run-task-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  flex: 0 0 auto;
   padding: 6px 12px;
   border-radius: 8px;
   border: 1px solid var(--accent);

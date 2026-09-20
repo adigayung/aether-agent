@@ -189,10 +189,17 @@ function closeConsultant() {
 // Task Proposal dari Consultant -> task Agent (alur task existing submitTask).
 // Modal Consultant SENGAJA tetap terbuka agar user dapat terus melihat
 // percakapan/aktivitas Consultant setelah task dikirim ke Agent.
+// `submittedTaskId` = task yang baru dibuat (dipakai ConsultantChat untuk
+// men-disable tombol Run Task milik Task Proposal itu sampai task terminal).
+const submittedTaskId = ref("");
+// task_id terakhir yang mencapai status terminal (completed/failed/cancelled).
+const terminalTaskId = ref("");
 async function runConsultantTask(text) {
   if (!text) return;
   await submitTask(text);
-  // Task baru (queue_state=pending) -> refresh panel TASKS.
+  // Task baru (queue_state=pending) -> refresh panel TASKS + beri tahu
+  // ConsultantChat task mana yang menjadi milik tombol Run Task.
+  submittedTaskId.value = task.id || "";
   queueRefresh.value += 1;
 }
 
@@ -383,12 +390,14 @@ function handleEvent(evt) {
       // Refresh File Explorer setelah agent selesai (file baru terlihat).
       explorerRefresh.value += 1;
       queueRefresh.value += 1;
+      terminalTaskId.value = evt.task_id || task.id || "";
       playStatusSound("completed");
       refreshTaskHistory();
       break;
     case "task_failed":
       task.status = "failed";
       queueRefresh.value += 1;
+      terminalTaskId.value = evt.task_id || task.id || "";
       playStatusSound("failed");
       refreshTaskHistory();
       break;
@@ -398,6 +407,7 @@ function handleEvent(evt) {
       runtime.activity = "";
       runtime.tool = "";
       queueRefresh.value += 1;
+      terminalTaskId.value = evt.task_id || task.id || "";
       playStatusSound("cancelled");
       refreshTaskHistory();
       break;
@@ -1081,6 +1091,8 @@ onBeforeUnmount(() => {
       :provider-instance-id="selectedProviderInstanceId"
       :model-id="selectedModelId"
       :running="isRunning"
+      :submitted-task-id="submittedTaskId"
+      :terminal-task-id="terminalTaskId"
       :queue-refresh-key="queueRefresh"
       @close="closeConsultant"
       @update:provider-instance-id="selectedProviderInstanceId = $event"

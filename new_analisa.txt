@@ -1,341 +1,141 @@
-=== GLOBAL TASK QUEUE AETHER — SERIAL SCHEDULER (1 EXECUTION SLOT) ===
-
-Scope: melengkapi subsystem queue yang SUDAH ADA (TaskRecord.queue_state,
-queue_order, Queue API, QueuePanel.vue) dengan scheduler serial nyata.
-TIDAK ada queue/task manager/scheduler kedua. Queue tetap in-memory.
-
---------------------------------------------------------------------------------
-1. FILE YANG DIUBAH
---------------------------------------------------------------------------------
-Backend:
-- web/django_app/api/services.py        (GatewayService: scheduler + slot)
-
-Frontend:
-- web/frontend/src/App.vue              (mount QueuePanel di Workbench right column)
-- web/frontend/src/styles.css           (.wb-queue styling)
-
-Verifikasi (baru):
-- scripts/check_task_queue_scheduler.py (verifier scheduler serial)
-
-Tidak diubah: execution.py, views.py, urls.py, core TaskStatus
-(src/agent_ai/tasks/models.py), runtime.py, orchestrator, provider, policy,
-Consultant, .aether/log writer, SessionStore/SSE.
+================================================================================
+AETHER — Consultant Chat UI: 3 Perbaikan (Run Task Queue, Copy Button, Provider/Model)
+================================================================================
+Scope      : Frontend-only
+Files      : web/frontend/src/App.vue
+             web/frontend/src/components/ConsultantChat.vue
+             web/frontend/src/styles.css
+Backend    : TIDAK DISENTUH (git diff --numstat -- src web/django_app => kosong)
+Build      : node node_modules/vite/bin/vite.js build (dari web/frontend) => 32 modules, 0 errors
+Environment: Windows (tanpa command Unix)
 
 --------------------------------------------------------------------------------
-2. PERUBAHAN UTAMA PER FILE
+1) OBSERVATION (kondisi sebelum perubahan)
 --------------------------------------------------------------------------------
-web/django_app/api/services.py
-- __init__: tambah self._pumping = False (penjaga re-entrancy pump; BUKAN
-  sumber kebenaran status slot).
-- create_task(): TIDAK lagi memanggil _start_execution langsung. Sekarang:
-    if self.auto_execute: self._scheduler_pump()
-  Task baru SELALU masuk antrian sebagai queue_state="pending" (default
-  TaskRecord), lalu dipromosikan ke "running" oleh pump BILA tidak ada blocker.
-- _scheduler_pump()  [BARU]: satu-satunya pemilih task berikutnya.
-    * di dalam self._lock: bila self._cancel_tokens tidak kosong ATAU ada
-      task queue_state=="running" -> slot terpakai, return (menutup race Stop
-      vs scheduler; menjamin tidak pernah 2 eksekusi paralel).
-    * pilih kandidat = queue_state=="pending" && status not in
-      (completed,failed,cancelled), urut (queue_order, task_id) -> FIFO.
-    * tandai slot ATOMIC: candidate.queue_state="running" + buat & daftarkan
-      CancellationToken (sinkron, sebelum thread jalan).
-    * keluar lock, lalu run_in_background(_execute_task) -> TIDAK menahan lock
-      saat TaskExecutor bekerja.
-    * kegagalan start: pulihkan queue_state="pending" + buang token (anti stall).
-- _start_execution(): dipertahankan untuk kompatibilitas pemanggil existing/
-  verifier; kini juga memastikan slot "running" bila masih pending.
-- _execute_task(): dibungkus try/finally -> _run_task_inner() menjalankan isi.
-    finally SELALU melepas slot:
-      - pop cancellation token (semua path, termasuk exception),
-      - queue_state -> "done" bila masih "running" (anti nyangkut),
-      - panggil _scheduler_pump() -> task berikutnya (FIFO) mulai.
-  Ini TITIK PELEPASAN SLOT di gateway (BUKAN di runtime.py).
-- _run_task_inner(): isi eksekusi (dipisah agar finally di atas bersih).
-- set_queue_state(): setelah disable/enable, panggil _scheduler_pump() (di luar
-  lock). Enable bisa langsung mempromosikan ke RUNNING sesuai queue_order.
-- cancel_task(): bila task dibatalkan saat BELUM running (tidak ada token),
-  pump dipanggil agar antrian bergerak. Bila RUNNING, slot dilepas oleh
-  _execute_task.finally setelah cancellation mencapai terminal state.
-- _update_task_status(): tidak diubah — tetap menyetel queue_state
-  "running"/"done" sebagai proyeksi UI.
-
-web/frontend/src/App.vue
-- import QueuePanel dari ./components/QueuePanel.vue.
-- Mount <QueuePanel class="wb-queue" :refresh-key="queueRefresh"
-  @stop-task="stopQueueTask" @view-task="viewQueueTask" /> di dalam
-  .ws-col.right, DI ATAS ChangesPanel + FileExplorer. Memakai komponen & API
-  queue yang SAMA dengan Consultant (satu queue global). Handler
-  stopQueueTask/viewQueueTask sudah ada (cancel_task + history/activity).
-
-web/frontend/src/styles.css
-- .wb-queue: flex column, min-height:0, overflow:hidden, padding:0,
-  max-height:210px (blok TASKS pinned dengan scroll internal pada .q-body).
-- .wb-queue.collapsed: max-height:none (header-only saat collapsed).
-  EXPLORER tetap memakai sisa tinggi kolom dan tetap satu-satunya scroll owner
-  daftar file.
+- ConsultantChat.vue memakai prop `running` (:running="isRunning" dari App.vue)
+  dan mengikat `:disabled="running"` pada .run-task-btn. Karena isRunning = true
+  bila ADA task global lain yang berjalan, user tidak bisa mengantrikan Task
+  Proposal baru — padahal queue global (concurrency=1) justru untuk itu.
+- App.vue::isRunning = computed dari task.status (task = task yang sedang
+  ditampilkan di Workbench, bukan task milik Task Proposal tertentu).
+- Tombol copy sudah ada (.cmsg-actions > .copy-btn) tetapi dirender sebagai
+  SIBLING di luar bubble (.ctext / .consultant-md), jadi terlihat "menggantung"
+  di bawah card.
+- .consultant-selects.inline (Provider/Model dropdown) dirender sebagai blok
+  TERPISAH setelah .consultant-proposal (bukan di dalam card).
+- Kontrak layout modal TIDAK diubah: .consultant-messages tetap scroll owner
+  (flex:1 1 auto; min-height:0; overflow-y:auto), .consultant-foot tetap sibling
+  flex-shrink:0, .consultant-proposal tetap DI DALAM .consultant-messages.
 
 --------------------------------------------------------------------------------
-3. CARA KERJA SCHEDULER SEKARANG
+2) ROOT CAUSE
 --------------------------------------------------------------------------------
-Struktur: satu queue GLOBAL (self._tasks) + satu scheduler + SATU execution
-slot. Consultant dan Workbench membaca/menulis queue yang sama.
-
-Alur:
-  create_task(auto_execute=True)
-      -> TaskRecord(queue_state="pending", queue_order=++seq)
-      -> _scheduler_pump()
-            slot bebas? -> promote ke "running" (atomic di lock)
-                        -> run_in_background(_execute_task) di luar lock
-            slot terpakai? -> tetap "pending"
-  _execute_task(...)
-      -> TaskExecutor.run(...)  (AgentRuntime/AgentOrchestrator TIDAK diubah)
-      -> on_status(...) -> _update_task_status (status lifecycle)
-      -> finally: lepas token + queue_state="done" + _scheduler_pump()
-  _scheduler_pump() lanjutan memilih pending berikutnya menurut queue_order.
-
-Jaminan:
-- Concurrency = 1 (slot tunggal; cek token+running di dalam lock).
-- FIFO by queue_order; Move Up/Down (move_task) mengubah queue_order -> benar-
-  benar mengubah task berikutnya.
-- Disabled TIDAK pernah dipilih (kandidat hanya queue_state=="pending").
-- Disable != Cancel; Cancel/Stop tetap memakai CancellationToken (primitif
-  tunggal). Slot dilepas hanya setelah execution benar-benar berakhir.
-- auto_execute=False: TIDAK ada eksekusi (kontrak verifier lain tetap utuh).
-- Lock TIDAK ditahan saat TaskExecutor bekerja.
+#1 Run Task disabled terlalu dini: satu boolean `running` dipakai untuk dua
+   makna berbeda — (a) "agent global sedang sibuk" (informasi) dan (b) "task
+   Proposal INI sedang berjalan / sudah disubmit" (harus memblokir). Karena
+   keduanya disatukan, agent busy memblokir antrian.
+#2 Copy button berada DI LUAR elemen bubble (sibling setelah .ctext /
+   .consultant-md), sehingga tidak terafiliasi visual dengan card pesan.
+#3 Provider/Model dipindah ke dalam .consultant-messages tapi sebagai elemen
+   terpisah, bukan bagian dari card Task Proposal.
 
 --------------------------------------------------------------------------------
-4. HASIL VERIFIKASI SKENARIO PENTING
+3) CHANGES
 --------------------------------------------------------------------------------
-scripts/check_task_queue_scheduler.py (task_executor palsu "gated"):
-  [1] Empty slot: A RUNNING -> selesai -> slot free ................. OK
-  [2] Serial: A,B,C -> HANYA 1 RUNNING, FIFO A->B->C, max concurrency=1 OK
-  [3] Disabled: B di-disable -> dilewati; A selesai -> C jalan; B tetap DISABLED OK
-  [4] Enable: B di-enable -> pending -> dieksekusi sesuai urutan .... OK
-  [5] Move Up/Down: queue_order mengubah task berikutnya ........... OK
-  [6] Stop: A STOP -> CANCELLED -> slot free -> B RUNNING (tanpa paralel) OK
-  [7] disable pada RUNNING ditolak (disable != cancel) .............. OK
-  [8] auto_execute=False -> tidak ada eksekusi (kontrak utuh) ...... OK
+A. web/frontend/src/components/ConsultantChat.vue
+   - Prop baru: `submittedTaskId` (task_id yang baru dibuat App.vue dari aksi
+     Run Task) dan `terminalTaskId` (task_id terakhir yang mencapai status
+     terminal). Prop `running` DIPERTAHANKAN sebagai informasi "agent busy"
+     (tidak lagi memblokir tombol) — kontrak prop tidak diputus.
+   - State baru: `submittedTaskId` (lokal), `terminalTaskId` (lokal),
+     `runDisabled = Boolean(submittedTaskId) && submittedTaskId !== terminalTaskId`.
+   - `runTask()`: guard `if (!target || runDisabled.value) return;` lalu set
+     `submittedTaskId.value = "__pending__"` + reset `terminalTaskId` SEBELUM
+     emit — anti double-submit instan (tanpa menunggu round-trip).
+   - watch(props.submittedTaskId) -> catat task milik tombol ini.
+   - watch(props.terminalTaskId) -> bila task terminal, `runDisabled` menjadi
+     false => tombol kembali enabled ("Run Task").
+   - Template: `<button class="run-task-btn" :disabled="runDisabled">` dengan
+     ikon panah tampil saat `!runDisabled` dan label `Running…` saat disabled.
+   - Copy button dipindah KE DALAM bubble:
+       * user  : `<div class="ctext"><span class="ctext-body">…</span>
+                  <div class="cmsg-actions">…</div></div>`
+       * assistant: `<div class="consultant-md md">
+                      <div class="md-body" v-html="renderMarkdown(...)"></div>
+                      <div class="cmsg-actions">…</div>
+                    </div>`
+     v-html dipindah ke `.md-body` (inner) agar tombol copy bisa berada di dalam
+     bubble tanpa tercampur konten markdown. Selector `.consultant-md.md p`
+     tetap berlaku (descendant). Desain tombol copy tidak diubah.
+   - Provider/Model: markup `.consultant-selects.inline` DIPINDAH KE DALAM
+     `.cp-foot` pada card `.consultant-proposal`.
 
-Regresi (semua PASS):
-- scripts/check_task_queue.py            (Queue API existing)
-- scripts/check_cancellation.py          (Stop end-to-end)
-- scripts/check_task_lifecycle.py        (TaskState/timestamps)
-- scripts/check_web_runtime.py           (Django Task API -> Runtime) [env]
-- scripts/check_django_gateway.py        (gateway tipis) [env]
-- scripts/check_consultant.py            (Consultant, auto_execute=False)
-- scripts/check_continuous_loop.py       (Agent loop tidak berubah)
-- scripts/check_orchestrator.py          (orchestrator tidak berubah)
-- scripts/check_executor.py              (tool executor tidak berubah)
-- scripts/check_streaming.py             (SSE) [env]
-- scripts/check_session.py               (session/event)
+B. web/frontend/src/App.vue
+   - Ref baru `submittedTaskId` + `terminalTaskId`.
+   - `runConsultantTask()`: setelah `await submitTask(text)`, set
+     `submittedTaskId.value = task.id || ""` (task milik tombol Run Task).
+   - `handleEvent()`: pada `task_completed` / `task_failed` / `task_cancelled`
+     set `terminalTaskId.value = evt.task_id || task.id || ""` — sehingga tombol
+     Run Task proposal tersebut kembali enabled pada status terminal.
+   - Teruskan `:submitted-task-id` dan `:terminal-task-id` ke <ConsultantChat>.
 
-Frontend build: `node node_modules/vite/bin/vite.js build` (dari web/frontend)
-  -> 32 modules, 0 errors. Bundle memuat .wb-queue dan QueuePanel di .ws-col.right.
-
-[env] = butuh DJANGO_ALLOWED_HOSTS=testserver,127.0.0.1,localhost (pre-existing).
-
---------------------------------------------------------------------------------
-5. MASALAH YANG MASIH DITEMUKAN
---------------------------------------------------------------------------------
-- scripts/check_web_settings.py gagal pada assertion statis
-  "include_api_key=True" not in services.py. Terkonfirmasi PRE-EXISTING:
-  gagal identik pada HEAD (diuji via git stash) — terkait kode provider
-  Consultant yang sudah ada, BUKAN pekerjaan queue ini.
-- Queue tetap in-memory (sesuai desain): restart = antrian kosong.
-- QueuePanel.vue masih memakai poll 5 detik + refreshKey; belum ada event SSE
-  khusus queue (di luar scope task ini).
-- Verifikasi frontend terbatas pada build produksi + inspeksi bundle
-  (tanpa uji interaksi browser).
-
---------------------------------------------------------------------------------
-6. KONFIRMASI BOUNDARY ARSITEKTUR
---------------------------------------------------------------------------------
-- Satu queue GLOBAL, satu scheduler, satu slot. Tidak ada ConsultantQueue /
-  WorkbenchQueue / TaskManager kedua / scheduler kedua.
-- Core TaskStatus & TERMINAL_STATUSES TIDAK diubah; queue_state tetap field
-  terpisah pada TaskRecord.
-- AgentRuntime / AgentOrchestrator / loop / tool policy TIDAK diubah; runtime
-  tidak tahu soal queue. Pelepasan slot ada di gateway (_execute_task.finally).
-- CancellationToken tetap satu-satunya primitif cancellation.
-- .aether/log tidak dihapus/diubah; SessionStore/SSE tidak diubah.
-- Provider/model system tidak diubah.
-
-===============================================================================
-=== FITUR: TOMBOL COPY DI SETIAP PESAN CONSULTANT CHAT ===
-===============================================================================
-
-Tujuan: menambah tombol "Copy" di SETIAP card/bubble pesan pada Consultant Chat
-(user maupun assistant), diposisikan di BAWAH-KIRI bubble.
+C. web/frontend/src/styles.css
+   - `.cp-foot`: dari `justify-content:flex-end` menjadi
+     `display:flex; align-items:flex-end; justify-content:space-between;
+      gap:10px;` => Provider/Model di KIRI, Run Task di KANAN, sejajar.
+   - `.consultant-selects.inline`: dari bar kotak (padding/border/background)
+     menjadi `flex:1 1 auto; min-width:0; padding:0; border:0;
+      background:transparent;` => menyatu di dalam card.
+   - `.run-task-btn`: tambah `flex:0 0 auto` agar tombol tidak menyusut.
+   - `.cmsg-actions`: `margin-top` 1px -> 8px (kini berada DI DALAM bubble).
+   - Tambah `.ctext-body { display:block; white-space:pre-wrap; word-break:break-word }`.
+   - Tambah `.consultant-md .md-body { min-width:0 }`.
 
 --------------------------------------------------------------------------------
-1. FILE YANG DIUBAH
+4) STATUS MAPPING / PERILAKU
 --------------------------------------------------------------------------------
-Frontend (frontend-only, tidak menyentuh backend/Python):
-- web/frontend/src/components/ConsultantChat.vue
-- web/frontend/src/styles.css
-
-Tidak ada perubahan pada: consultant/, services.py, views.py, api.js,
-orchestrator, Project Bible, atau backend lainnya.
-
---------------------------------------------------------------------------------
-2. VERIFIKASI SUMBER (INVESTIGATE)
---------------------------------------------------------------------------------
-- Pesan dirender via v-for atas `messages` di ConsultantChat.vue.
-  * User      : { role: "user", text, images }
-  * Assistant : { role: "assistant", text, tools, taskProposal, failed }
-- Bubble user  -> .cmsg.user  berisi .ctext (teks apa adanya: msg.text).
-- Bubble assistant -> .cmsg berisi .consultant-md (render Markdown) ATAU .ctext,
-  yang isinya = assistantText(msg) = stripTaskProposal(msg.text).
-  => Teks assistant yang tampil SUDAH di-strip dari blok fenced ```task
-     (Task Proposal ditampilkan terpisah di .consultant-proposal). Maka copy
-     untuk assistant WAJIB memakai assistantText(msg), bukan msg.text mentah,
-     agar yang disalin = yang benar-benar terlihat di bubble.
-- API clipboard existing: navigator.clipboard.writeText(...).catch(() => {})
-  (pola sama dipakai FileExplorer.vue ctxCopyPath/ctxCopyFullPath).
-- Belum ada tombol copy pada bubble (dikonfirmasi).
+- Run Task: ENABLED saat ada task global berjalan (task masuk antrian pending).
+- Klik Run Task: langsung DISABLED, label "Running…" (anti double-submit).
+- Kembali ENABLED hanya saat task yang di-submit dari tombol itu mencapai
+  status terminal: completed | failed | cancelled (event SSE terminal).
+- Scheduler/queue backend (queue_state, _scheduler_pump) TIDAK diubah — UI
+  hanya mengandalkan event terminal SSE yang sudah ada.
 
 --------------------------------------------------------------------------------
-3. IMPLEMENTASI
+5) VALIDATION
 --------------------------------------------------------------------------------
-ConsultantChat.vue (script):
-- messageCopyText(msg): assistant -> assistantText(msg); user -> msg.text.
-- copyMessage(msg, index): await navigator.clipboard.writeText(text);
-  set copiedIndex=index lalu reset ke -1 setelah 1400ms (feedback "Copied"),
-  dengan clearTimeout agar tidak ada timer ganda.
-- copiedIndex = ref(-1) sebagai penanda pesan yang baru disalin; timer
-  disimpan pada variabel lokal (copiedTimer).
-
-ConsultantChat.vue (template):
-- Ditambahkan blok .cmsg-actions berisi <button class="copy-btn"> sebagai anak
-  TERAKHIR dari .cmsg (setelah konten pesan, tools, proposal, selects),
-  sehingga muncul di BAWAH-KIRI setiap bubble (kedua role).
-- Ikon SVG copy (dua rect tumpang tindih) saat idle; ikon centang saat
-  copiedIndex === i. Label teks "Copy" / "Copied".
-- title & aria-label dinamis ("Copy message" / "Copied").
-
-styles.css:
-- .cmsg-actions { display:flex; justify-content:flex-start; margin-top:1px }
-  => tombol menempel kiri-bawah bubble.
-- .copy-btn (flex inline, padding 3px 9px, radius 7px, warna --text-faint,
-  transition halus).
-- .copy-btn:hover (bg rgba(255,255,255,.06), warna #cdb9f5, border border-soft).
-- .copy-btn.copied (warna hijau #6ee7b7 + border hijau lembut).
-- .copy-label (font-weight 600, letter-spacing .02em).
-Gaya konsisten dengan tema AETHER (dark, compact, non-neon).
+- Build: node node_modules/vite/bin/vite.js build => 32 modules, 0 errors.
+- Bundle CSS (dist/assets/index-CcmppJLY.css) memuat:
+    .cp-foot{display:flex;align-items:flex-end;justify-content:space-between…
+    .cmsg-actions{…margin-top:8px}
+    .consultant-md .md-body
+    .ctext-body{display:block…
+    .consultant-selects.inline{flex:1 1 auto;min-width:0;padding:0;border:0;background:transparent}
+    .run-task-btn{…flex:0 0 auto…
+- Bundle JS (dist/assets/index-B5R0sGwq.js) memuat:
+    marker "__pending__", prop "submittedTaskId"/"terminalTaskId",
+    label "Run Task" dan "Running…", class "md-body" dan "ctext-body".
+- Backend tidak tersentuh: `git diff --numstat -- src web/django_app` kosong.
+- `git status --porcelain` hanya: App.vue, ConsultantChat.vue, styles.css.
 
 --------------------------------------------------------------------------------
-4. PERILAKU
+6) ARCHITECTURE IMPACT
 --------------------------------------------------------------------------------
-- Klik "Copy" pada bubble user   -> menyalin teks pesan user.
-- Klik "Copy" pada bubble AETHER -> menyalin teks yang tampil (tanpa blok
-  fenced Task Proposal), bukan teks mentah.
-- Setelah klik, label berubah menjadi "Copied" (ikon centang) selama ~1.4s lalu
-  kembali normal.
-- Bila clipboard API gagal (mis. izin browser), fungsi return tanpa error UI.
+- Nol perubahan pada Agent reasoning/loop/tool policy/provider, queue backend,
+  scheduler, .aether/log, SessionStore/SSE, Task lifecycle, Project Bible.
+- Tidak ada subsystem/komponen baru. Reuse penuh: prop + emit existing,
+  selector wait existing, audio registry existing (start sound tetap dipicu oleh
+  event task_started, tidak diubah).
+- Kontrak layout modal Consultant dipertahankan apa adanya.
 
 --------------------------------------------------------------------------------
-5. VALIDASI
+7) REMAINING WORK / CATATAN
 --------------------------------------------------------------------------------
-- Build produksi: `node node_modules/vite/bin/vite.js build` (dari web/frontend)
-  -> 32 modules, 0 errors.
-- Bundle JS (dist/assets/index-*.js) memuat: "copy-btn", navigator.clipboard
-  .writeText, label "Copied"/"Copy".
-- Bundle CSS (dist/assets/index-*.css) memuat: .cmsg-actions, .copy-btn,
-  .copy-btn:hover, .copy-btn.copied, .copy-label.
-- git status: HANYA web/frontend/src/components/ConsultantChat.vue dan
-  web/frontend/src/styles.css (plus new_analisa.txt). Tidak ada file
-  backend/Python/API yang berubah.
-
---------------------------------------------------------------------------------
-6. KONFIRMASI BOUNDARY
---------------------------------------------------------------------------------
-- Frontend-only. Tidak ada perubahan backend/Python, API, task execution,
-  logging, SessionStore/SSE, orchestrator, atau Project Bible.
-- Kontrak layout modal TIDAK diubah: .consultant-messages tetap scroll owner,
-  .consultant-foot tetap sibling flex-shrink:0, .consultant-proposal tetap di
-  dalam .consultant-messages.
-- Fitur existing TIDAK diubah: mode Quick/Investigate, dropdown provider/model,
-  attach image, Run Task, keyboard Enter=newline / Shift+Enter=send, auto-scroll.
-- Tanpa dependensi baru; memakai navigator.clipboard bawaan browser.
-
-=== TASK INDEPENDEN — BATASI TINGGI BLOK "CHANGES" DI RIGHT WORKBENCH COLUMN ===
-
-Tujuan: blok CHANGES (ChangesPanel) di right workbench column menjadi ringkas
-(maksimum tinggi kecil + scroll internal) sehingga blok EXPLORER (FileExplorer)
-selalu terlihat dan daftar file-nya dapat di-scroll, berapapun jumlah perubahan.
-
---------------------------------------------------------------------------------
-1. FILE YANG DIUBAH
---------------------------------------------------------------------------------
-- web/frontend/src/components/ChangesPanel.vue  (markup: header tetap + body scroll)
-- web/frontend/src/styles.css                   (batas tinggi CHANGES + scroll owner)
-- new_analisa.txt                               (catatan ini)
-Tidak ada file Python/backend/API/FileExplorer.vue yang disentuh.
-
---------------------------------------------------------------------------------
-2. ROOT CAUSE
---------------------------------------------------------------------------------
-- .ws-col.right adalah flex column (overflow:hidden; min-height:0) yang berisi
-  3 blok: QueuePanel.wb-queue, ChangesPanel (section.block), FileExplorer (section.block.explorer-block).
-- Rule lama `.ws-col.right > .block:not(.explorer-block) { flex: 0 0 auto }`
-  membuat CHANGES memakai tinggi NATURAL dan TIDAK boleh menyusut.
-- ChangesPanel (section.block) tidak punya wrapper scroll (baris .file-row
-  dirender langsung di dalam section.block) dan tidak ada batas tinggi.
-- Akibatnya, dengan 3+ item perubahan, CHANGES mendorong .explorer-block ke
-  bawah kolom hingga header EXPLORER + daftar file keluar dari pandangan, dan
-  karena .explorer-block butuh sisa tinggi untuk mengaktifkan scroll internalnya,
-  daftar file tidak bisa diakses.
-
---------------------------------------------------------------------------------
-3. FIX
---------------------------------------------------------------------------------
-Markup (ChangesPanel.vue):
-- Bungkus konten (list .file-row + .cp-diff + .cp-result) ke dalam <div class="changes-body">.
-- .block-head dibiarkan di luar wrapper sebagai header tetap.
-- Pola meniru .ex-head (header flex:0 0 auto) + .explorer (list scroll owner).
-
-CSS (styles.css):
-- `.ws-col.right > .block:not(.explorer-block)` diubah dari `flex: 0 0 auto`
-  menjadi `flex: 0 1 auto; min-height: 0; overflow: hidden` (CHANGES boleh menyusut).
-- Rule khusus blok CHANGES (`.ws-col.right > .block:not(.explorer-block):not(.wb-queue)`):
-    display:flex; flex-direction:column; max-height:30%; min-height:96px;
-  sehingga CHANGES selalu ringkas dan tidak pernah menelan kolom.
-- `.block-head` anak blok CHANGES: flex:0 0 auto (header tetap terlihat).
-- `.changes-body`: flex:1 1 auto; min-height:0; overflow-y:auto; overflow-x:hidden
-  + scrollbar tipis bertema AETHER (scrollbar-width:thin; var(--border)/var(--bg-hover)).
-- Selector :not(.wb-queue) dipakai agar blok TASKS (QueuePanel) yang sudah punya
-  batas tinggi sendiri (max-height:210px) tidak ikut terpengaruh.
-- Media query ≤1080px (mode stacked, .ws-col.right{overflow:visible}): %-based
-  max-height tidak bermakna, jadi CHANGES diberi `max-height:240px` eksplisit.
-
-Kontrak Explorer TIDAK diubah (tetap utuh): .explorer-block{flex:1 1 auto;
-min-height:0; overflow:hidden}; .ex-head{flex:0 0 auto}; .explorer{flex:1 1 auto;
-min-height:0; overflow-y:auto; overflow-x:hidden}. .ws-body tetap
-grid-template-rows:minmax(0,1fr); .ws-col.right tetap overflow:hidden; min-height:0.
-
---------------------------------------------------------------------------------
-4. VALIDASI
---------------------------------------------------------------------------------
-- Build: `node node_modules/vite/bin/vite.js build` dari web/frontend →
-  32 modules transformed, 0 error.
-- Bundle CSS dist/assets/index-BX1Oiyj8.css memuat: `.changes-body` (true),
-  `max-height:30%` (true), `grid-template-rows:minmax(0,1fr)` (true), `.explorer{` (true).
-- Kontrak Explorer diverifikasi utuh di bundle:
-  `.explorer-block{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;overflow:hidden}`
-  dan `.ex-head{...;flex:0 0 auto}`.
-- `python scripts/check_workbench.py` → 12/12 PASS termasuk
-  [12] Explorer daftar file scroll owner OK.
-- `git status --porcelain` → hanya web/frontend/src/components/ChangesPanel.vue
-  dan web/frontend/src/styles.css (plus new_analisa.txt). `git diff --numstat -- src web/django_app`
-  kosong → tidak ada perubahan backend/Python.
-
---------------------------------------------------------------------------------
-5. PERILAKU SETELAH FIX
---------------------------------------------------------------------------------
-- Dengan 0/1/3/10 item di CHANGES: CHANGES dibatasi max-height:30% kolom dengan
-  min-height:96px, daftar perubahan punya scroll internal.
-- EXPLORER selalu menerima sisa tinggi kolom (flex:1 1 auto) dan tetap menjadi
-  SATU-SATUNYA scroll owner untuk daftar file; header EXPLORER selalu terlihat.
-- Tidak ada perubahan perilaku FileExplorer (open/rename/delete/reveal/context menu).
-- Tidak ada horizontal overflow (overflow-x:hidden pada .changes-body & .explorer).
-- QueuePanel (wb-queue) tidak terpengaruh (tetap max-height:210px, scroll .q-body).
+- `terminalTaskId` hanya melacak SATU task terakhir yang terminal. Cukup untuk
+  alur serial (concurrency=1) satu Task Proposal pada satu waktu.
+- Bila task yang di-submit dibatalkan/di-remove dari antrian sebelum pernah
+  running, tombol tetap disabled sampai status terminal (cancelled) diterima —
+  sesuai permintaan ("kembali enabled saat task mencapai status terminal").
+- Verifikasi visual (klik nyata di browser) belum dijalankan; validasi bersifat
+  build + inspeksi bundle.
+================================================================================

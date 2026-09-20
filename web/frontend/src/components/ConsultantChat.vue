@@ -17,9 +17,16 @@ const props = defineProps({
   providerInstanceId: { type: String, default: "" },
   modelId: { type: String, default: "" },
   // Status task Agent yang sedang berjalan (dari App.vue, sumber tunggal).
-  // Dipakai untuk men-disable "Run Task" + label "Running…" selama task
-  // berjalan, agar tidak ada double-submit dari Task Proposal yang sama.
+  // Ini INFORMASI "global agent busy" — TIDAK memblokir Run Task, karena
+  // antrian global (concurrency=1) memang menerima task baru saat slot terisi.
   running: { type: Boolean, default: false },
+  // task_id task yang BARU SAJA dibuat App.vue dari aksi Run Task (di-bump
+  // App.vue setiap submitTask). Dipakai child untuk mengetahui task miliknya.
+  submittedTaskId: { type: String, default: "" },
+  // task_id task yang mencapai status terminal (completed/failed/cancelled).
+  // Di-bump App.vue dari event SSE terminal. Bila cocok dengan task yang
+  // di-submit dari tombol ini -> tombol kembali enabled.
+  terminalTaskId: { type: String, default: "" },
   // Penanda refresh panel TASKS (dinaikkan App.vue setelah Run Task / event
   // terminal task). Panel TASKS membaca SATU queue global yang sama.
   queueRefreshKey: { type: Number, default: 0 },
@@ -290,9 +297,40 @@ const lastProposal = computed(() => {
   return null;
 });
 
+// --- Status Run Task (anti double-submit, TIDAK diblokir oleh agent busy) ----
+// State terpisah dari props.running (global agent busy). Kita hanya men-disable
+// tombol untuk task yang BENAR-BENAR di-submit dari tombol ini, sampai task
+// tersebut mencapai status terminal.
+const submittedTaskId = ref("");
+const terminalTaskId = ref("");
+const runDisabled = computed(
+  () => Boolean(submittedTaskId.value) && submittedTaskId.value !== terminalTaskId.value
+);
+
+// App.vue membuat task dari aksi Run Task -> catat task milik kita.
+watch(
+  () => props.submittedTaskId,
+  (id) => {
+    if (id && id !== submittedTaskId.value) submittedTaskId.value = id;
+  }
+);
+
+// Task kita mencapai status terminal -> tombol kembali enabled.
+watch(
+  () => props.terminalTaskId,
+  (id) => {
+    if (id) terminalTaskId.value = id;
+  }
+);
+
 function runTask(proposal) {
   const target = proposal || lastProposal.value;
-  if (!target || props.running) return;
+  if (!target || runDisabled.value) return;
+  // Disable langsung (anti double-submit) sampai task ini terminal. submitted
+  // id akan menyusul dari App.vue; untuk selang singkat itu kita pakai penanda
+  // "pending" agar tombol tidak bisa diklik dua kali.
+  submittedTaskId.value = "__pending__";
+  terminalTaskId.value = "";
   emit("run-task", target);
 }
 
@@ -371,76 +409,92 @@ onMounted(() => {
               alt="attachment"
             />
           </div>
-          <div v-if="msg.role === 'user'" class="ctext">{{ msg.text }}</div>
+          <div v-if="msg.role === 'user'" class="ctext">
+            <span class="ctext-body">{{ msg.text }}</span>
+            <!-- Tombol copy: DI DALAM card pesan, sudut kiri bawah bubble. -->
+            <div class="cmsg-actions">
+              <button
+                type="button"
+                class="copy-btn"
+                :class="{ copied: copiedIndex === i }"
+                :title="copiedIndex === i ? 'Copied' : 'Copy message'"
+                :aria-label="copiedIndex === i ? 'Copied' : 'Copy message'"
+                @click="copyMessage(msg, i)"
+              >
+                <svg v-if="copiedIndex === i" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+                <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                <span class="copy-label">{{ copiedIndex === i ? "Copied" : "Copy" }}</span>
+              </button>
+            </div>
+          </div>
           <!-- eslint-disable-next-line vue/no-v-html -->
           <div
             v-else-if="assistantText(msg)"
             class="consultant-md md"
             :class="{ failed: msg.failed }"
-            v-html="renderMarkdown(assistantText(msg))"
-          ></div>
+          >
+            <div class="md-body" v-html="renderMarkdown(assistantText(msg))"></div>
+            <!-- Tombol copy: DI DALAM card pesan, sudut kiri bawah bubble. -->
+            <div class="cmsg-actions">
+              <button
+                type="button"
+                class="copy-btn"
+                :class="{ copied: copiedIndex === i }"
+                :title="copiedIndex === i ? 'Copied' : 'Copy message'"
+                :aria-label="copiedIndex === i ? 'Copied' : 'Copy message'"
+                @click="copyMessage(msg, i)"
+              >
+                <svg v-if="copiedIndex === i" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+                <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                <span class="copy-label">{{ copiedIndex === i ? "Copied" : "Copy" }}</span>
+              </button>
+            </div>
+          </div>
           <div v-if="msg.role === 'assistant' && msg.tools && msg.tools.length" class="consultant-tools">
             <span v-for="(t, ti) in msg.tools" :key="ti" class="consultant-tool" :class="t.success ? 'ok' : 'err'">
               {{ t.success ? "✓" : "✗" }} {{ t.tool }}<template v-if="t.target"> {{ t.target }}</template>
             </span>
-          </div>
-          <!-- Tombol copy: di bawah-kiri setiap card/bubble pesan. Menyalin teks
-               bubble apa adanya (assistant: tanpa blok Task Proposal). -->
-          <div class="cmsg-actions">
-            <button
-              type="button"
-              class="copy-btn"
-              :class="{ copied: copiedIndex === i }"
-              :title="copiedIndex === i ? 'Copied' : 'Copy message'"
-              :aria-label="copiedIndex === i ? 'Copied' : 'Copy message'"
-              @click="copyMessage(msg, i)"
-            >
-              <svg v-if="copiedIndex === i" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
-              <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-              <span class="copy-label">{{ copiedIndex === i ? "Copied" : "Copy" }}</span>
-            </button>
           </div>
           <!-- Task Proposal mengalir sebagai bagian dari message flow: ia
                dirender inline di dalam pesan yang menghasilkannya (bukan selalu
                di akhir container), sehingga balasan Consultant berikutnya
                muncul DI BAWAH card dan card ikut naik seperti bubble lain.
                Card tetap berada di dalam area percakapan yang scrollable.
-               Urutan card: title -> body -> tombol Run Task di paling BAWAH. -->
+               Urutan card: title -> body -> footer (Provider/Model di KIRI,
+               tombol Run Task di KANAN, sejajar). -->
           <div v-if="msg.role === 'assistant' && msg.taskProposal" class="consultant-proposal">
             <div class="cp-head">
               <span class="cp-title">Task Proposal</span>
             </div>
             <pre class="cp-body">{{ msg.taskProposal }}</pre>
             <div class="cp-foot">
-              <button class="run-task-btn" type="button" :disabled="running" @click="runTask(msg.taskProposal)">
-                <svg v-if="!running" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
-                {{ running ? "Running…" : "Run Task" }}
+              <!-- Pemilihan Provider/Model menyatu DI DALAM card, di bawah,
+                   sejajar KIRI tombol Run Task. -->
+              <div class="consultant-selects inline">
+                <label class="consultant-select">
+                  <span class="cs-label">Provider</span>
+                  <select class="input-a" :value="providerInstanceId" @change="onProviderChange">
+                    <option v-if="!providerOptions.length" value="">No provider instance</option>
+                    <option v-for="p in providerOptions" :key="p.id" :value="p.id">
+                      {{ providerLabel(p) }}
+                    </option>
+                  </select>
+                </label>
+                <label class="consultant-select">
+                  <span class="cs-label">Model</span>
+                  <select class="input-a" :value="modelId" @change="onModelChange">
+                    <option v-if="!modelOptions.length" value="">No model</option>
+                    <option v-for="m in modelOptions" :key="m.id" :value="m.id">
+                      {{ m.model_name }}
+                    </option>
+                  </select>
+                </label>
+              </div>
+              <button class="run-task-btn" type="button" :disabled="runDisabled" @click="runTask(msg.taskProposal)">
+                <svg v-if="!runDisabled" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+                {{ runDisabled ? "Running…" : "Run Task" }}
               </button>
             </div>
-          </div>
-          <!-- Pemilihan Provider/Model: dropdown <select class="input-a"> seperti
-               semula, diletakkan DI BAWAH card Task Proposal sebagai bagian dari
-               alur pesan (ikut ter-scroll bersama percakapan). Memakai state
-               existing via emit update:providerInstanceId / update:modelId. -->
-          <div v-if="msg.role === 'assistant' && msg.taskProposal" class="consultant-selects inline">
-            <label class="consultant-select">
-              <span class="cs-label">Provider</span>
-              <select class="input-a" :value="providerInstanceId" @change="onProviderChange">
-                <option v-if="!providerOptions.length" value="">No provider instance</option>
-                <option v-for="p in providerOptions" :key="p.id" :value="p.id">
-                  {{ providerLabel(p) }}
-                </option>
-              </select>
-            </label>
-            <label class="consultant-select">
-              <span class="cs-label">Model</span>
-              <select class="input-a" :value="modelId" @change="onModelChange">
-                <option v-if="!modelOptions.length" value="">No model</option>
-                <option v-for="m in modelOptions" :key="m.id" :value="m.id">
-                  {{ m.model_name }}
-                </option>
-              </select>
-            </label>
           </div>
         </div>
 
