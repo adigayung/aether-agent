@@ -35,6 +35,29 @@ urlpatterns = [
     path("llm/models", views.llm_models, name="llm_models"),
     path("llm/models/<str:model_id>", views.llm_model_detail, name="llm_model_detail"),
     path("projects", views.projects, name="projects"),
+    # GitHub Backup routes HARUS mendahului "projects/<str:project_id>" agar
+    # sub-path literal tidak tertukar (project_id tidak memuat '/', namun
+    # urutan eksplisit lebih aman & konsisten).
+    path(
+        "projects/<str:project_id>/github",
+        views.project_github,
+        name="project_github",
+    ),
+    path(
+        "projects/<str:project_id>/github/test",
+        views.project_github_test,
+        name="project_github_test",
+    ),
+    path(
+        "projects/<str:project_id>/github/checkpoints",
+        views.project_github_checkpoints,
+        name="project_github_checkpoints",
+    ),
+    path(
+        "projects/<str:project_id>/github/restore",
+        views.project_github_restore,
+        name="project_github_restore",
+    ),
     path("projects/<str:project_id>", views.delete_project, name="delete_project"),
     path("active-project", views.active_project, name="active_project"),
     path("open-in-explorer", views.open_in_explorer, name="open_in_explorer"),

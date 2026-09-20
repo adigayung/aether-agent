@@ -2259,6 +2259,17 @@ select.input-a {
   display: grid;
   gap: 10px;
 }
+/* Detail project di halaman Projects (berisi GithubBackupPanel). */
+.proj-detail {
+  border-top: 1px solid var(--border-soft);
+  margin-top: 6px;
+}
+.proj-detail .panel-head {
+  border-bottom: none;
+}
+.proj-detail .desc.mono {
+  overflow-wrap: anywhere;
+}
 .aether-table {
   width: 100%;
   border-collapse: collapse;

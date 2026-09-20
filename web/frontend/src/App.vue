@@ -17,6 +17,7 @@ import CodeEditor from "./components/CodeEditor.vue";
 import TaskComposer from "./components/TaskComposer.vue";
 import ChangesPanel from "./components/ChangesPanel.vue";
 import FileExplorer from "./components/FileExplorer.vue";
+import GithubBackupPanel from "./components/GithubBackupPanel.vue";
 import QueuePanel from "./components/QueuePanel.vue";
 import ReportViewer from "./components/ReportViewer.vue";
 import SettingsView from "./components/SettingsView.vue";
@@ -29,6 +30,7 @@ import {
   deleteProject,
   getActiveProject,
   getConfig,
+  getGithubConfig,
   getHealth,
   getLLMProviders,
   getProjects,
@@ -61,6 +63,11 @@ const navItems = [
     id: "projects",
     label: "Projects",
     icon: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
+  },
+  {
+    id: "backup",
+    label: "Backup",
+    icon: "M12 3v10M8 9l4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2",
   },
   {
     id: "settings",
@@ -329,15 +336,54 @@ const lifecyclePct = computed(() => {
 const pageTitle = computed(() => {
   if (activeNav.value === "tasks") return "Tasks";
   if (activeNav.value === "projects") return "Projects";
+  if (activeNav.value === "backup") return "Backup";
   if (activeNav.value === "settings") return "Settings";
   return "Workbench";
 });
 const pageDesc = computed(() => {
   if (activeNav.value === "tasks") return "Live task queue and past task history.";
   if (activeNav.value === "projects") return "Workspaces registered in AETHER.";
+  if (activeNav.value === "backup") return "GitHub backup, checkpoints, and recovery for the active project.";
   if (activeNav.value === "settings") return "Configure providers and models used by the AETHER workbench.";
   return "";
 });
+
+// Project yang sedang dipilih di halaman Projects (detail + GitHub Backup).
+// Sumber data = daftar project launcher yang sama (bukan registry kedua).
+const selectedProject = computed(() =>
+  (projects.value || []).find((p) => p.id === selectedProjectId.value) || null
+);
+
+// Status GitHub Backup per project (di halaman Projects) — memakai SUMBER DATA
+// YANG SAMA dengan halaman Backup (`GET /projects/<id>/github`), bukan store
+// kedua. Best-effort: project tanpa konfigurasi berstatus "Not configured".
+const projectGithub = ref({});
+async function refreshProjectGithubStatuses() {
+  const list = projects.value || [];
+  const result = {};
+  await Promise.all(
+    list.map(async (p) => {
+      try {
+        result[p.id] = await getGithubConfig(p.id);
+      } catch {
+        result[p.id] = null;
+      }
+    })
+  );
+  projectGithub.value = result;
+}
+watch(activeNav, (nav) => {
+  if (nav === "projects") refreshProjectGithubStatuses();
+});
+function githubStatusLabel(p) {
+  const st = projectGithub.value[p.id];
+  if (!st) return "—";
+  return st.configured ? "Configured" : "Not configured";
+}
+function githubStatusClass(p) {
+  const st = projectGithub.value[p.id];
+  return st && st.configured ? "status-on" : "status-off";
+}
 function statusTagClass(s) {
   const v = (s || "").toLowerCase();
   if (v === "completed") return "status-on";
@@ -1168,8 +1214,9 @@ onBeforeUnmount(() => {
             <table v-else class="aether-table">
               <thead>
                 <tr>
-                  <th style="width: 40%">Project</th>
-                  <th style="width: 60%">Path</th>
+                  <th style="width: 34%">Project</th>
+                  <th style="width: 46%">Path</th>
+                  <th style="width: 20%">GitHub Backup</th>
                 </tr>
               </thead>
               <tbody>
@@ -1184,9 +1231,48 @@ onBeforeUnmount(() => {
                     </div>
                   </td>
                   <td><span class="mono">{{ p.root || p.path }}</span></td>
+                  <td>
+                    <span class="status-tag" :class="githubStatusClass(p)">
+                      {{ githubStatusLabel(p) }}
+                    </span>
+                  </td>
                 </tr>
               </tbody>
             </table>
+
+            <!-- Detail project + konfigurasi GitHub Backup (SUMBER DATA SAMA
+                 dengan halaman Backup: endpoint /projects/<id>/github). -->
+            <div v-if="selectedProject" class="proj-detail">
+              <div class="panel-head">
+                <div>
+                  <div class="title">{{ selectedProject.name }}</div>
+                  <div class="desc mono">{{ selectedProject.root || selectedProject.path }}</div>
+                </div>
+                <button class="btn-aether btn-ghost-a" type="button" @click="selectedProjectId = ''">
+                  Close
+                </button>
+              </div>
+              <div class="panel-body">
+                <GithubBackupPanel :project="selectedProject" />
+              </div>
+            </div>
+          </section>
+
+          <!-- Backup (project AKTIF): konfigurasi/checkpoint/recovery GitHub.
+               Komponen yang sama dengan detail Projects -> satu sumber data. -->
+          <section v-else-if="activeNav === 'backup'" class="panel">
+            <div class="panel-head">
+              <div>
+                <div class="title">Backup</div>
+                <div class="desc">
+                  GitHub backup for
+                  <span class="mono">{{ activeProject ? activeProject.name : "—" }}</span>
+                </div>
+              </div>
+            </div>
+            <div class="panel-body">
+              <GithubBackupPanel :project="activeProject" />
+            </div>
           </section>
 
           <!-- Settings (kelola provider/model/credential via Gateway). -->

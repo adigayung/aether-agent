@@ -235,6 +235,77 @@ def delete_project(request: HttpRequest, service: GatewayService, project_id: st
     return _json_response(service.delete_project(project_id))
 
 
+# ---------------------------------------------------------------------------
+# GitHub Backup (OPTIONAL per project). Satu sumber konfigurasi dipakai
+# bersama oleh halaman Backup (sidebar, project aktif) dan Projects.
+# Credential (token) TIDAK pernah dikembalikan ke klien.
+# ---------------------------------------------------------------------------
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+@_handle
+def project_github(
+    request: HttpRequest, service: GatewayService, project_id: str
+) -> JsonResponse:
+    """GET/POST /api/projects/<project_id>/github -> konfigurasi GitHub Backup.
+
+    GET  -> status konfigurasi (tanpa token).
+    POST -> simpan konfigurasi (body: repository, branch, exclude, token?).
+    """
+    if request.method == "GET":
+        return _json_response(service.github_backup_status(project_id))
+
+    body = _parse_json_body(request)
+    return _json_response(service.save_github_backup_config(project_id, body))
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@_handle
+def project_github_test(
+    request: HttpRequest, service: GatewayService, project_id: str
+) -> JsonResponse:
+    """POST /api/projects/<project_id>/github/test -> uji token/repo/branch."""
+    body = _parse_json_body(request)
+    return _json_response(service.test_github_backup_connection(project_id, body))
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+@_handle
+def project_github_checkpoints(
+    request: HttpRequest, service: GatewayService, project_id: str
+) -> JsonResponse:
+    """GET/POST /api/projects/<project_id>/github/checkpoints.
+
+    GET  -> daftar checkpoint (Git history).
+    POST -> buat checkpoint (body: description) -> add/commit/push.
+    """
+    if request.method == "GET":
+        return _json_response(service.list_github_checkpoints(project_id))
+
+    body = _parse_json_body(request)
+    record = service.create_github_checkpoint(project_id, body.get("description"))
+    return _json_response(record, status=201)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@_handle
+def project_github_restore(
+    request: HttpRequest, service: GatewayService, project_id: str
+) -> JsonResponse:
+    """POST /api/projects/<project_id>/github/restore -> recovery ke checkpoint.
+
+    Body: { commit: <hash>, force?: bool }.
+    """
+    body = _parse_json_body(request)
+    return _json_response(
+        service.restore_github_checkpoint(
+            project_id, body.get("commit"), force=bool(body.get("force", False))
+        )
+    )
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 @_handle

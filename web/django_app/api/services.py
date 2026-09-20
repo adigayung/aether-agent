@@ -175,6 +175,9 @@ class GatewayService:
         # Consultant (AETHER reasoning layer, read-only terhadap CODE PROJECT).
         # Lazy agar jalur read-only tetap ringan; verifier dapat menyuntikkan.
         self._consultant_service = consultant_service
+        # GitHub Backup (fitur OPTIONAL per project). Lazy: hanya dibangun saat
+        # endpoint backup dipakai, sehingga jalur read-only tetap ringan.
+        self._github_backup_service = None
         self._tasks: Dict[str, TaskRecord] = {}
         # PreparedTask asli (bukan ringkasan) untuk diteruskan ke runtime.
         self._prepared: Dict[str, Any] = {}
@@ -231,6 +234,21 @@ class GatewayService:
 
             self._consultant_service = ConsultantService()
         return self._consultant_service
+
+    @property
+    def github_backup_service(self) -> Any:
+        """GithubBackupService (lazy) — fitur OPTIONAL per project.
+
+        Memakai ulang Git Awareness Foundation AETHER (read) + `.aether/github`
+        project-local store + proteksi credential Windows (DPAPI). Dibuat lazy
+        agar jalur read-only gateway tetap ringan. Bukan subsystem kedua:
+        checkpoint/commit history tetap milik Git, bukan DB checkpoint baru.
+        """
+        if self._github_backup_service is None:
+            from api.github_backup import GithubBackupService
+
+            self._github_backup_service = GithubBackupService()
+        return self._github_backup_service
 
     # ------------------------------------------------------------------ #
     # Health
@@ -835,6 +853,132 @@ class GatewayService:
             return tool.execute(path=path, content=content)
         except ToolError as exc:
             raise ValidationError(str(exc)) from exc
+
+    # ------------------------------------------------------------------ #
+    # GitHub Backup (OPTIONAL per project; checkpoint/recovery via Git)
+    #
+    # Gateway HANYA mengorkestrasi: konfigurasi per project disimpan di
+    # `<root>/.aether/github/` (credential terenkripsi Windows DPAPI), sedangkan
+    # checkpoint/history/recovery memakai Git yang sudah ada (bukan DB kedua).
+    # Token TIDAK pernah dikembalikan ke frontend / dicatat di log.
+    # ------------------------------------------------------------------ #
+    def _project_root_by_id(self, project_id: str):
+        """Root project target berdasarkan id/name (satu sumber: store launcher).
+
+        Raises:
+            ValidationError: bila project_id kosong.
+            NotFoundError: bila project tidak ditemukan.
+            ValidationError: bila path project tidak ada / bukan directory.
+        """
+        from pathlib import Path as _Path
+
+        if not project_id or not str(project_id).strip():
+            raise ValidationError("Field 'project_id' wajib diisi.")
+        project_id = str(project_id).strip()
+
+        root = None
+        meta = self.project_store.get_project(project_id)
+        if meta is not None:
+            root = meta.get("path") or meta.get("root")
+        if not root:
+            try:
+                root = self.projects.get(project_id).root
+            except ProjectNotFoundError as exc:
+                raise NotFoundError(f"Project '{project_id}' tidak ditemukan.") from exc
+        if not root:
+            raise ValidationError("Project tidak memiliki path.")
+
+        target = _Path(root)
+        if not target.exists() or not target.is_dir():
+            raise ValidationError(f"Path project tidak ditemukan: {root}")
+        return target
+
+    @staticmethod
+    def _github_error_to_gateway(exc: Exception) -> GatewayError:
+        """Petakan error GitHub Backup -> error gateway (HTTP)."""
+        from api.github_backup import GithubBackupError
+
+        message = str(exc)
+        if "belum diamankan" in message or "force" in message.lower():
+            err = ConflictError(message)
+            err.code = "conflict"
+            return err
+        if isinstance(exc, GithubBackupError):
+            return ValidationError(message)
+        return GatewayError(message)
+
+    def github_backup_status(self, project_id: str) -> Dict[str, Any]:
+        """Status konfigurasi GitHub Backup + ringkasan changes (TANPA token)."""
+        root = self._project_root_by_id(project_id)
+        try:
+            return self.github_backup_service.get_config(root)
+        except Exception as exc:  # noqa: BLE001
+            raise self._github_error_to_gateway(exc) from exc
+
+    def save_github_backup_config(
+        self, project_id: str, payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Simpan konfigurasi GitHub Backup project (token dienkripsi)."""
+        root = self._project_root_by_id(project_id)
+        payload = payload or {}
+        try:
+            return self.github_backup_service.save_config(
+                root,
+                repository=payload.get("repository"),
+                branch=payload.get("branch"),
+                exclude=payload.get("exclude"),
+                token=payload.get("token") or None,
+                clear_token=bool(payload.get("clear_token", False)),
+                enabled=payload.get("enabled"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise self._github_error_to_gateway(exc) from exc
+
+    def test_github_backup_connection(
+        self, project_id: str, payload: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Uji token/repository/branch. TIDAK commit/push."""
+        root = self._project_root_by_id(project_id)
+        payload = payload or {}
+        try:
+            return self.github_backup_service.test_connection(
+                root,
+                repository=payload.get("repository"),
+                branch=payload.get("branch"),
+                token=payload.get("token") or None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise self._github_error_to_gateway(exc) from exc
+
+    def list_github_checkpoints(self, project_id: str) -> Dict[str, Any]:
+        """Daftar checkpoint dari Git history project (bukan DB kedua)."""
+        root = self._project_root_by_id(project_id)
+        try:
+            return {"checkpoints": self.github_backup_service.list_checkpoints(root)}
+        except Exception as exc:  # noqa: BLE001
+            raise self._github_error_to_gateway(exc) from exc
+
+    def create_github_checkpoint(
+        self, project_id: str, description: str
+    ) -> Dict[str, Any]:
+        """Buat checkpoint (add -> commit -> push) memakai Git AETHER existing."""
+        root = self._project_root_by_id(project_id)
+        try:
+            return self.github_backup_service.create_checkpoint(root, description)
+        except Exception as exc:  # noqa: BLE001
+            raise self._github_error_to_gateway(exc) from exc
+
+    def restore_github_checkpoint(
+        self, project_id: str, commit: str, force: bool = False
+    ) -> Dict[str, Any]:
+        """Recovery: restore working tree ke sebuah checkpoint."""
+        root = self._project_root_by_id(project_id)
+        try:
+            return self.github_backup_service.restore_checkpoint(
+                root, commit, force=bool(force)
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise self._github_error_to_gateway(exc) from exc
 
     # ------------------------------------------------------------------ #
     # Tasks

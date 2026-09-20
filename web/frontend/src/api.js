@@ -163,6 +163,46 @@ export function closeActiveProject() {
   return request("/active-project", { method: "DELETE" });
 }
 
+// --- GitHub Backup (OPTIONAL per project) ----------------------------------
+// Konfigurasi disimpan project-local di `<root>/.aether/github/`. Token TIDAK
+// pernah dikembalikan backend (hanya `credential_set`). Checkpoint/history/
+// recovery memakai Git history project (bukan DB checkpoint kedua).
+export function getGithubConfig(projectId) {
+  return request(`/projects/${encodeURIComponent(projectId)}/github`);
+}
+
+export function saveGithubConfig(projectId, payload) {
+  return request(`/projects/${encodeURIComponent(projectId)}/github`, {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+export function testGithubConnection(projectId, payload = {}) {
+  return request(`/projects/${encodeURIComponent(projectId)}/github/test`, {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+export function listGithubCheckpoints(projectId) {
+  return request(`/projects/${encodeURIComponent(projectId)}/github/checkpoints`);
+}
+
+export function createGithubCheckpoint(projectId, description) {
+  return request(`/projects/${encodeURIComponent(projectId)}/github/checkpoints`, {
+    method: "POST",
+    body: JSON.stringify({ description }),
+  });
+}
+
+export function restoreGithubCheckpoint(projectId, commit, force = false) {
+  return request(`/projects/${encodeURIComponent(projectId)}/github/restore`, {
+    method: "POST",
+    body: JSON.stringify({ commit, force }),
+  });
+}
+
 export function createTask(task, projectId = null, metadata = null) {
   const body = { task };
   if (projectId) body.project_id = projectId;
