@@ -2953,4 +2953,24 @@ select.input-a {
   }
 }
 
+/* ---- TASKS panel di Workbench right column (.ws-col.right) ----
+   SATU QueuePanel yang sama dengan Consultant (komponen & API queue yang sama).
+   Bukan queue subsystem kedua. Blok ini di-pin dengan tinggi terbatas
+   (flex: 0 0 auto dari aturan .ws-col.right > .block:not(.explorer-block))
+   dan daftarnya (.q-body) adalah scroll owner INTERNAL, sehingga EXPLORER tetap
+   memakai sisa tinggi kolom dan tetap satu-satunya scroll owner file list. */
+.wb-queue {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+  border-bottom: 1px solid var(--border-soft);
+  max-height: 210px;
+}
+.wb-queue.collapsed {
+  max-height: none;
+}
+
+
 

@@ -186,6 +186,12 @@ class GatewayService:
         self._cancel_tokens: Dict[str, "CancellationToken"] = {}
         # Monotonic counter untuk urutan antrian (di belakang self._lock).
         self._queue_seq = 0
+        # Scheduler serial GLOBAL (1 execution slot). `_pumping` hanya penjaga
+        # re-entrancy agar pump tidak rekursif; keputusan "slot bebas" SELALU
+        # dibaca ulang dari self._tasks di dalam self._lock (bukan flag ini).
+        # Ini BUKAN worker framework/queue subsystem kedua: satu queue, satu
+        # scheduler, satu slot — sumber data tetap self._tasks.
+        self._pumping = False
 
     @property
     def task_executor(self) -> Any:
@@ -837,24 +843,111 @@ class GatewayService:
         )
 
         # Jalankan eksekusi nyata di background (non-blocking HTTP).
+        # Scheduler serial GLOBAL yang mengontrol slot: task baru SELALU masuk
+        # antrian sebagai queue_state="pending" (sudah default TaskRecord), lalu
+        # di-promosikan ke RUNNING oleh pump BILA tidak ada blocker di depannya
+        # (FIFO by queue_order, skip disabled). Ini menggantikan pemanggilan
+        # _start_execution langsung agar concurrency dibatasi 1 slot.
         if self.auto_execute:
-            self._start_execution(task_id)
+            self._scheduler_pump()
 
         return record.to_dict()
+
+    # ------------------------------------------------------------------ #
+    # Serial scheduler GLOBAL (1 execution slot)
+    # ------------------------------------------------------------------ #
+    def _scheduler_pump(self) -> None:
+        """Pilih SATU task pending eligible berikutnya dan jalankan.
+
+        Satu queue GLOBAL, satu scheduler, satu slot. Dipanggil (idempoten):
+            - setelah create_task,
+            - setelah status terminal (completed/failed/cancelled),
+            - setelah disable/enable/cancel.
+
+        Algoritma (seluruh keputusan di dalam self._lock):
+            1. Bila sudah ada task RUNNING -> tidak ada slot -> return.
+            2. Ambil task pending paling awal menurut queue_order (FIFO).
+               Task disabled/done/terminal otomatis dilewati.
+            3. Tandai slot terpakai (queue_state="running") secara atomic agar
+               task lain tidak bisa mengambil slot yang sama.
+            4. Keluar lock, lalu mulai eksekusi (JANGAN tahan lock saat
+               TaskExecutor bekerja).
+
+        Re-entrancy dijaga oleh self._pumping; ini hanya mencegah rekursi
+        tak terbatas, bukan sumber kebenaran status slot.
+        """
+        if self._pumping:
+            return
+
+        from api.execution import run_in_background
+
+        with self._lock:
+            # [1] Sudah ada eksekusi aktif? -> slot terpakai, tidak lanjut.
+            #     Slot dianggap terpakai bila ADA task yang queue_state="running"
+            #     (slot yang sudah direservasi) ATAU masih ada cancellation token
+            #     aktif (thread eksekutor masih hidup, mis. task baru saja
+            #     di-cancel tetapi belum selesai wind-down). Ini menutup race
+            #     "Stop task running + scheduler mencari task berikutnya" dan
+            #     menjamin tidak pernah ada dua eksekusi paralel.
+            if self._cancel_tokens or any(
+                r.queue_state == "running" for r in self._tasks.values()
+            ):
+                return
+            # [2] Kandidat: pending, bukan terminal, queue_order paling awal.
+            candidates = [
+                r
+                for r in self._tasks.values()
+                if r.queue_state == "pending"
+                and r.status not in ("completed", "failed", "cancelled")
+            ]
+            if not candidates:
+                return  # Sistem idle.
+            candidate = min(candidates, key=lambda r: (r.queue_order, r.task_id))
+            # [3] Ambil slot secara atomic (di dalam lock yang sama).
+            candidate.queue_state = "running"
+            task_id = candidate.task_id
+            # Token cancellation dibuat & didaftarkan SINKRON di sini
+            # (sebelum thread jalan) agar Stop selalu menemukan token.
+            token = CancellationToken()
+            self._cancel_tokens[task_id] = token
+            self._pumping = True
+
+        try:
+            # [4] Mulai eksekusi di luar lock.
+            run_in_background(lambda: self._execute_task(task_id, token))
+        except Exception:  # noqa: BLE001 - kegagalan start tidak boleh deadlock
+            with self._lock:
+                self._pumping = False
+                self._cancel_tokens.pop(task_id, None)
+                rec = self._tasks.get(task_id)
+                if rec is not None and rec.queue_state == "running":
+                    rec.queue_state = "pending"
+            raise
+        else:
+            with self._lock:
+                self._pumping = False
 
     # ------------------------------------------------------------------ #
     # Execution bridge (#55)
     # ------------------------------------------------------------------ #
     def _start_execution(self, task_id: str) -> None:
-        """Mulai eksekusi task di background thread (minimal, tanpa queue).
+        """Mulai eksekusi task di background thread (slot sudah direservasi).
 
         Token cancellation DIBUAT & DIDAFTARKAN di sini (thread pemanggil,
         sinkron) SEBELUM thread daemon dijalankan. Ini menutup race: Stop yang
         datang tepat setelah task dibuat tetap menemukan token dan dapat
         menandainya (tidak ada jendela "belum terdaftar").
+
+        Catatan: pemanggil normal adalah `_scheduler_pump` (yang sudah menandai
+        slot running). Method ini dipertahankan agar tetap kompatibel dengan
+        pemanggil existing/verifier yang memanggilnya secara langsung.
         """
         from api.execution import run_in_background
 
+        with self._lock:
+            existing = self._tasks.get(task_id)
+            if existing is not None and existing.queue_state == "pending":
+                existing.queue_state = "running"
         token = CancellationToken()
         with self._lock:
             self._cancel_tokens[task_id] = token
@@ -865,7 +958,32 @@ class GatewayService:
 
         Error apa pun ditangkap dan dicatat sebagai status FAILED agar thread
         tidak crash dan task tidak menggantung di status 'running'.
+
+        Slot release: blok `finally` terluar SELALU melepas execution slot
+        (menghapus token + memastikan queue_state tidak "nyangkut" running bila
+        runtime gagal tanpa on_status terminal) lalu memanggil `_scheduler_pump`
+        agar task berikutnya (per queue_order) mulai. Ini TIDAK menjadikan
+        AgentRuntime sebagai scheduler: runtime tetap tak tahu soal queue.
         """
+        try:
+            self._run_task_inner(task_id, token)
+        finally:
+            # --- Release execution slot (COMPLETED/FAILED/CANCELLED/semua path).
+            with self._lock:
+                self._cancel_tokens.pop(task_id, None)
+                rec = self._tasks.get(task_id)
+                # Bila runtime crash tanpa pernah mengirim status terminal,
+                # jangan biarkan slot "nyangkut" running selamanya.
+                if rec is not None and rec.queue_state == "running":
+                    if rec.status in ("completed", "failed", "cancelled"):
+                        rec.queue_state = "done"
+                    else:
+                        rec.queue_state = "done"
+            # Slot bebas -> scheduler memilih task berikutnya (FIFO).
+            self._scheduler_pump()
+
+    def _run_task_inner(self, task_id: str, token: CancellationToken) -> None:
+        """Isi eksekusi task (dipisah agar slot release di `_execute_task`)."""
         with self._lock:
             record = self._tasks.get(task_id)
             prepared = self._prepared.get(task_id)
@@ -925,10 +1043,6 @@ class GatewayService:
                     error=f"{type(exc).__name__}: {exc}",
                 )
             return
-        finally:
-            # Eksekusi selesai (atau gagal): token tidak diperlukan lagi.
-            with self._lock:
-                self._cancel_tokens.pop(task_id, None)
 
         with self._lock:
             rec = self._tasks.get(task_id)
@@ -1090,7 +1204,13 @@ class GatewayService:
             if queue_state not in ("pending", "disabled"):
                 raise _ValidationError("queue_state harus 'pending' atau 'disabled'.")
             record.queue_state = queue_state
-            return record.to_dict()
+            result = record.to_dict()
+        # Disable/Enable memengaruhi eligibility scheduler -> pump.
+        # Enable bisa langsung mempromosikan task ke RUNNING bila tidak ada
+        # blocker di depannya (FIFO). Pump dilakukan di luar lock.
+        if self.auto_execute:
+            self._scheduler_pump()
+        return result
 
     def move_task(self, task_id: str, direction: str) -> List[Dict[str, Any]]:
         """Geser posisi task non-running di antrian (FIFO default).
@@ -1439,7 +1559,15 @@ class GatewayService:
         if token is not None:
             token.request("user_requested")
         # 2) Status record gateway langsung CANCELLED (UI/HTTP responsif).
+        #    Ini juga menyetel queue_state="done" (via _update_task_status),
+        #    sehingga task keluar dari antrian aktif.
         self._update_task_status(task_id, "cancelled")
+        # Bila task yang dibatalkan BELUM running (tidak ada token), slot tidak
+        # pernah terpakai — tetap pump agar antrian bergerak sesuai urutan.
+        # Bila task sedang running, slot dilepas oleh _execute_task (finally)
+        # setelah cancellation mencapai terminal state.
+        if token is None and self.auto_execute:
+            self._scheduler_pump()
         return self.get_task(task_id)
 
     # ------------------------------------------------------------------ #

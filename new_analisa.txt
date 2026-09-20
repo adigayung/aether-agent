@@ -1,157 +1,161 @@
-=== TASK: Agent Report final (AGENT — Task completed) tampil LENGKAP di "aether — agent activity" (frontend-only) ===
+=== GLOBAL TASK QUEUE AETHER — SERIAL SCHEDULER (1 EXECUTION SLOT) ===
 
-FILES CHANGED
-- web/frontend/src/styles.css   (rule .term-body.act-body)
-- new_analisa.txt               (dokumen ini)
+Scope: melengkapi subsystem queue yang SUDAH ADA (TaskRecord.queue_state,
+queue_order, Queue API, QueuePanel.vue) dengan scheduler serial nyata.
+TIDAK ada queue/task manager/scheduler kedua. Queue tetap in-memory.
 
-TIDAK ADA file Python/backend/API yang berubah
-(dikonfirmasi: `git status --porcelain -- src web/django_app` KOSONG;
- `git diff --stat -- src web/django_app` KOSONG).
+--------------------------------------------------------------------------------
+1. FILE YANG DIUBAH
+--------------------------------------------------------------------------------
+Backend:
+- web/django_app/api/services.py        (GatewayService: scheduler + slot)
 
-Catatan: working tree juga memuat perubahan uncommitted dari sesi lain pada
-web/frontend/src/components/ConsultantChat.vue dan hunk Consultant di styles.css.
-Perubahan itu TIDAK terkait task ini dan TIDAK diubah oleh task ini.
+Frontend:
+- web/frontend/src/App.vue              (mount QueuePanel di Workbench right column)
+- web/frontend/src/styles.css           (.wb-queue styling)
 
-------------------------------------------------------------
-LOCATION OF THE COMPLAINT (Investigate a)
-------------------------------------------------------------
-Keluhan "laporan akhir Task completed terpotong" TERKONFIRMASI berada pada
-(i) AgentActivity.vue baris `task_completed` inline — panel "aether — agent
-activity" di kolom kiri Workbench (App.vue ~L895: <AgentActivity .../>).
-- ReportViewer.vue modal (ii): BUKAN sumber keluhan. Modalnya scrollable
-  (.report-m + .report-body overflow-y:auto) dan menampilkan .md penuh.
-- Latest Task / History Report (iii): memakai modal ReportViewer yang sama
-  (openReport -> ReportViewer). BUKAN sumber keluhan.
+Verifikasi (baru):
+- scripts/check_task_queue_scheduler.py (verifier scheduler serial)
 
-------------------------------------------------------------
-OBSERVATION (Investigate b–h — bukti langsung source/build)
-------------------------------------------------------------
-(b) AgentActivity.vue SUDAH merender body laporan PENUH:
-    - case "task_completed": const report = typeof d.result === "string" ? d.result : "":
-      item.reportHtml = report ? renderMarkdown(report) : ""
-    - template: <div v-if="item.reportHtml" class="md act-report" v-html="item.reportHtml"></div>
-    - TIDAK ada truncate/ellipsis/"readmore" pada laporan. renderMarkdown()
-      (web/frontend/src/markdown.js) mengembalikan seluruh teks.
-    Jadi: UI SUDAH merender body laporan (bukan root cause (i) "tidak render").
+Tidak diubah: execution.py, views.py, urls.py, core TaskStatus
+(src/agent_ai/tasks/models.py), runtime.py, orchestrator, provider, policy,
+Consultant, .aether/log writer, SessionStore/SSE.
 
-(c) styles.css — aturan area laporan TIDAK memotong isi:
-    - .act-report { margin-top:6px; padding:10px 12px; border; border-radius:8px;
-      background; overflow-wrap:anywhere }  -> TIDAK ada max-height/overflow-clip.
-    - .md / .md-code: .md-code punya overflow-x:auto (kode panjang), bukan pemotong laporan.
-    - Tidak ada `-webkit-line-clamp`, `text-overflow: ellipsis`, atau
-      `white-space: nowrap` yang berlaku pada container laporan
-      (semua `text-overflow` di file hanya untuk baris nama file/URL, bukan laporan).
-    ROOT CAUSE (ii) BUKAN line-clamp/ellipsis, melainkan CLIP tinggi panel:
+--------------------------------------------------------------------------------
+2. PERUBAHAN UTAMA PER FILE
+--------------------------------------------------------------------------------
+web/django_app/api/services.py
+- __init__: tambah self._pumping = False (penjaga re-entrancy pump; BUKAN
+  sumber kebenaran status slot).
+- create_task(): TIDAK lagi memanggil _start_execution langsung. Sekarang:
+    if self.auto_execute: self._scheduler_pump()
+  Task baru SELALU masuk antrian sebagai queue_state="pending" (default
+  TaskRecord), lalu dipromosikan ke "running" oleh pump BILA tidak ada blocker.
+- _scheduler_pump()  [BARU]: satu-satunya pemilih task berikutnya.
+    * di dalam self._lock: bila self._cancel_tokens tidak kosong ATAU ada
+      task queue_state=="running" -> slot terpakai, return (menutup race Stop
+      vs scheduler; menjamin tidak pernah 2 eksekusi paralel).
+    * pilih kandidat = queue_state=="pending" && status not in
+      (completed,failed,cancelled), urut (queue_order, task_id) -> FIFO.
+    * tandai slot ATOMIC: candidate.queue_state="running" + buat & daftarkan
+      CancellationToken (sinkron, sebelum thread jalan).
+    * keluar lock, lalu run_in_background(_execute_task) -> TIDAK menahan lock
+      saat TaskExecutor bekerja.
+    * kegagalan start: pulihkan queue_state="pending" + buang token (anti stall).
+- _start_execution(): dipertahankan untuk kompatibilitas pemanggil existing/
+  verifier; kini juga memastikan slot "running" bila masih pending.
+- _execute_task(): dibungkus try/finally -> _run_task_inner() menjalankan isi.
+    finally SELALU melepas slot:
+      - pop cancellation token (semua path, termasuk exception),
+      - queue_state -> "done" bila masih "running" (anti nyangkut),
+      - panggil _scheduler_pump() -> task berikutnya (FIFO) mulai.
+  Ini TITIK PELEPASAN SLOT di gateway (BUKAN di runtime.py).
+- _run_task_inner(): isi eksekusi (dipisah agar finally di atas bersih).
+- set_queue_state(): setelah disable/enable, panggil _scheduler_pump() (di luar
+  lock). Enable bisa langsung mempromosikan ke RUNNING sesuai queue_order.
+- cancel_task(): bila task dibatalkan saat BELUM running (tidak ada token),
+  pump dipanggil agar antrian bergerak. Bila RUNNING, slot dilepas oleh
+  _execute_task.finally setelah cancellation mencapai terminal state.
+- _update_task_status(): tidak diubah — tetap menyetel queue_state
+  "running"/"done" sebagai proyeksi UI.
 
-    SEBELUM FIX:
-      .term-body.act-body { height: 240px; max-height: 240px; }
-      dan .term-body (base) { height:116px; max-height:116px; overflow-y:auto }
-    => Panel activity dikunci tinggi 240px dengan overflow-y:auto. Laporan
-    dirender UTUH di dalamnya, tetapi hanya ~240px yang terlihat; sisanya
-    tersembunyi di scrollbox kecil DI DALAM panel. Dari sudut pandang user,
-    laporan tampak "terpotong" karena viewport panel terlalu pendek.
-    (Ini root cause (ii) "CSS memotong" — spesifik: tinggi panel dipatok,
-    bukan line-clamp.)
+web/frontend/src/App.vue
+- import QueuePanel dari ./components/QueuePanel.vue.
+- Mount <QueuePanel class="wb-queue" :refresh-key="queueRefresh"
+  @stop-task="stopQueueTask" @view-task="viewQueueTask" /> di dalam
+  .ws-col.right, DI ATAS ChangesPanel + FileExplorer. Memakai komponen & API
+  queue yang SAMA dengan Consultant (satu queue global). Handler
+  stopQueueTask/viewQueueTask sudah ada (cancel_task + history/activity).
 
-(d) .act-body adalah scroll owner LAMA (dipatok 240px). Setelah fix, panel
-    mengalir mengikuti tinggi konten dan scroll halaman ditangani oleh
-    `.ws-scroll` (scroll owner kolom kiri yang SUDAH ADA:
-    .ws-scroll { flex:1 1 auto; min-height:0; overflow-y:auto }).
-    Mekanisme scroll TIDAK dihapus — hanya DIpindahkan ke ancestor yang benar.
+web/frontend/src/styles.css
+- .wb-queue: flex column, min-height:0, overflow:hidden, padding:0,
+  max-height:210px (blok TASKS pinned dengan scroll internal pada .q-body).
+- .wb-queue.collapsed: max-height:none (header-only saat collapsed).
+  EXPLORER tetap memakai sisa tinggi kolom dan tetap satu-satunya scroll owner
+  daftar file.
 
-(e) Backend commentary BUKAN sumber masalah:
-    src/agent_ai/core/orchestrator.py :: _extract_commentary()
-    -> `if len(text) > 600: text = text[:600].rstrip() + "…"`
-    Batas 600-char hanya untuk COMMENTARY (baris AGENT commentary), TIDAK
-    menyentuh `task_completed.data.result`. Tidak diubah.
+--------------------------------------------------------------------------------
+3. CARA KERJA SCHEDULER SEKARANG
+--------------------------------------------------------------------------------
+Struktur: satu queue GLOBAL (self._tasks) + satu scheduler + SATU execution
+slot. Consultant dan Workbench membaca/menulis queue yang sama.
 
-(f) Laporan di sumber SUDAH UTUH:
-    `.aether/log/<task_id>.log` event `task_completed` -> data.result berisi
-    teks laporan penuh (ribuan karakter, mis. task 0872e872… melaporkan
-    ringkasan lengkap). Report API GET /api/tasks/<task_id>/report membaca
-    `task_completed.data.result` apa adanya (fallback task_finished.data.result).
-    => Laporan di API/log TIDAK terpotong. Perbaikan cukup di presentasi (frontend).
+Alur:
+  create_task(auto_execute=True)
+      -> TaskRecord(queue_state="pending", queue_order=++seq)
+      -> _scheduler_pump()
+            slot bebas? -> promote ke "running" (atomic di lock)
+                        -> run_in_background(_execute_task) di luar lock
+            slot terpakai? -> tetap "pending"
+  _execute_task(...)
+      -> TaskExecutor.run(...)  (AgentRuntime/AgentOrchestrator TIDAK diubah)
+      -> on_status(...) -> _update_task_status (status lifecycle)
+      -> finally: lepas token + queue_state="done" + _scheduler_pump()
+  _scheduler_pump() lanjutan memilih pending berikutnya menurut queue_order.
 
-(g) dist/ status:
-    SEBELUM rebuild, dist/assets/index-*.js sudah memuat `act-report` dan
-    `reportHtml` (kode render laporan ADA) dan dist CSS sudah memuat
-    `.act-report`; yang belum ada hanyalah nilai baru `.term-body.act-body`.
-    Setelah fix dibangun ulang, bundle baru:
-      dist/assets/index-BrnUJtc5.js  (memuat "md act-report" + innerHTML report)
-      dist/assets/index-D429OPIS.css (memuat ".term-body.act-body{height:auto;max-height:none}")
-    Artinya UI yang dilayani Django sudah memuat kode perbaikan.
+Jaminan:
+- Concurrency = 1 (slot tunggal; cek token+running di dalam lock).
+- FIFO by queue_order; Move Up/Down (move_task) mengubah queue_order -> benar-
+  benar mengubah task berikutnya.
+- Disabled TIDAK pernah dipilih (kandidat hanya queue_state=="pending").
+- Disable != Cancel; Cancel/Stop tetap memakai CancellationToken (primitif
+  tunggal). Slot dilepas hanya setelah execution benar-benar berakhir.
+- auto_execute=False: TIDAK ada eksekusi (kontrak verifier lain tetap utuh).
+- Lock TIDAK ditahan saat TaskExecutor bekerja.
 
-(h) git status/log:
-    AgentActivity.vue TIDAK pernah di-revert; versi saat ini SUDAH versi
-    "render penuh" (commit terakhir menyentuh file ini: 944741f).
-    styles.css punya perubahan uncommitted dari sesi lain (hunk Consultant),
-    tetapi hunk `.term-body.act-body` yang lama (240px) masih ada sebelum fix.
+--------------------------------------------------------------------------------
+4. HASIL VERIFIKASI SKENARIO PENTING
+--------------------------------------------------------------------------------
+scripts/check_task_queue_scheduler.py (task_executor palsu "gated"):
+  [1] Empty slot: A RUNNING -> selesai -> slot free ................. OK
+  [2] Serial: A,B,C -> HANYA 1 RUNNING, FIFO A->B->C, max concurrency=1 OK
+  [3] Disabled: B di-disable -> dilewati; A selesai -> C jalan; B tetap DISABLED OK
+  [4] Enable: B di-enable -> pending -> dieksekusi sesuai urutan .... OK
+  [5] Move Up/Down: queue_order mengubah task berikutnya ........... OK
+  [6] Stop: A STOP -> CANCELLED -> slot free -> B RUNNING (tanpa paralel) OK
+  [7] disable pada RUNNING ditolak (disable != cancel) .............. OK
+  [8] auto_execute=False -> tidak ada eksekusi (kontrak utuh) ...... OK
 
-------------------------------------------------------------
-ROOT CAUSE (explisit, sesuai permintaan)
-------------------------------------------------------------
-(ii) CSS memotong — secara spesifik: `.term-body.act-body` dipatok
-`height:240px; max-height:240px` (plus base .term-body 116px + overflow-y:auto),
-sehingga Agent Report final yang sudah dirender UTUH hanya terlihat ~240px dan
-sisanya tersembunyi di scrollbox kecil. Bukan (i) UI tidak render body
-(body dirender penuh), bukan (iii) commentary 600-char (itu hanya commentary),
-bukan (iv) dist basi (kode render sudah ada; hanya nilai CSS yang belum di-rebuild).
+Regresi (semua PASS):
+- scripts/check_task_queue.py            (Queue API existing)
+- scripts/check_cancellation.py          (Stop end-to-end)
+- scripts/check_task_lifecycle.py        (TaskState/timestamps)
+- scripts/check_web_runtime.py           (Django Task API -> Runtime) [env]
+- scripts/check_django_gateway.py        (gateway tipis) [env]
+- scripts/check_consultant.py            (Consultant, auto_execute=False)
+- scripts/check_continuous_loop.py       (Agent loop tidak berubah)
+- scripts/check_orchestrator.py          (orchestrator tidak berubah)
+- scripts/check_executor.py              (tool executor tidak berubah)
+- scripts/check_streaming.py             (SSE) [env]
+- scripts/check_session.py               (session/event)
 
-------------------------------------------------------------
-FIX
-------------------------------------------------------------
-web/frontend/src/styles.css — ubah SATU rule:
-  .term-body.act-body {
-    height: 240px;      -> height: auto;
-    max-height: 240px;  -> max-height: none;
-  }
-Efek: panel activity mengalir mengikuti tinggi konten, laporan panjang tampil
-PENUH, dan scroll halaman ditangani `.ws-scroll` (satu scroll owner existing).
-Tidak ada perubahan pada AgentActivity.vue (render sudah benar), markdown.js,
-ReportViewer.vue, atau komponen lain.
+Frontend build: `node node_modules/vite/bin/vite.js build` (dari web/frontend)
+  -> 32 modules, 0 errors. Bundle memuat .wb-queue dan QueuePanel di .ws-col.right.
 
-Verifikasi Build: `node node_modules/vite/bin/vite.js build` dari web/frontend
-  -> 32 modules transformed, 0 error.
-Bundle produksi memuat: ".term-body.act-body{height:auto;max-height:none}"
-dan tetap memuat render laporan penuh ("md act-report" + innerHTML report).
-dist/ sudah di-rebuild sehingga benar-benar di-serve Django.
+[env] = butuh DJANGO_ALLOWED_HOSTS=testserver,127.0.0.1,localhost (pre-existing).
 
-------------------------------------------------------------
-ACCEPTANCE CRITERIA — PEMENUHAN
-------------------------------------------------------------
-1. Untuk task nyata, teks laporan yang tampil setara `task_completed.data.result`
-   dari GET /api/tasks/<task_id>/report: TERCAPAI. Laporan dirender via
-   renderMarkdown(d.result) UTUH tanpa pemotongan; panel tidak lagi memaksa
-   viewport 240px.
-2. Tidak ada `…` pada LAPORAN dari pemotongan: TERCAPAI. `…` yang ada hanya
-   pada commentary (600-char, baris AGENT commentary) dan pada ringkasan
-   OBSERVATION (140-char) — keduanya bukan baris laporan dan tidak dihitung.
-3. Laporan panjang dapat di-scroll tanpa kehilangan bagian bawah: TERCAPAI —
-   scroll ditangani `.ws-scroll` (kolom kiri) yang sudah terbukti dipakai.
-4. Build produksi 0 error; dist/ memuat kode fix (bundle memuat `act-report`):
-   TERCAPAI.
-5. `git status` hanya menampilkan file frontend + new_analisa.txt:
-   TERCAPAI (perubahan task ini = web/frontend/src/styles.css;
-   ConsultantChat.vue + new_analisa.txt adalah perubahan sesi lain yang sudah
-   ada; tidak ada file Python/backend).
+--------------------------------------------------------------------------------
+5. MASALAH YANG MASIH DITEMUKAN
+--------------------------------------------------------------------------------
+- scripts/check_web_settings.py gagal pada assertion statis
+  "include_api_key=True" not in services.py. Terkonfirmasi PRE-EXISTING:
+  gagal identik pada HEAD (diuji via git stash) — terkait kode provider
+  Consultant yang sudah ada, BUKAN pekerjaan queue ini.
+- Queue tetap in-memory (sesuai desain): restart = antrian kosong.
+- QueuePanel.vue masih memakai poll 5 detik + refreshKey; belum ada event SSE
+  khusus queue (di luar scope task ini).
+- Verifikasi frontend terbatas pada build produksi + inspeksi bundle
+  (tanpa uji interaksi browser).
 
-------------------------------------------------------------
-KONFIRMASI BACKEND TIDAK BERUBAH
-------------------------------------------------------------
-- `git status --porcelain -- src web/django_app`  -> kosong.
-- `git diff --stat -- src web/django_app`         -> kosong.
-- Tidak menyentuh: src/agent_ai/**, web/django_app/**, .aether/log,
-  Report API, SessionStore/SSE, orchestrator, `_extract_commentary`.
-- Perbaikan murni presentasi/CSS frontend.
-
-------------------------------------------------------------
-RINGKASAN
-------------------------------------------------------------
-Files changed: web/frontend/src/styles.css (+/- rule .term-body.act-body),
-               new_analisa.txt.
-Root cause: tinggi panel activity dipatok 240px (`.term-body.act-body`)
-            sehingga laporan penuh tampak terpotong; bukan line-clamp,
-            bukan commentary 600-char, bukan dist basi.
-Fix: panel mengalir mengikuti konten (height:auto; max-height:none),
-     scroll ditangani `.ws-scroll` yang sudah ada; laporan dirender utuh.
-Backend: TIDAK berubah.
+--------------------------------------------------------------------------------
+6. KONFIRMASI BOUNDARY ARSITEKTUR
+--------------------------------------------------------------------------------
+- Satu queue GLOBAL, satu scheduler, satu slot. Tidak ada ConsultantQueue /
+  WorkbenchQueue / TaskManager kedua / scheduler kedua.
+- Core TaskStatus & TERMINAL_STATUSES TIDAK diubah; queue_state tetap field
+  terpisah pada TaskRecord.
+- AgentRuntime / AgentOrchestrator / loop / tool policy TIDAK diubah; runtime
+  tidak tahu soal queue. Pelepasan slot ada di gateway (_execute_task.finally).
+- CancellationToken tetap satu-satunya primitif cancellation.
+- .aether/log tidak dihapus/diubah; SessionStore/SSE tidak diubah.
+- Provider/model system tidak diubah.

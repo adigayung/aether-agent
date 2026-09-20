@@ -16,6 +16,7 @@ import AgentActivity from "./components/AgentActivity.vue";
 import TaskComposer from "./components/TaskComposer.vue";
 import ChangesPanel from "./components/ChangesPanel.vue";
 import FileExplorer from "./components/FileExplorer.vue";
+import QueuePanel from "./components/QueuePanel.vue";
 import ReportViewer from "./components/ReportViewer.vue";
 import SettingsView from "./components/SettingsView.vue";
 import ConsultantChat from "./components/ConsultantChat.vue";
@@ -934,6 +935,12 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="ws-col right">
+          <QueuePanel
+            class="wb-queue"
+            :refresh-key="queueRefresh"
+            @stop-task="stopQueueTask"
+            @view-task="viewQueueTask"
+          />
           <ChangesPanel :changes="changes" :validation="validation" @open-file="openFileInEditor" />
           <FileExplorer
             :project="activeProject"
