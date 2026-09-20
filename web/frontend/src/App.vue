@@ -10,7 +10,7 @@
 // Layout 3 area: Sidebar | Agent Workbench | Changes/File Explorer.
 // Bootstrap 5 dipakai untuk layout/spacing/form/button/dropdown/responsive.
 
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import ProjectLauncher from "./components/ProjectLauncher.vue";
 import AgentActivity from "./components/AgentActivity.vue";
 import CodeEditor from "./components/CodeEditor.vue";
@@ -36,6 +36,7 @@ import {
   getTaskHistory,
   getTaskReport,
   listTaskHistory,
+  listTaskQueue,
   listTasks,
   openEventStream,
   openInExplorer,
@@ -133,11 +134,28 @@ const activityEvents = computed(() => historyEvents.value || events.value);
 let source = null;
 
 const hasActiveTask = computed(() => Boolean(task.id));
-const isRunning = computed(() =>
-  ["running", "prepared", "planning", "executing", "validating"].includes(
-    (task.status || "").toLowerCase()
-  )
-);
+
+// ID task yang BENAR-BENAR sedang RUNNING di Global Task Queue (satu sumber
+// kebenaran = TaskRecord backend, GET /api/tasks/queue). Bukan state/mesin
+// kedua: hanya proyeksi status antrian existing. Dipakai sebagai target tombol
+// Stop agar Stop SELALU merujuk ke task yang benar-benar berjalan — bukan task
+// terakhir yang dikirim/dibuat/dipilih.
+const runningTaskId = ref("");
+async function refreshRunningTask() {
+  try {
+    const data = await listTaskQueue();
+    const running = (data.tasks || []).find((t) => t.queue_state === "running");
+    runningTaskId.value = running ? running.task_id : "";
+  } catch {
+    // Endpoint queue belum tersedia: pertahankan state existing (fallback).
+  }
+}
+
+// isRunning = ADA task yang sedang RUNNING (bukan apakah task yang sedang
+// ditampilkan running). Dipakai untuk MENAMPILKAN tombol Stop + indikator UI.
+// SENGAJA TIDAK dipakai untuk men-disable input/Submit: Agent Input selalu bisa
+// submit (task baru masuk Global Task Queue sebagai pending/queued).
+const isRunning = computed(() => Boolean(runningTaskId.value));
 
 // Agent status kecil (dari state/event AETHER sebenarnya, bukan fake).
 const agentStatus = computed(() => {
@@ -182,6 +200,12 @@ const consultantOpen = ref(false);
 // Panel TASKS di Consultant (SATU queue global AETHER). Penanda refresh untuk
 // QueuePanel; dinaikkan setelah Run Task / event terminal task.
 const queueRefresh = ref(0);
+// Setiap refresh antrian (submit/terminal/stop) -> perbarui "task running" saat
+// ini dari sumbernya. Event-driven (BUKAN polling baru): hanya mengikuti penanda
+// refresh yang sudah ada (queueRefresh), yang sama dipakai panel TASKS.
+watch(queueRefresh, () => {
+  refreshRunningTask();
+});
 function openConsultant() {
   consultantOpen.value = true;
 }
@@ -340,6 +364,8 @@ function handleEvent(evt) {
   switch (evt.event_type) {
     case "task_started":
       task.status = "running";
+      // Task ini BENAR-BENAR mulai running -> jadikan target tombol Stop.
+      runningTaskId.value = evt.task_id || runningTaskId.value || "";
       runtime.activity = "Starting task";
       // Audio feedback HANYA saat task BENAR-BENAR mulai berjalan (transisi
       // status nyata), bukan saat user klik Run Task/Send. Dedup di
@@ -505,9 +531,12 @@ async function submitTask(text, overrideProviderInstanceId = null, overrideModel
     // dari SSE `task_started` (atau queue_state="running" pada respons ini).
     const queueState = record.queue_state;
     if (queueState === "pending") {
+      // Menunggu execution slot Global Task Queue -> "queued" (bukan running).
       task.status = "queued";
     } else if (queueState === "running") {
       task.status = "running";
+      // Task ini langsung mendapat slot -> target tombol Stop.
+      runningTaskId.value = record.task_id;
     } else {
       task.status = record.status || "prepared";
     }
@@ -527,12 +556,24 @@ async function submitTask(text, overrideProviderInstanceId = null, overrideModel
 }
 
 async function stopTask() {
-  if (!task.id) return;
+  // Target Stop = task yang BENAR-BENAR RUNNING (Global Task Queue). Fallback
+  // ke task aktif hanya bila id running belum diketahui (mis. antrian sedang
+  // dimuat). Mekanisme penghentian tetap cancel_task existing (bukan sistem
+  // cancellation baru). Send TIDAK pernah menghentikan task.
+  const targetId = runningTaskId.value || task.id;
+  if (!targetId) return;
   try {
-    const record = await cancelTask(task.id);
-    task.status = record.status || "cancelled";
+    const record = await cancelTask(targetId);
+    // Jangan menimpa status tampilan task lain yang sedang dibuka.
+    if (targetId === task.id) task.status = record.status || "cancelled";
   } catch (e) {
     error.value = e.message || "Failed to stop task.";
+  } finally {
+    runningTaskId.value = "";
+    // Scheduler existing akan mempromosikan task pending berikutnya; refresh
+    // antrian + sinkronkan target Stop ke task running yang baru (bila ada).
+    queueRefresh.value += 1;
+    refreshRunningTask();
   }
 }
 
@@ -745,6 +786,10 @@ onMounted(async () => {
   } catch {
     lastProject.value = null;
   }
+  // Sinkronkan "task running" saat ini dari Global Task Queue (mis. task yang
+  // sudah berjalan sebelum halaman dimuat/di-refresh), sehingga tombol Stop
+  // langsung mengarah ke task yang benar.
+  refreshRunningTask();
 });
 
 onBeforeUnmount(() => {
@@ -954,7 +999,11 @@ onBeforeUnmount(() => {
             </section>
           </div>
 
-          <!-- Agent input -> Task Composer modal -->
+          <!-- Agent input -> Task Composer modal.
+               Send dan Stop adalah DUA aksi TERPISAH, bukan satu tombol toggle:
+               Send selalu tersedia (task baru masuk Global Task Queue sebagai
+               pending/queued bila slot eksekusi terpakai), Stop hanya muncul saat
+               ADA task yang benar-benar RUNNING. -->
           <div class="agent-input">
             <div class="agent-input-row">
               <input
@@ -967,23 +1016,21 @@ onBeforeUnmount(() => {
                 @focus="openComposer"
               />
               <button
-                v-if="!isRunning"
                 class="send-btn"
                 type="button"
-                title="Compose task"
+                title="New task"
                 @click="openComposer"
               >
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
               </button>
               <button
-                v-else
-                class="stop-btn stop-btn-run"
+                v-if="isRunning"
+                class="stop-btn"
                 type="button"
-                title="Stop task"
+                title="Stop running task"
                 @click="stopTask"
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
-                <span class="stop-label">Running…</span>
               </button>
             </div>
             <div v-if="error" class="wb-error">{{ error }}</div>

@@ -1,6 +1,9 @@
 <script setup>
 // Task Composer (#52 rework). Input utama user untuk memberi pekerjaan.
-// Saat idle: composer + Start Task. Saat berjalan: Stop Task.
+// Send (Run Task) dan Stop adalah DUA aksi TERPISAH (bukan toggle): Run Task
+// selalu tersedia — task baru masuk Global Task Queue (pending/queued bila slot
+// eksekusi terpakai) — sedangkan Stop hanya tampil bila ADA task yang benar-
+// benar RUNNING. `disabled` (= isSubmitting) HANYA mencegah double-submit.
 // Model & mode dibaca dari konfigurasi AETHER (TIDAK hardcode).
 // TIDAK ada execution engine di frontend: hanya memanggil API #50.
 import { computed, onMounted, ref } from "vue";
@@ -66,8 +69,11 @@ onMounted(() => {
 });
 
 function submit() {
+  // Agent Input TIDAK diblokir oleh task yang sedang running: task baru selalu
+  // dapat dikirim dan masuk Global Task Queue (pending/queued). `disabled` hanya
+  // mencegah double-submit selama request createTask belum selesai.
   const value = text.value.trim();
-  if (!value || props.disabled || props.running) return;
+  if (!value || props.disabled) return;
   emit("submit", value);
   text.value = "";
 }
@@ -87,7 +93,7 @@ function onKeydown(e) {
       ref="textarea"
       v-model="text"
       class="composer-text"
-      :disabled="disabled || running"
+      :disabled="disabled"
       placeholder="Describe the task for AETHER…  (Enter to run, Shift+Enter for a new line)"
       @keydown="onKeydown"
     ></textarea>
@@ -100,7 +106,7 @@ function onKeydown(e) {
         <span class="cs-label">Provider</span>
         <select
           class="input-a"
-          :disabled="running"
+          :disabled="disabled"
           :value="providerInstanceId"
           @change="onProviderChange"
         >
@@ -116,7 +122,7 @@ function onKeydown(e) {
         <span class="cs-label">Model</span>
         <select
           class="input-a"
-          :disabled="running || !providerInstanceId"
+          :disabled="disabled || !providerInstanceId"
           :value="modelId"
           @change="onModelChange"
         >
@@ -130,24 +136,29 @@ function onKeydown(e) {
       <!-- Mode selector: routing profile AETHER (Fast/Balanced/Deep). -->
       <label class="composer-select">
         <span class="cs-label">Mode</span>
-        <select class="input-a" :disabled="running" :value="mode" @change="emit('update:mode', $event.target.value)">
+        <select class="input-a" :disabled="disabled" :value="mode" @change="emit('update:mode', $event.target.value)">
           <option v-for="m in modes" :key="m" :value="m">{{ MODE_LABELS[m] || m }}</option>
         </select>
       </label>
     </div>
 
     <div class="composer-actions">
-      <button v-if="running" class="btn-aether btn-ghost-a" type="button" @click="emit('stop')">
-        Stop Task
-      </button>
       <button
-        v-else
         class="btn-aether btn-primary-a"
         type="button"
         :disabled="disabled || !text.trim()"
         @click="submit"
       >
-        Run Task
+        {{ disabled ? "Sending…" : "Run Task" }}
+      </button>
+      <button
+        v-if="running"
+        class="btn-aether btn-ghost-a"
+        type="button"
+        title="Stop running task"
+        @click="emit('stop')"
+      >
+        Stop Task
       </button>
     </div>
   </div>

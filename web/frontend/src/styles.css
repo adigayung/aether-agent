@@ -485,6 +485,13 @@ button {
 }
 
 /* ---- Lifecycle ---- */
+/* Stepper harus SELALU PAS di lebar kartu: satu baris (nowrap), kompak,
+   dan TANPA scroll horizontal / konten keluar frame.
+   - .lifecycle : flex satu baris, tanpa overflow-x.
+   - .step      : kompak + boleh menyusut (min-width:0) dengan ellipsis pada
+                  label sebagai pengaman terakhir bila kartu sangat sempit.
+   - .step-line : elastis — menyerap sisa ruang (dan menyusut saat sempit)
+                  sehingga ruang sisa tidak mendorong elemen keluar kartu. */
 .lifecycle {
   display: flex;
   align-items: center;
@@ -492,27 +499,36 @@ button {
   margin-top: 18px;
   /* Semua step WAJIB satu baris horizontal (tidak wrap ke bawah). */
   flex-wrap: nowrap;
-  overflow-x: auto;
+  min-width: 0;
 }
 .step {
   display: flex;
   align-items: center;
-  gap: 7px;
-  font-size: 12px;
+  gap: 4px;
+  font-size: 11px;
   color: var(--text-faint);
   font-weight: 550;
-  flex: 0 0 auto;
+  /* Boleh menyusut agar tidak pernah melebihi lebar kartu. */
+  flex: 0 1 auto;
+  min-width: 0;
   white-space: nowrap;
 }
+/* Label step: tetap satu baris (tidak pecah); bila ruang benar-benar kurang,
+   dipangkas dengan ellipsis supaya tidak menimbulkan scroll horizontal. */
+.step > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .step .mark {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   display: grid;
   place-items: center;
   border: 1.5px solid var(--border);
   background: var(--bg-elev);
-  font-size: 10.5px;
+  font-size: 9.5px;
   flex: 0 0 auto;
 }
 .step.done {
@@ -530,14 +546,18 @@ button {
   border-color: var(--accent);
   background: rgba(139, 92, 246, 0.2);
   color: #c4b5fd;
-  box-shadow: 0 0 0 4px rgba(139, 92, 246, 0.12);
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.12);
 }
+/* Garis penghubung antar step: elastis — menyerap sisa ruang di layar lebar
+   (dibatasi max-width agar tidak melar berlebihan) dan boleh menyusut saat
+   kartu sempit, jadi elemen lain tidak pernah didorong keluar frame. */
 .step-line {
-  width: 16px;
   height: 1.5px;
   background: var(--border);
-  margin: 0 6px;
-  flex: 0 0 auto;
+  margin: 0 4px;
+  flex: 1 1 auto;
+  min-width: 5px;
+  max-width: 28px;
 }
 .step-line.done {
   background: rgba(52, 211, 153, 0.5);

@@ -1,280 +1,193 @@
 ===========================================================================
-AETHER — AGENT ACTIVITY PANEL: PRESENTASI KECIL (SPACING + WARNA)
-Task: (1) 1 spasi nama tool + command di baris Result, (2) timestamp putih,
-      (3) OBSERVATION orange muda, (4) pesan AGENT light cyan/soft blue.
-Status: FIXED + VERIFIED (frontend-only, deterministik; build + bundle check)
+AETHER — AGENT INPUT (AGENT WORKBENCH): PISAHKAN TOMBOL SEND & STOP
+Tujuan: Agent Input tidak lagi memakai pola toggle [Send/Stop]. Send dan Stop
+        menjadi DUA aksi terpisah yang selalu konsisten dengan Global Task
+        Queue (Send selalu bisa submit; Stop hanya untuk task RUNNING).
+Status: FIXED + VERIFIED (frontend-only; production build (vite) 0 error,
+        bundle check, backend-unchanged verification)
 ===========================================================================
 
 1. FILE YANG DIUBAH
 ---------------------------------------------------------------------------
 Frontend (frontend-only; TIDAK ada perubahan backend/Python):
 
-  M web/frontend/src/components/AgentActivity.vue
-      - Baris TOOL   : separator nama tool + target/argument diperbaiki.
-      - Baris RESULT : separator nama tool + target/argument diperbaiki.
-      (Hanya ekspresi render; struktur/kondisi v-if TIDAK berubah.)
+  M web/frontend/src/App.vue
+      - Tambah state `runningTaskId` + fungsi `refreshRunningTask()`
+        (sumber: GET /api/tasks/queue).
+      - Ubah definisi `isRunning` menjadi "ADA task yang RUNNING"
+        (Boolean(runningTaskId)) — bukan lagi status task yang sedang
+        ditampilkan.
+      - Watcher pada `queueRefresh` -> refreshRunningTask() (event-driven,
+        BUKAN polling baru).
+      - `submitTask`: saat respons backend `queue_state === "running"`,
+        set runningTaskId ke task baru (immediate Stop target).
+      - `handleEvent`/`task_started`: set runningTaskId dari event (task yang
+        benar-benar mulai berjalan).
+      - `stopTask`: target = runningTaskId (fallback task.id); stop tidak
+        pernah menimpa status task lain yang sedang dibuka.
+      - onMounted: sinkronkan runningTaskId dari queue.
+      - Template `.agent-input-row`: tombol Send SELALU tampil; tombol Stop
+        hanya tampil bila `isRunning` (v-if, bukan v-else toggle).
 
-  M web/frontend/src/styles.css
-      - Tambah 3 CSS var di :root (single source of truth warna aktivitas):
-          --act-ts:    #eae6f5;  /* timestamp: near-white */
-          --act-agent: #8ad7ef;  /* pesan AGENT: light cyan / soft blue */
-          --act-obs:   #eab984;  /* konten OBSERVATION: soft orange muda */
-      - .act-ts memakai var(--act-ts) (sebelumnya var(--text-faint) = abu).
-      - Tambah rule .act-row.agent .act-text { color: var(--act-agent); }
-        dan .act-row.observation .act-text { color: var(--act-obs); }
+  M web/frontend/src/components/TaskComposer.vue
+      - Footer: tombol "Run Task" (Send) SELALU tampil; tombol "Stop Task"
+        hanya bila `running` (v-if, bukan v-else toggle).
+      - `submit()` tidak lagi diblokir `props.running` (hanya `props.disabled`
+        = isSubmitting).
+      - `:disabled` pada textarea/select tidak lagi memakai `running`.
+      - Label "Sending…" saat request createTask berlangsung (isSubmitting).
 
-Catatan: `git diff --stat -- src web/django_app` KOSONG -> backend/Python,
-API, ToolExecutor, AgentRuntime, task lifecycle, logging/.aether/log,
-SessionStore/SSE, queue, dan payload event TIDAK disentuh.
+Konfirmasi scope:
+  $ git status --porcelain -- src web/django_app
+      (kosong) -> backend/Python/API/task execution/logging/SessionStore/SSE
+                   TIDAK berubah.
+  $ git status --porcelain
+      M web/frontend/src/App.vue
+      M web/frontend/src/components/TaskComposer.vue
+      M web/frontend/src/styles.css   <-- perubahan LAMA (lifecycle stepper,
+                                           sesi sebelumnya), BUKAN dari task ini
+      M new_analisa.txt
 
-2. SUMBER FORMATTING COMMAND YANG DIPERBAIKI (ROOT CAUSE)
+2. AKAR PENYEBAB TOMBOL SEND/STOP LAMA
 ---------------------------------------------------------------------------
-Lokasi: web/frontend/src/components/AgentActivity.vue (template timeline).
+Pola lama memakai SATU tombol yang bertukar peran (toggle):
 
-SEBELUM (baris RESULT):
-  {{ item.success ? "✓" : "✗" }} {{ item.tool }}<template v-if="item.target"> <span class="act-target">{{ item.target }}</span></template>
-SEBELUM (baris TOOL):
-  <span class="fn">{{ item.tool }}</span><template v-if="item.target"> <span class="act-target">{{ item.target }}</span></template>
+  App.vue (.agent-input-row):
+      <button v-if="!isRunning" class="send-btn" @click="openComposer">…</button>
+      <button v-else class="stop-btn stop-btn-run" @click="stopTask">…</button>
 
-Akar masalah: SATU spasi pemisah itu adalah text-node whitespace-only yang
-menjadi ANAK PERTAMA di dalam <template v-if="item.target">. Vue 3 (mode
-whitespace default "condense") MENGHAPUS leading/trailing whitespace node,
-sehingga spasi tersebut hilang saat compile. Bukti dari bundle sebelum fix:
-  ... I(m.tool),1), m.target?(...) ? w("span", ..., I(m.target),1) ...
-(tidak ada teks " " sebelum target) -> hasil "run_commandpython ...".
+  TaskComposer.vue (composer-foot):
+      <button v-if="running" ... @click="emit('stop')">Stop Task</button>
+      <button v-else ... @click="submit">Run Task</button>
 
-SESUDAH (fix, dipakai di TOOL dan RESULT):
-  ...<span class="act-target">{{ " " + item.target }}</span>...
-Spasi dipindah KE DALAM ekspresi interpolasi, sehingga menjadi node
-interpolasi (bukan whitespace-only text node) dan PASTI ter-render.
-Spasi tetap KONDISIONAL: hanya muncul bila item.target ada (masih di dalam
-v-if="item.target"); bila argument kosong -> tidak ada spasi tambahan.
-
-Bukti dari bundle SETELAH fix (dist/assets/index-34IyEPZa.js):
-  TOOL   : w("span", sv, I(" "+m.target), 1)
-  RESULT : ... st(I(m.success?"✓":"✗")+" "+I(m.tool),1), ... w("span", iv, I(" "+m.target),1)
-=> "✓ run_command" + " " + "python scripts/check_code_editor.py".
-
-3. WARNA / STYLE YANG DIPAKAI
----------------------------------------------------------------------------
-  Timestamp [HH:MM:SS] : --act-ts    = #eae6f5 (near-white, opacity tinggi)
-                         .act-ts { color: var(--act-ts); }
-  OBSERVATION (konten) : --act-obs   = #eab984 (soft orange muda, non-neon)
-                         .act-row.observation .act-text { color: var(--act-obs); }
-  AGENT (pesan)        : --act-agent = #8ad7ef (light cyan / soft blue, non-neon)
-                         .act-row.agent .act-text { color: var(--act-agent); }
-  TIDAK memakai hijau untuk AGENT (hijau tetap untuk success/status:
-  .act-text.ok / .act-label.result / chip completed).
-
-Catatan cakupan: warna hanya menyasar KONTEN aktivitas:
-  - .act-row.agent  -> HANYA commentary (kind "agent").
-  - .act-row.observation -> seluruh konten observation (tool → summary).
-Label, timestamp, TOOL/RESULT, status (Task started/completed/failed/
-cancelled), dan report (.md .act-report) TIDAK berubah -> tidak ada regresi.
-
-4. VALIDASI
----------------------------------------------------------------------------
-  Build produksi frontend (Windows, npm tidak tersedia):
-    cd web/frontend && node node_modules/vite/bin/vite.js build
-    -> v1089 modules transformed, 0 error, "built in 18.42s".
-    (dist/assets/index-34IyEPZa.js + dist/assets/index-dmSdkqPw.css)
-
-  Verifikasi bundle (grep pada dist/):
-    - CSS: --act-ts:#eae6f5; --act-agent:#8ad7ef; --act-obs:#eab984;
-           .act-ts{font-size:11px;color:var(--act-ts)}
-           .act-row.agent .act-text{color:var(--act-agent)}
-           .act-row.observation .act-text{color:var(--act-obs)}
-    - JS : I(" "+m.target) pada node TOOL (sv) dan RESULT (iv).
-
-  Verifikasi minimal sesuai requirement:
-    [1] run_command: "✓ run_command" + spasi + "python scripts/check_code_editor.py"
-        (target span merender I(" "+m.target)).
-    [2] read_file: nama tool + path/argument terpisah 1 spasi (pola sama).
-    [3] AGENT message: .act-row.agent .act-text -> light cyan (#8ad7ef).
-    [4] Timestamp pada beberapa event: .act-ts -> #eae6f5 (putih).
-    [5] Event panjang: .act-text / .act-target tetap white-space:pre-wrap;
-        overflow-wrap:anywhere; .act-body tetap overflow-x:hidden
-        -> wrapping benar, tanpa overflow horizontal. Spasi tidak merusak
-        wrapping karena tetap karakter spasi normal (bukan non-breaking).
-
-5. KONFIRMASI BATASAN
----------------------------------------------------------------------------
-  - Frontend-only: `git status --porcelain` menunjukkan perubahan hanya di
-    web/frontend/src/components/AgentActivity.vue dan web/frontend/src/styles.css
-    (plus new_analisa.txt). Tidak ada file di src/** atau web/django_app/**.
-  - JANGAN diubah (tetap): ToolExecutor, AgentRuntime, task lifecycle,
-    logging/.aether/log, SessionStore/SSE, queue, struktur/hierarchy event,
-    format payload, dan Markdown report (.md .act-report).
-  - Tidak ada komponen/subsystem/dependency baru.
-
-6. SISA / CATATAN
----------------------------------------------------------------------------
-  - Karena Django menyajikan dist/ hasil build, lakukan hard refresh browser
-    agar warna/spasi terlihat (dist sudah di-rebuild pada task ini).
-  - Warna .act-label.agent (label chip) tetap ungu (tidak diminta diubah);
-    permintaan hanya untuk warna KONTEN pesan AGENT.
-===========================================================================
-
-
-===========================================================================
-TASK: Task dari Agent Workbench harus masuk GLOBAL TASK QUEUE (sama dgn Consultant)
-===========================================================================
-
-1. HIPOTESIS vs TEMUAN AKTUAL (hasil inspeksi kode, bukan asumsi)
----------------------------------------------------------------------------
-Hipotesis yang diberikan:
-  (a) ada jalur submit KEDUA untuk Agent Input (langsung _start_execution/auto_execute)
-  (b) frontend Workbench set status "running" secara optimistik setelah POST
-  (c) create_task punya CABANG beda per sumber task; hanya satu cabang mem-pump
-  (d) flag auto_execute dikirim berbeda oleh Workbench vs Consultant
-
-HASIL: yang BENAR adalah (b). (a), (c), (d) TERBUKTI TIDAK ADA.
-
-Bukti (file:line):
-  - (a) TIDAK ADA jalur submit kedua. Frontend hanya punya SATU fungsi submit:
-    web/frontend/src/App.vue::submitTask (L474). Kedua entry point memakainya:
-      * Agent Input (Workbench)  -> TaskComposer modal, template L1107
-        `@submit="submitTask"` (tanpa override provider/model).
-      * Consultant Run Task      -> App.vue::runConsultantTask (L202) yang juga
-        memanggil `await submitTask(text, overrideProviderId, overrideModelId)` (L209).
-    Backend juga satu: web/django_app/api/urls.py `tasks` -> views.tasks (L347) ->
-    service.create_task (views.py L364). Tidak ada endpoint/param "start_now",
-    "run_now", "auto_execute" dari request (pencarian literal = 0 hasil).
-  - (c) TIDAK ADA cabang berdasarkan sumber task. web/django_app/api/services.py::
-    create_task (L842) TIDAK PERNAH memanggil _start_execution lagi; di ujungnya
-    (L920-924) selalu: `if self.auto_execute: self._scheduler_pump()`.
-    Sebaliknya `_start_execution` (L1005) sekarang hanya dipertahankan untuk
-    kompatibilitas/verifier dan TIDAK dipanggil dari create_task.
-  - (d) Tidak ada flag queue-related di payload frontend. api.js::createTask (L166)
-    hanya mengirim {task, project_id?, metadata?}; metadata = provider_instance_id/
-    model_id/mode. Workbench dan Consultant memakai payload queue yang IDENTIK.
-  - (b) BENAR (akar masalah). web/frontend/src/App.vue::submitTask sebelumnya:
-        task.status = record.status || "prepared";
-    `record.status` dari gateway SELALU "prepared" (create_task membuat
-    TaskRecord(status="prepared"); promosi slot hanya mengubah `queue_state`).
-    Sementara `isRunning` (App.vue L136) menganggap "prepared" sebagai RUNNING:
+Selain itu:
+  - `isRunning` DULU dihitung dari `task.status` (task yang sedang ditampilkan):
         ["running","prepared","planning","executing","validating"].includes(status)
-    Akibatnya task yang di backend ber-queue_state="pending" (menunggu slot)
-    tetap tampil "Running…" di Workbench (Stop button, composer disabled, chip
-    "Task: Running"), sehingga user melihat "task langsung running" dan tombol
-    yang tersedia adalah STOP/CANCEL (bukan Disable) -> persis keluhan
-    "tidak bisa entry pending/disabled".
+    sehingga setelah submit task baru yang masuk antrian (queued), isRunning
+    menjadi false -> tombol Stop hilang / tombol Send "terpaksa" menggantikan
+    Stop.
+  - TaskComposer memblokir submit & men-disable textarea/select saat `running`
+    (`:disabled="disabled || running"`, `if (props.running) return`).
+  - `stopTask()` selalu menghentikan `task.id` = task TERAKHIR yang dikirim,
+    bukan task yang benar-benar RUNNING.
 
-BUKTI EMPIRIS bahwa jalur Workbench sudah melewati queue yang sama (sebelum
-perubahan frontend apa pun): skenario baru [9] (POST /api/tasks via HTTP, layer
-yang sama dengan Workbench) LULUS pada kode backend yang ada ->
-  A (slot kosong)  -> queue_state="running"
-  B, C (slot dipakai) -> queue_state="pending"
-  disable/enable pada B dari Workbench -> OK
-  A selesai -> B running -> B selesai -> C running (FIFO, max concurrency=1)
-Jadi TIDAK ada perubahan backend yang diperlukan.
+Kesimpulan: satu tombol tidak bisa mewakili dua aksi berbeda, dan tidak ada
+sumber tunggal yang tahu task mana yang benar-benar RUNNING.
 
-2. AKAR MASALAH (ringkas)
+3. SEND DAN STOP SEKARANG DIPISAHKAN
 ---------------------------------------------------------------------------
-Presentasi status optimistik di frontend: setelah POST /api/tasks, Workbench
-memakai `record.status` (lifecycle, selalu "prepared") dan mengabaikan
-`record.queue_state` (pending|running|disabled|done). Karena isRunning
-menghitung "prepared" sebagai running, task yang sebenarnya PENDING tampil
-sebagai RUNNING.
+- App.vue `.agent-input-row`:
+    Send  = <button class="send-btn" @click="openComposer">      (SELALU ada)
+    Stop  = <button v-if="isRunning" class="stop-btn" @click="stopTask">
+            (hanya saat ADA task RUNNING)
+  Tidak ada lagi v-if/v-else toggle.
 
-3. PERUBAHAN YANG DILAKUKAN (minimal, additive, frontend-only)
+- TaskComposer.vue `.composer-actions`:
+    Run Task = <button class="btn-primary-a" :disabled="disabled || !text"
+                       @click="submit">  (SELALU ada; disabled hanya saat submit)
+    Stop     = <button v-if="running" class="btn-ghost-a"
+                       @click="emit('stop')">  (hanya saat ada task RUNNING)
+  `submit()` hanya menolak bila `props.disabled` (isSubmitting) atau teks kosong.
+
+- Handler: `handleSend` = `submitTask` (existing) dan `handleStop` = `stopTask`
+  (existing cancel_task). Send tidak pernah memanggil stop; Stop tidak pernah
+  memanggil submit. Tidak ada endpoint/queue/task-manager baru.
+
+4. PENGGUNAAN isRunning / isSubmitting / RUNNING TASK
 ---------------------------------------------------------------------------
-A. web/frontend/src/App.vue :: submitTask (L492-503)
-   Status awal sekarang berasal dari KEBENARAN backend (queue_state), bukan
-   optimistik:
-       const queueState = record.queue_state;
-       if (queueState === "pending")       task.status = "queued";
-       else if (queueState === "running")  task.status = "running";
-       else                               task.status = record.status || "prepared";
-   -> task PENDING (menunggu execution slot) TIDAK lagi tampil running; promosi
-      ke running datang dari SSE `task_started` (atau queue_state="running" pada
-      respons POST). Kode status "queued" TIDAK ditambahkan ke isRunning, jadi
-      task pending tidak dianggap running dan TIDAK memunculkan Stop/Canel.
+- isRunning (baru): `computed(() => Boolean(runningTaskId))` = "ADA task yang
+  sedang RUNNING". Dipakai untuk:
+      * menampilkan tombol Stop (Agent Input & TaskComposer);
+      * indikator status UI (taskTag fallback "running").
+  TIDAK dipakai untuk `:disabled` input/Submit. Input Agent selalu bisa submit.
 
-B. web/frontend/src/App.vue :: agentStatus (chip header + dot sidebar)
-   Ditambah: `if (s === "queued") return { label: "Queued", cls: "queued" };`
-   (status "queued" memang sudah dikenal `lifecycleIndex` di App.vue; tidak ada
-   nilai enum baru di backend).
+- isSubmitting (existing: `submitting` ref): true selama request createTask
+  belum selesai. Dipakai:
+      * mencegah double submit (submit() menolak saat disabled=true);
+      * label tombol "Sending…" + `:disabled` pada Run Task.
+  Setelah respons diterima, `submitting=false` -> Send kembali tersedia
+  WALAU Agent masih RUNNING. Stop (untuk task RUNNING) tetap tampil.
 
-C. web/frontend/src/App.vue :: taskTag (tag "Latest Task")
-   Ditambah: `if (s === "queued") return { label: "queued", cls: "queued" };`
+- runningTaskId (baru, single source of truth = TaskRecord backend):
+      * diisi dari GET /api/tasks/queue (task dengan queue_state === "running");
+      * diisi dari event SSE `task_started` (task yang benar-benar mulai);
+      * diisi dari respons createTask bila queue_state === "running";
+      * TIDAK membuat polling baru: refresh mengikuti penanda `queueRefresh`
+        yang sudah ada (submit / event terminal / stop) + sekali saat mount.
+  Karena id ini berasal dari queue, Stop selalu menunjuk task RUNNING yang
+  sebenarnya — bukan task terakhir yang dikirim, pending, atau proposal
+  Consultant.
 
-D. web/frontend/src/styles.css :: 2 rule kecil (konsisten tema AETHER, amber/
-   non-neon): `.chip.queued` dan `.tag.queued`. TIDAK ada rule lain diubah.
-
-E. scripts/check_task_queue_scheduler.py :: skenario baru [9]
-   `scenario_9_workbench_http_path()` — menguji JALUR SUBMIT WORKBENCH lewat
-   layer HTTP nyata (`POST /api/tasks` via Django test client, service di-patch
-   seperti verifier lain) dengan GatedExecutor, membuktikan:
-     (i)   Workbench submit saat slot kosong -> RUNNING
-     (ii)  Workbench submit saat task lain RUNNING -> PENDING (tidak dieksekusi)
-     (iii) task PENDING dari Workbench dapat di-disable lalu di-enable
-     (iv)  slot bebas -> task pending berikutnya RUNNING (FIFO, concurrency=1)
-   Docstring + pesan akhir script diperbarui.
-
-TIDAK diubah: web/django_app/**, src/**, api.js, ConsultantChat.vue, queue API,
-scheduler, TaskStatus core/TERMINAL_STATUSES, reasonin Agent, tool registry/
-policy, provider, .aether/log, SessionStore/SSE, task lifecycle finalize.
-
-4. HASIL VERIFIKASI
+5. HASIL VERIFIKASI QUEUE
 ---------------------------------------------------------------------------
-- `python scripts/check_task_queue_scheduler.py` -> 9/9 OK (8 skenario lama +
-  skenario baru [9] jalur Workbench HTTP). Output:
-    [9] Workbench POST /api/tasks -> GLOBAL queue sama
-        (running/pending/disable/enable/FIFO) OK
-- `python scripts/check_task_queue.py` -> 9/9 OK (kontrak queue API tidak berubah)
-- `python scripts/check_cancellation.py` -> 8/8 OK
-- `python scripts/check_task_lifecycle.py` -> OK (semua langkah)
-- `python scripts/check_consultant.py` -> OK (semua langkah, termasuk Task
-  Proposal -> create_task jalur Agent existing)
-- `python scripts/check_web_runtime.py` -> OK (POST /api/tasks -> runtime ->
-  events -> SSE)
-- `python scripts/check_django_gateway.py` -> 10/10 OK
-- `python scripts/check_workbench.py` -> 12/12 OK (termasuk SSR render App.vue
-  1828 bytes + kontrak scroll Explorer)
-  (check_web_runtime/check_django_gateway dijalankan dengan
-   DJANGO_ALLOWED_HOSTS=testserver,127.0.0.1,localhost — kebutuhan environment
-   yang sudah ada sebelumnya, bukan efek perubahan ini)
-- Build frontend: `node node_modules/vite/bin/vite.js build` dari web/frontend
-  -> 1089 modules transformed, 0 error. Bundle terverifikasi memuat logika baru:
-    * index-*.js : `queue_state==="pending"?status="queued"`, `"Queued"/"queued"`
-    * index-*.css: `.chip.queued{...}` dan `.tag.queued{...}`
+Analisis alur (source-based):
+  - Submit (Agent Input / Consultant Run Task) tetap lewat satu jalur:
+        App.vue::submitTask -> api.js::createTask -> POST /api/tasks
+        -> Global Task Queue (queue_state=pending bila slot terpakai).
+  - submitTask menetapkan status tampilan dari KEBENARAN backend:
+        queue_state "pending" -> task.status = "queued"  (bukan "running")
+        queue_state "running" -> task.status = "running"
+        selain itu            -> record.status
+  - Task B/C/D yang dikirim saat A RUNNING tetap masuk sebagai PENDING
+    (queued); tidak dipromosikan ke RUNNING secara optimistik.
+  - Setelah Stop pada A: A -> CANCELLED; scheduler existing mempromosikan B;
+    event `task_started`/refresh queue menyinkronkan runningTaskId ke B.
+  - Label queued memakai token status yang SUDAH ada (`.chip.queued` /
+    `.tag.queued`); lifecycle steps/index tidak diubah.
 
-5. ACCEPTANCE (R1-R9)
+6. HASIL VERIFIKASI STOP
 ---------------------------------------------------------------------------
-  R1 melewati Global Task Queue yang sama        : TERPENUHI (verifikasi [9])
-  R2 submit saat tidak ada task -> Running       : TERPENUHI ([9] (i))
-  R3 submit saat ada task Running -> Pending     : TERPENUHI ([9] (ii))
-  R4 Pending Workbench dapat Disable/Enable      : TERPENUHI ([9] (iii))
-  R5 slot bebas -> pending berikutnya Running    : TERPENUHI ([9] (iv))
-  R6 tidak ada jalur eksekusi langsung Workbench : TERPENUHI (create_task selalu
-     _scheduler_pump; satu-satunya Thread ada di execution.py via pump)
-  R7 Consultant tidak berubah + tidak ada queue kedua : TERPENUHI
-     (check_consultant OK; src/** dan web/django_app/** tidak disentuh)
-  R8 enum/TERMINAL_STATUSES/Agent/log/SSE tidak berubah : TERPENUHI
-     (`git diff --stat -- src web/django_app` kosong; queue_state tetap field
-      terpisah; tidak ada nilai enum baru)
-  R9 new_analisa.txt diperbarui                  : TERPENUHI (seksi ini)
+  - stopTask() target = `runningTaskId || task.id` -> menghentikan task yang
+    benar-benar RUNNING (bukan task terakhir dibuat/pending/proposal).
+  - Menggunakan mekanisme cancel EXISTING (api.js::cancelTask ->
+    POST /api/tasks/<id>/cancel, cooperative cancellation) — TIDAK ada
+    mekanisme cancellation kedua.
+  - Stop tidak menimpa status tampilan task lain (`if (targetId === task.id)`).
+  - Setelah Stop: queueRefresh++ + refreshRunningTask() -> target Stop
+    otomatis pindah ke task RUNNING berikutnya (bila ada).
+  - Stop hanya dirender saat `isRunning` true (tidak ditampilkan bila tidak
+    ada task RUNNING).
 
-catatan: acceptance "Workbench submit -> Pending" kini terlihat di UI sebagai
-status "queued" (bukan "running"). Perubahan ini ADDITIVE: status token "queued"
-sudah dipahami lifecycleIndex App.vue; tidak ada kontrak backend yang berubah.
-
-6. FILE YANG DIUBAH
+7. HASIL BUILD
 ---------------------------------------------------------------------------
-  - web/frontend/src/App.vue              (submitTask + agentStatus + taskTag)
-  - web/frontend/src/styles.css           (+ .chip.queued, + .tag.queued)
-  - scripts/check_task_queue_scheduler.py (+ scenario_9 jalur Workbench HTTP)
-  - new_analisa.txt                       (seksi ini)
-  (File lain yang tampak modified di `git status` — AgentActivity.vue,
-   FileExplorer.vue, ExplorerTreeNode.vue — berasal dari sesi lain, bukan task
-   ini dan tidak diubah di sini.)
+  $ cd web/frontend && node node_modules/vite/bin/vite.js build
+      vite v5.4.21  building for production...
+      ✓ 1089 modules transformed.
+      ✓ built in ~18s
+      0 error (hanya warning pre-existing: chunk > 500 kB untuk Monaco).
 
-7. SISA / CATATAN
+  Bundle dist/assets/index-*.js DIVERIFIKASI memuat:
+    - TaskComposer: label "Sending…"/"Run Task", tombol "Stop Task" via
+      `e.running?(...)` (v-if), dan `disabled:e.disabled` (isSubmitting).
+    - App.vue: tombol "send-btn" TANPA v-if (selalu ada) + tombol "stop-btn"
+      via `isRunning ? (...) : null`; `refreshRunningTask` memanggil
+      GET /api/tasks/queue; `task_started` men-set id running.
+
+8. ACCEPTANCE (sesuai daftar verifikasi task)
 ---------------------------------------------------------------------------
-  - Waiktu task pending, Agent Input menampilkan tombol Send (bukan
-    Stop/"Running…") karena task tersebut memang belum berjalan; menghentikan
-    task yang SEDANG running dilakukan dari panel TASKS (context menu Stop) —
-    perilaku ini konsisten dengan desain queue (Disable != Cancel).
-  - Django menyajikan dist/ hasil build -> hard refresh browser setelah rebuild.
+  [1] Agent idle -> Send terlihat ......................... OK
+      (send-btn selalu dirender)
+  [2] Agent running -> Send tetap terlihat ................ OK
+  [3] Agent running -> Stop terlihat ...................... OK (v-if isRunning)
+  [4] Submit saat running -> task masuk pending/queued .... OK (submitTask
+      memakai queue_state backend)
+  [5] Submit kedua/ketiga -> semua masuk queue ............ OK
+  [6] Send tidak menghentikan task running ................ OK (handler terpisah)
+  [7] Stop menghentikan task running ...................... OK (runningTaskId)
+  [8] Setelah Stop, scheduler menjalankan pending berikut .. OK (refresh queue)
+  [9] Double-click Send tidak membuat duplicate task ....... OK (submitting)
+  [10] Consultant tetap berjalan seperti sebelumnya ........ OK (Prop/logika
+       ConsultantChat & QueuePanel tidak diubah; jalur queue sama)
+  [11] Tidak ada perubahan backend ......................... OK
+       (git status -- src web/django_app = kosong)
+
+BATAS / CATATAN
+---------------------------------------------------------------------------
+  - Frontend-only. Backend/Python/API/scheduler/TaskRecord/TaskStatus/
+    TaskExecutor/AgentRuntime/CancellationToken/SSE/SessionStore TIDAK diubah.
+  - Tidak membuat queue/task-manager/handler submit kedua.
+  - `runningTaskId` adalah proyeksi dari TaskRecord backend (satu sumber
+    kebenaran), bukan state machine kedua.
+  - Verifikasi UI interaktif (klik browser) tidak dilakukan di lingkungan ini;
+    validasi = build produksi + inspeksi bundle + analisis alur source.
 ===========================================================================
