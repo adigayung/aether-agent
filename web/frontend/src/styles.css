@@ -338,7 +338,49 @@ button {
   min-height: 0;
 }
 .ws-col.right > .block:not(.explorer-block) {
+  /* CHANGES: boleh menyusut (flex-shrink) dan dibatasi tinggi agar selalu
+     ringkas, sehingga tidak mendorong EXPLORER keluar dari kolom. Scroll
+     internal ada di .changes-body (bukan di blok ini). */
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+/* Blok CHANGES (tanpa .explorer-block / .wb-queue): batasi tinggi maksimum
+   agar EXPLORER selalu menerima sisa tinggi kolom. Daftar perubahan menjadi
+   scroll owner internal (.changes-body) mengikuti pola .ex-head/.explorer. */
+.ws-col.right > .block:not(.explorer-block):not(.wb-queue) {
+  display: flex;
+  flex-direction: column;
+  max-height: 30%;
+  min-height: 96px;
+}
+.ws-col.right > .block:not(.explorer-block):not(.wb-queue) > .block-head {
   flex: 0 0 auto;
+}
+.ws-col.right > .block:not(.explorer-block):not(.wb-queue) > .changes-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.ws-col.right > .block:not(.explorer-block):not(.wb-queue) > .changes-body::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+.ws-col.right > .block:not(.explorer-block):not(.wb-queue) > .changes-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+.ws-col.right > .block:not(.explorer-block):not(.wb-queue) > .changes-body::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.ws-col.right > .block:not(.explorer-block):not(.wb-queue) > .changes-body::-webkit-scrollbar-thumb:hover {
+  background: var(--bg-hover);
+  background-clip: padding-box;
 }
 .ws-scroll {
   flex: 1 1 auto;
@@ -871,9 +913,11 @@ button {
   background: var(--bg-hover);
   background-clip: padding-box;
 }
-/* Catatan: CHANGES (`.ws-col.right > .block:not(.explorer-block)`) sudah diatur
-   flex:0 0 auto di atas. Explorer TIDAK boleh kena flex:0 0 auto — ia harus
-   flex:1 1 auto agar mengisi sisa tinggi kolom dan daftarnya bisa scroll. */
+/* Catatan: CHANGES (`.ws-col.right > .block:not(.explorer-block)`) dibatasi
+   tingginya dan boleh menyusut (lihat aturan di atas blok ini), dengan scroll
+   internal pada `.changes-body`. Explorer TIDAK boleh kena aturan tersebut —
+   ia harus flex:1 1 auto agar mengisi sisa tinggi kolom dan daftarnya bisa
+   scroll. */
 .ex-row {
   display: flex;
   align-items: center;
@@ -2362,6 +2406,12 @@ select.input-a {
   .explorer-block {
     flex: 0 1 auto;
     max-height: 60vh;
+  }
+  /* Mode stacked: kolom kanan tidak dibatasi grid track, jadi % untuk CHANGES
+     tidak bermakna. Beri batas tinggi eksplisit agar blok tetap ringkas dan
+     EXPLORER selalu terlihat. */
+  .ws-col.right > .block:not(.explorer-block):not(.wb-queue) {
+    max-height: 240px;
   }
 }
 
