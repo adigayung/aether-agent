@@ -1,4 +1,104 @@
 ================================================================================
+AETHER — CONSULTANT CHAT VISUAL DESIGN (KONTRAS & SPACING)
+(Frontend-only: warna bg/text + ruang napas di dalam modal Consultant Chat)
+Scope: web/frontend/src/styles.css saja. Struktur/scroll layout TIDAK diubah.
+================================================================================
+
+--------------------------------------------------------------------------------
+RINGKASAN
+--------------------------------------------------------------------------------
+Tujuan: menghilangkan kesan "sesak" pada chat box AETHER Consultant dengan
+meningkatkan KONTRAS WARNA (background & text) dan memberi SPACING/ruang napas,
+tanpa mengubah struktur layout, perilaku fitur, atau backend.
+
+Hipotesis lama (font/line-height kecil) TERBANTAHKAN: font sudah 14px dan
+line-height sudah 1.6. Akar masalah sebenarnya = kontras rendah + spacing rapat.
+
+--------------------------------------------------------------------------------
+PERUBAHAN DITERAPKAN (web/frontend/src/styles.css)
+--------------------------------------------------------------------------------
+1) Bubble AETHER (.consultant-md, class "consultant-md md") dan bubble generik
+   (.ctext):
+   - background  : var(--bg-panel) #14121f  -> #1c1830   (lebih terang, terpisah dari latar modal)
+   - border      : var(--border-soft) #221d36 -> #2e2850 (lebih jelas)
+   - padding     : 9px 13px                 -> 12px 16px
+
+2) Bubble user (.cmsg.user .ctext):
+   - background  : rgba(139,92,246,0.22)    -> rgba(139,92,246,0.30)  (#8b5cf64d)
+   - border-color: rgba(139,92,246,0.40)    -> rgba(139,92,246,0.55)  (#8b5cf68c)
+
+3) Warna teks:
+   - .ctext                     : #ffffff -> #f3eefb (putih lembut)
+   - .cmsg.user .ctext          : #ffffff -> #f3eefb
+   - .consultant-md.md p        : var(--text) #ece6f5 -> #f3eefb
+   Catatan: heading markdown (.md h1..h6) tetap memakai var(--text) (#ece6f5),
+   sudah lembut, tidak diubah.
+
+4) Label role (.crole): #b0d4f0 -> #cdb9f5 (lebih kontras di latar gelap),
+   margin-bottom 2px -> 3px.
+
+5) Spacing / ruang napas:
+   - .consultant-messages  : gap 10px -> 16px ; padding 14px 18px -> 18px 22px
+   - .cmsg                 : gap 3px  -> 5px
+   - .ctext / .consultant-md: padding 9px 13px -> 12px 16px
+
+6) Batas panjang baris: .cmsg max-width 85% -> 78% (baris lebih nyaman dibaca).
+
+--------------------------------------------------------------------------------
+YANG SENGAJA TIDAK DIUBAH (struktur/scroll/perilaku)
+--------------------------------------------------------------------------------
+- .modal.consultant-m : max-width 860px; width 90vw; max-height calc(100vh-100px);
+  margin 50px auto; flex column; overflow hidden  -> TIDAK diubah.
+- .consultant-messages tetap scroll owner (flex:1 1 auto; min-height:0; overflow-y:auto).
+- .consultant-foot tetap sibling dengan flex-shrink:0.
+- .consultant-proposal tetap DI DALAM .consultant-messages.
+- Tidak ada min-height baru pada .consultant-messages.
+- Tidak ada perubahan pada ConsultantChat.vue (markup/stuktur) — hanya CSS.
+- Perilaku fitur (mode Quick/Investigate, provider/model, attach image,
+  Task Proposal + Run Task, keyboard Enter=newline / Shift+Enter=kirim,
+  auto-scroll) TIDAK disentuh.
+- Tidak ada dependency/icon library baru. Tidak ada refactor.
+
+--------------------------------------------------------------------------------
+FILE DIUBAH
+--------------------------------------------------------------------------------
+- web/frontend/src/styles.css   (hanya warna bg/text + spacing; 2 blok rules)
+- new_analisa.txt               (catatan ini)
+(Tidak ada file Python/backend, App.vue, api.js, atau komponen lain yang diubah.)
+
+--------------------------------------------------------------------------------
+VALIDASI
+--------------------------------------------------------------------------------
+- Build: `node node_modules/vite/bin/vite.js build` dari web/frontend
+  -> 30 modules transformed, 0 error, sukses.
+- Bundle dist/assets/index-Bkf5H59I.css terverifikasi memuat nilai baru:
+  padding:18px 22px; gap:16px; max-width:78%; color:#cdb9f5;
+  color:#f3eefb; padding:12px 16px; background:#1c1830; border:1px solid #2e2850;
+  background:#8b5cf64d; border-color:#8b5cf68c.
+- Bundle juga memastikan struktur tetap: .modal.consultant-m max-width:860px,
+  .consultant-foot flex-shrink:0, .consultant-proposal utuh.
+- `git status --porcelain` => hanya ` M web/frontend/src/styles.css`
+  (tidak ada file Python/backend yang berubah).
+
+--------------------------------------------------------------------------------
+DAMPAK ARSITEKTUR
+--------------------------------------------------------------------------------
+- Nol. Perubahan murni presentational (CSS) di dalam modal Consultant Chat.
+- Tidak mengubah API, task lifecycle, SessionStore/SSE, .aether/log, provider,
+  maupun Agent execution.
+
+--------------------------------------------------------------------------------
+ACCEPTANCE CRITERIA
+--------------------------------------------------------------------------------
+- Bubble AETHER & bubble user terlihat jelas terpisah dari latar modal.        [OK]
+- Warna teks nyaman (#f3eefb, bukan putih murni), label role lebih jelas.     [OK]
+- Spacing antar pesan / padding bubble / jarak blok lebih lega.               [OK]
+- Panjang baris dibatasi (max-width 78%).                                     [OK]
+- Build frontend sukses 0 error.                                              [OK]
+- Tidak ada file Python/backend berubah.                                      [OK]
+- Ringkasan ditulis ke new_analisa.txt.                                       [OK]
+
+================================================================================
 AETHER — CONSULTANT VISION / MULTIMODAL IMAGE SUPPORT
 (Provider content-parts + Consultant image attach)
 Mode: ADDITIVE. Tidak ada arsitektur stabil yang di-rewrite.
