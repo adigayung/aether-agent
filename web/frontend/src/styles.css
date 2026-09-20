@@ -310,6 +310,11 @@ button {
   flex: 1 1 auto;
   display: grid;
   grid-template-columns: 1fr 340px;
+  /* Baris tunggal dibatasi ke tinggi container (minmax(0,1fr)). Tanpa ini,
+     track implicit `auto` mengambil tinggi max-content sehingga kolom kanan
+     bisa meluber keluar .ws-body dan overflow-y pada daftar Explorer tidak
+     pernah aktif (item terpotong & tak bisa di-scroll). */
+  grid-template-rows: minmax(0, 1fr);
   min-height: 0;
 }
 .ws-col {
@@ -320,6 +325,20 @@ button {
 }
 .ws-col.left {
   border-right: 1px solid var(--border-soft);
+}
+/* Kolom kanan (CHANGES + EXPLORER): CHANGES tetap di atas dengan ukuran
+   natural (flex-shrink:0), EXPLORER mengisi sisa tinggi dan memiliki scroll
+   pada area daftar file. overflow:hidden memastikan anak-anak kolom terikat
+   pada tinggi kolom sehingga tidak meluber/terpotong oleh .ws-body. */
+.ws-col.right {
+  overflow: hidden;
+  /* min-height:0 wajib agar kolom kanan boleh menyusut di dalam grid track
+     minmax(0,1fr); tanpa ini rantai flex anak (explorer) tidak pernah
+     dibatasi tinggi sehingga overflow-y daftar file tidak aktif. */
+  min-height: 0;
+}
+.ws-col.right > .block:not(.explorer-block) {
+  flex: 0 0 auto;
 }
 .ws-scroll {
   flex: 1 1 auto;
@@ -765,12 +784,19 @@ button {
 .explorer-block {
   display: flex;
   flex-direction: column;
+  /* Isi sisi kanan: ambil sisa tinggi kolom, jangan ikut meluber keluar
+     panel. min-height:0 wajib agar overflow-y anak (daftar) bekerja. */
+  flex: 1 1 auto;
+  min-height: 0;
+  /* CHANGES tetap di atas; hanya daftar explorer yang scroll. */
+  overflow: hidden;
 }
 .ex-head {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-bottom: 12px;
+  flex: 0 0 auto;
 }
 .ex-head-ico {
   display: inline-flex;
@@ -819,7 +845,35 @@ button {
   gap: 1px;
   font-family: var(--mono);
   font-size: 12.5px;
+  /* Area daftar file: mengisi sisa tinggi blok explorer dan scroll vertikal. */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* Scrollbar gelap selaras tema AETHER. */
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
 }
+.explorer::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+.explorer::-webkit-scrollbar-track {
+  background: transparent;
+}
+.explorer::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.explorer::-webkit-scrollbar-thumb:hover {
+  background: var(--bg-hover);
+  background-clip: padding-box;
+}
+/* Catatan: CHANGES (`.ws-col.right > .block:not(.explorer-block)`) sudah diatur
+   flex:0 0 auto di atas. Explorer TIDAK boleh kena flex:0 0 auto — ia harus
+   flex:1 1 auto agar mengisi sisa tinggi kolom dan daftarnya bisa scroll. */
 .ex-row {
   display: flex;
   align-items: center;
@@ -859,6 +913,7 @@ button {
 }
 .ex-name {
   color: inherit;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2200,12 +2255,29 @@ select.input-a {
   }
   .ws-body {
     grid-template-columns: 1fr;
+    /* Mode stacked (2 baris): jangan paksa satu baris 1fr. Biarkan baris
+       mengikuti konten agar kedua kolom tersusun vertikal seperti semula. */
+    grid-template-rows: none;
   }
   .ws-col.left {
     border-right: none;
   }
   .ws-col.right {
     border-top: 1px solid var(--border-soft);
+    /* Mode stacked: kolom tidak lagi dibatasi oleh grid track 1fr, jadi biarkan
+       tinggi mengikuti konten (tanpa overflow:hidden) agar tidak ada daftar
+       file yang terpotong. Scroll tetap dimiliki daftar (.explorer) pada
+       layout desktop. */
+    overflow: visible;
+  }
+  /* Mode stacked: baris grid mengikuti konten (auto), sehingga kolom kanan
+     tidak punya tinggi terbatas. Tanpa batas ini, daftar Explorer tumbuh
+     mengikuti isi dan overflow-y-nya (.explorer) tidak pernah aktif — item
+     terbawah terpotong. Beri tinggi eksplisit pada blok Explorer agar area
+     daftar kembali menjadi scroll owner (header tetap terlihat di atas). */
+  .explorer-block {
+    flex: 0 1 auto;
+    max-height: 60vh;
   }
 }
 

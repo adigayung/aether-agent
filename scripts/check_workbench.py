@@ -17,6 +17,7 @@ Menguji:
     9. tidak ada agent logic di frontend
    10. tidak ada event system kedua
    11. Django API/SSE tetap kompatibel
+   12. Explorer daftar file = scroll owner (bukan seluruh kolom)
 
 Jalankan:
     python scripts/check_workbench.py
@@ -107,11 +108,15 @@ def _run() -> int:
     finally:
         shutil.rmtree(ssr_out, ignore_errors=True)
 
-    # Initial state: tanpa active project -> Project Launcher; dengan active
-    # project -> Workbench ("Agent Workspace"). Keduanya valid.
-    assert "Agent Workspace" in html or "Recent Projects" in html, (
-        "App harus merender Workbench (Agent Workspace) atau Project Launcher"
-    )
+    # Initial state: tanpa active project -> Project Launcher ("New Project");
+    # dengan active project -> Workbench ("Workspace:" + EXPLORER). Keduanya
+    # valid; yang penting App merender salah satu shell tersebut.
+    assert (
+        "Create and open AETHER workspaces" in html
+        or "New Project" in html
+        or "Workspace:" in html
+        or "EXPLORER" in html
+    ), "App harus merender Workbench (Workspace/EXPLORER) atau Project Launcher"
     assert "AETHER" in html or "AE" in html, "App harus merender brand AETHER"
     print(f"[2] main App render OK -> {len(html)} bytes HTML (SSR)")
 
@@ -221,7 +226,9 @@ def _run() -> int:
 
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
     # Django test client mengirim Host: testserver (hardening #57 membatasi host).
-    os.environ.setdefault("DJANGO_ALLOWED_HOSTS", "testserver,127.0.0.1,localhost")
+    # Paksa (bukan setdefault) agar deterministik walau env host sudah terisi
+    # tanpa "testserver" — kalau tidak, request test client ditolak (DisallowedHost).
+    os.environ["DJANGO_ALLOWED_HOSTS"] = "testserver,127.0.0.1,localhost"
     import django
     django.setup()
     from django.test import Client
@@ -240,6 +247,33 @@ def _run() -> int:
     assert sse.status_code == 200
     assert sse["Content-Type"].startswith("text/event-stream")
     print("[11] Django API/SSE tetap kompatibel OK -> #50 + #51")
+
+    # 12) Explorer: daftar file adalah scroll owner (bukan seluruh kolom).
+    css_src = sources.get("src/styles.css", "")
+    assert ".explorer-block" in css_src, "explorer-block style tidak ada"
+    assert ".explorer {" in css_src or ".explorer{" in css_src, (
+        "rule .explorer (scroll owner daftar file) tidak ada"
+    )
+    # Ambil blok rule .explorer untuk memverifikasi kontrak scroll.
+    idx = css_src.find(".explorer {")
+    if idx == -1:
+        idx = css_src.find(".explorer{")
+    explorer_rule = css_src[idx : css_src.find("}", idx)]
+    assert "flex: 1 1 auto" in explorer_rule, "explorer harus flex: 1 1 auto"
+    assert "min-height: 0" in explorer_rule, "explorer butuh min-height: 0 (agar scroll aktif)"
+    assert "overflow-y: auto" in explorer_rule, "explorer harus overflow-y: auto"
+    assert "overflow-x: hidden" in explorer_rule, "explorer harus overflow-x: hidden"
+    # Header tetap terlihat: .ex-head tidak ikut scroll (flex: 0 0 auto).
+    head_idx = css_src.find(".ex-head {")
+    head_rule = css_src[head_idx : css_src.find("}", head_idx)]
+    assert "flex: 0 0 auto" in head_rule, "ex-head harus flex: 0 0 auto (header tetap terlihat)"
+    # .ws-body dibatasi satu baris agar kolom kanan tidak meluber.
+    wsbody_idx = css_src.find(".ws-body {")
+    wsbody_rule = css_src[wsbody_idx : css_src.find("}", wsbody_idx)]
+    assert "minmax(0, 1fr)" in wsbody_rule, (
+        ".ws-body harus grid-template-rows: minmax(0, 1fr) agar explorer scroll"
+    )
+    print("[12] Explorer daftar file scroll owner OK -> header tetap, hanya daftar scroll")
 
     print()
     print("[OK] Engineering Workbench UI bekerja (Vue+Vite tipis, API #50 + SSE #51).")
