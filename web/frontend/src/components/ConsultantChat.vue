@@ -110,31 +110,6 @@ function onModelChange(e) {
   emit("update:modelId", String(e.target.value || ""));
 }
 
-// --- LLM Model Sidebar -----------------------------------------------------
-// Daftar model enabled per provider (data SUDAH ADA dari props.providers).
-function enabledModels(p) {
-  return (p.models || []).filter((m) => m.enabled !== false);
-}
-
-// Pilih provider dari sidebar: set provider instance. Bila provider sudah aktif,
-// pertahankan model; bila berganti provider, model di-reset (mekanisme sama
-// dengan dropdown existing via emit update:*).
-function selectProvider(providerId) {
-  if (providerId === props.providerInstanceId) return;
-  emit("update:providerInstanceId", providerId);
-  emit("update:modelId", "");
-}
-
-// Pilih model dari sidebar: set provider instance + model sekaligus. Ini adalah
-// SATU jalur state existing (App.vue) yang juga dipakai New Task & dropdown.
-function selectModel(providerId, modelIdValue) {
-  if (providerId !== props.providerInstanceId) {
-    emit("update:providerInstanceId", providerId);
-  }
-  if (modelIdValue === props.modelId) return;
-  emit("update:modelId", modelIdValue);
-}
-
 function scrollToBottom() {
   nextTick(() => {
     const el = scroller.value;
@@ -322,26 +297,6 @@ onMounted(() => {
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a4 4 0 0 1 4 4c0 1.95-1.4 3.58-3.25 3.93L12 22l-.75-12.07A4.001 4.001 0 0 1 12 2z"/><circle cx="12" cy="6" r="1.5" fill="currentColor" stroke="none"/><path d="M9 14l-3 3 3 3M15 14l3 3-3 3"/></svg>
           AETHER Consultant
         </div>
-        <div class="consultant-selects">
-          <label class="consultant-select">
-            <span class="cs-label">Provider</span>
-            <select class="input-a" :value="providerInstanceId" @change="onProviderChange">
-              <option v-if="!providerOptions.length" value="">No provider instance</option>
-              <option v-for="p in providerOptions" :key="p.id" :value="p.id">
-                {{ providerLabel(p) }}
-              </option>
-            </select>
-          </label>
-          <label class="consultant-select">
-            <span class="cs-label">Model</span>
-            <select class="input-a" :value="modelId" @change="onModelChange">
-              <option v-if="!modelOptions.length" value="">No model</option>
-              <option v-for="m in modelOptions" :key="m.id" :value="m.id">
-                {{ m.model_name }}
-              </option>
-            </select>
-          </label>
-        </div>
         <button class="consultant-new" type="button" title="New session" @click="startNewSession">
           New
         </button>
@@ -373,54 +328,6 @@ onMounted(() => {
       </div>
 
       <div class="consultant-body">
-        <!-- LLM Model Sidebar (KIRI): daftar provider/model dari data LLM config
-             yang SUDAH ADA (props.providers). Model aktif Consultant di-highlight.
-             Memilih model mengubah model Consultant via mekanisme existing
-             (emit update:providerInstanceId / update:modelId -> App.vue). -->
-        <aside class="consultant-models" aria-label="LLM model">
-          <div class="cm-side-head">
-            <span class="cm-side-title">LLM MODEL</span>
-          </div>
-          <div class="cm-side-body">
-            <div v-if="!providerOptions.length" class="cm-side-empty">
-              No provider configured.
-            </div>
-            <div
-              v-for="p in providerOptions"
-              :key="p.id"
-              class="cm-side-provider"
-              :class="{ active: p.id === providerInstanceId }"
-            >
-              <button
-                type="button"
-                class="cm-side-provider-btn"
-                :title="providerLabel(p)"
-                @click="selectProvider(p.id)"
-              >
-                <span class="cm-side-provider-name">{{ providerLabel(p) }}</span>
-              </button>
-              <ul class="cm-side-models">
-                <li
-                  v-for="m in enabledModels(p)"
-                  :key="m.id"
-                  class="cm-side-model"
-                  :class="{ active: p.id === providerInstanceId && m.id === modelId }"
-                >
-                  <button
-                    type="button"
-                    class="cm-side-model-btn"
-                    :title="m.model_name"
-                    @click="selectModel(p.id, m.id)"
-                  >
-                    <span class="cm-side-dot" aria-hidden="true"></span>
-                    <span class="cm-side-model-name">{{ m.model_name }}</span>
-                  </button>
-                </li>
-              </ul>
-            </div>
-          </div>
-        </aside>
-
         <div class="consultant-chat">
           <div class="consultant-messages" ref="scroller">
         <div v-for="(msg, i) in messages" :key="i" class="cmsg" :class="msg.role">
@@ -464,6 +371,30 @@ onMounted(() => {
                 {{ running ? "Running…" : "Run Task" }}
               </button>
             </div>
+          </div>
+          <!-- Pemilihan Provider/Model: dropdown <select class="input-a"> seperti
+               semula, diletakkan DI BAWAH card Task Proposal sebagai bagian dari
+               alur pesan (ikut ter-scroll bersama percakapan). Memakai state
+               existing via emit update:providerInstanceId / update:modelId. -->
+          <div v-if="msg.role === 'assistant' && msg.taskProposal" class="consultant-selects inline">
+            <label class="consultant-select">
+              <span class="cs-label">Provider</span>
+              <select class="input-a" :value="providerInstanceId" @change="onProviderChange">
+                <option v-if="!providerOptions.length" value="">No provider instance</option>
+                <option v-for="p in providerOptions" :key="p.id" :value="p.id">
+                  {{ providerLabel(p) }}
+                </option>
+              </select>
+            </label>
+            <label class="consultant-select">
+              <span class="cs-label">Model</span>
+              <select class="input-a" :value="modelId" @change="onModelChange">
+                <option v-if="!modelOptions.length" value="">No model</option>
+                <option v-for="m in modelOptions" :key="m.id" :value="m.id">
+                  {{ m.model_name }}
+                </option>
+              </select>
+            </label>
           </div>
         </div>
 

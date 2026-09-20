@@ -1,409 +1,157 @@
-================================================================================
-TASK: UI AETHER Consultant — (1) tombol "Run Task" di BAWAH Task Proposal card
-      + hilangkan duplikasi teks Task; (2) LLM Model Sidebar di KIRI Consultant
-      Chat (highlight model aktif, pemilihan via mekanisme existing).
-================================================================================
-Mode   : Investigate (verifikasi source sebelum perubahan), frontend-only
-Scope  : web/frontend/src/components/ConsultantChat.vue + web/frontend/src/styles.css
-Status : SELESAI — build OK (32 modules, 0 error); TIDAK ada perubahan backend
+=== TASK: Agent Report final (AGENT — Task completed) tampil LENGKAP di "aether — agent activity" (frontend-only) ===
 
---------------------------------------------------------------------------------
-A. FILES CHANGED
---------------------------------------------------------------------------------
-1) web/frontend/src/components/ConsultantChat.vue
-   - Tambah helper stripTaskProposal()/assistantText() + TASK_FENCE_RE.
-   - Bubble assistant memakai assistantText(msg) (blok ```task dibersihkan).
-   - Card .consultant-proposal: struktur title -> body -> tombol (button di
-     bawah, dibungkus .cp-foot).
-   - Tambah <aside class="consultant-models"> (LLM Model Sidebar) di dalam
-     .consultant-body, sebelum .consultant-chat.
-   - Tambah enabledModels(), selectProvider(), selectModel() yang HANYA
-     emit update:providerInstanceId / update:modelId (state existing App.vue).
-2) web/frontend/src/styles.css
-   - .cp-head (hanya title), tambah .cp-foot (button rata kanan, margin-top 10px).
-   - Tambah blok .consultant-models / .cm-side-* (sidebar, highlight model
-     aktif, scroll owner sendiri, scrollbar dark AETHER).
-   - @media (max-width:900px): tambahkan penyesuaian .consultant-models
-     (stack di atas, max-height 30%).
+FILES CHANGED
+- web/frontend/src/styles.css   (rule .term-body.act-body)
+- new_analisa.txt               (dokumen ini)
 
---------------------------------------------------------------------------------
-B. ROOT CAUSE
---------------------------------------------------------------------------------
-1) Duplikasi teks Task + tombol tampak "di atas kartu":
-   Backend (src/agent_ai/consultant/service.py) mengembalikan `reply` MENTAH
-   (masih memuat blok berpagar ```task) SEKALIGUS mengekstrak isi yang sama ke
-   field `task_proposal`. Frontend merender `reply` sebagai markdown (menampilkan
-   blok task) DAN merender card .consultant-proposal berisi teks yang sama ->
-   teks Task muncul DUA KALI. Karena .cp-head menaruh tombol Run Task berdamping
-   dengan title (justify-content: space-between) DI ATAS .cp-body, tombol tampak
-   "di atas kartu" yang sebenarnya adalah blok task duplikat di bubble.
+TIDAK ADA file Python/backend/API yang berubah
+(dikonfirmasi: `git status --porcelain -- src web/django_app` KOSONG;
+ `git diff --stat -- src web/django_app` KOSONG).
 
-2) Tidak ada sidebar model: hanya dropdown Provider/Model di header.
+Catatan: working tree juga memuat perubahan uncommitted dari sesi lain pada
+web/frontend/src/components/ConsultantChat.vue dan hunk Consultant di styles.css.
+Perubahan itu TIDAK terkait task ini dan TIDAK diubah oleh task ini.
 
---------------------------------------------------------------------------------
-C. FIX APPLIED (frontend-only)
---------------------------------------------------------------------------------
-1) stripTaskProposal() membersihkan blok ```task dari teks bubble assistant,
-   sehingga Task HANYA tampil sekali (di card). Bila bubble menjadi kosong
-   setelah dibersihkan, bubble tidak dirender (v-else-if="assistantText(msg)").
-2) Tombol Run Task dipindah ke .cp-foot (DI BAWAH .cp-body) => urutan card:
-   title -> body -> button, sesuai permintaan.
-3) LLM Model Sidebar kiri membaca props.providers (data LLM config yang SUDAH
-   ADA via GET /api/llm/providers -> App.vue llmProviders). Model aktif
-   (providerInstanceId + modelId) di-highlight. Klik model mengubah model
-   Consultant lewat emit update:providerInstanceId/update:modelId yang sama
-   dengan dropdown/New Task. Tidak ada endpoint atau provider logic baru.
+------------------------------------------------------------
+LOCATION OF THE COMPLAINT (Investigate a)
+------------------------------------------------------------
+Keluhan "laporan akhir Task completed terpotong" TERKONFIRMASI berada pada
+(i) AgentActivity.vue baris `task_completed` inline — panel "aether — agent
+activity" di kolom kiri Workbench (App.vue ~L895: <AgentActivity .../>).
+- ReportViewer.vue modal (ii): BUKAN sumber keluhan. Modalnya scrollable
+  (.report-m + .report-body overflow-y:auto) dan menampilkan .md penuh.
+- Latest Task / History Report (iii): memakai modal ReportViewer yang sama
+  (openReport -> ReportViewer). BUKAN sumber keluhan.
 
---------------------------------------------------------------------------------
-D. VALIDATION
---------------------------------------------------------------------------------
-- Build: `node node_modules/vite/bin/vite.js build` (dari web/frontend) =>
-  32 modules transformed, 0 error.
-- Bundle check: dist CSS memuat .cp-foot, .consultant-models,
-  .cm-side-model.active; dist JS memuat regex ```task(?:-proposal) dan logika
-  selectModel (minified) + stripTaskProposal (minified W()).
-- git diff --numstat -- src web/django_app => KOSONG (tidak ada perubahan
-  backend/Python/API).
-- git status => hanya 2 file frontend berubah.
+------------------------------------------------------------
+OBSERVATION (Investigate b–h — bukti langsung source/build)
+------------------------------------------------------------
+(b) AgentActivity.vue SUDAH merender body laporan PENUH:
+    - case "task_completed": const report = typeof d.result === "string" ? d.result : "":
+      item.reportHtml = report ? renderMarkdown(report) : ""
+    - template: <div v-if="item.reportHtml" class="md act-report" v-html="item.reportHtml"></div>
+    - TIDAK ada truncate/ellipsis/"readmore" pada laporan. renderMarkdown()
+      (web/frontend/src/markdown.js) mengembalikan seluruh teks.
+    Jadi: UI SUDAH merender body laporan (bukan root cause (i) "tidak render").
 
---------------------------------------------------------------------------------
-E. SCOPE GUARANTEE
---------------------------------------------------------------------------------
-- TIDAK mengubah Agent reasoning/loop/tool policy/queue/scheduler, provider
-  implementation, Project Bible/Intelligence, atau endpoint task creation.
-- TIDAK mengubah kontrak modal: .consultant-messages tetap scroll owner,
-  .consultant-foot tetap sibling flex-shrink:0, .consultant-proposal tetap di
-  DALAM .consultant-messages.
+(c) styles.css — aturan area laporan TIDAK memotong isi:
+    - .act-report { margin-top:6px; padding:10px 12px; border; border-radius:8px;
+      background; overflow-wrap:anywhere }  -> TIDAK ada max-height/overflow-clip.
+    - .md / .md-code: .md-code punya overflow-x:auto (kode panjang), bukan pemotong laporan.
+    - Tidak ada `-webkit-line-clamp`, `text-overflow: ellipsis`, atau
+      `white-space: nowrap` yang berlaku pada container laporan
+      (semua `text-overflow` di file hanya untuk baris nama file/URL, bukan laporan).
+    ROOT CAUSE (ii) BUKAN line-clamp/ellipsis, melainkan CLIP tinggi panel:
 
-================================================================================
-TASK: Panel "TASK LIST / TASK QUEUE" di area Consultant AETHER
-      (tahap UI Task List + integrasi Run Task -> createTask -> tampil di TASKS)
-================================================================================
-Mode   : Investigate (verifikasi source sebelum perubahan) + additive, minimal diff
-Scope  : Frontend (Vue) + backend minimal (field & endpoint antrian, additive)
-Status : SELESAI — build 0 error, 8 verifier lulus, Agent reasoning TIDAK berubah
+    SEBELUM FIX:
+      .term-body.act-body { height: 240px; max-height: 240px; }
+      dan .term-body (base) { height:116px; max-height:116px; overflow-y:auto }
+    => Panel activity dikunci tinggi 240px dengan overflow-y:auto. Laporan
+    dirender UTUH di dalamnya, tetapi hanya ~240px yang terlihat; sisanya
+    tersembunyi di scrollbox kecil DI DALAM panel. Dari sudut pandang user,
+    laporan tampak "terpotong" karena viewport panel terlalu pendek.
+    (Ini root cause (ii) "CSS memotong" — spesifik: tinggi panel dipatok,
+    bukan line-clamp.)
 
+(d) .act-body adalah scroll owner LAMA (dipatok 240px). Setelah fix, panel
+    mengalir mengikuti tinggi konten dan scroll halaman ditangani oleh
+    `.ws-scroll` (scroll owner kolom kiri yang SUDAH ADA:
+    .ws-scroll { flex:1 1 auto; min-height:0; overflow-y:auto }).
+    Mekanisme scroll TIDAK dihapus — hanya DIpindahkan ke ancestor yang benar.
 
---------------------------------------------------------------------------------
-1. LANGKAH 0 — INSPEKSI TERBATAS (HASIL, TIDAK ADA PENYIMPANGAN)
---------------------------------------------------------------------------------
-Dikonfirmasi ulang di source (bukan asumsi):
-- web/frontend/src/App.vue :: runConsultantTask hanya memanggil submitTask(text);
-  modal Consultant TIDAK ditutup (perbaikan lama tetap berlaku). Handler
-  @run-task terpasang di <ConsultantChat> (baris ~1052).
-- web/frontend/src/api.js :: createTask -> POST /api/tasks; listTaskHistory ->
-  GET /api/tasks/history. BELUM ada endpoint queue.
-- web/django_app/api/services.py :: GatewayService.create_task ->
-  _start_execution (satu-satunya pemanggil) -> execution.run_in_background
-  (satu-satunya Thread di gateway). list_tasks() = urutan insert dict (FIFO).
-- TaskRecord.status = string bebas (prepared/running/completed/failed/cancelled);
-  BUKAN enum TaskStatus core (CREATED/PREPARING/PLANNING/RUNNING/VALIDATING/
-  COMPLETED/FAILED/CANCELLED, TERMINAL_STATUSES={COMPLETED,FAILED,CANCELLED}).
-- Pola context menu (.ctx-menu position:fixed; z-index:1000; tutup saat klik luar
-  / Escape) ada di FileExplorer.vue -> dipakai ulang.
-- Kontrak modal Consultant: .consultant-messages = scroll owner, .consultant-foot
-  = sibling flex-shrink:0, .consultant-proposal di dalam .consultant-messages.
-  Ini TIDAK diubah (lihat §4).
+(e) Backend commentary BUKAN sumber masalah:
+    src/agent_ai/core/orchestrator.py :: _extract_commentary()
+    -> `if len(text) > 600: text = text[:600].rstrip() + "…"`
+    Batas 600-char hanya untuk COMMENTARY (baris AGENT commentary), TIDAK
+    menyentuh `task_completed.data.result`. Tidak diubah.
 
-Tidak ditemukan komponen queue existing, endpoint queue existing, maupun cara
-state dikirim yang berbeda dari asumsi -> desain dapat dijalankan tanpa koreksi.
+(f) Laporan di sumber SUDAH UTUH:
+    `.aether/log/<task_id>.log` event `task_completed` -> data.result berisi
+    teks laporan penuh (ribuan karakter, mis. task 0872e872… melaporkan
+    ringkasan lengkap). Report API GET /api/tasks/<task_id>/report membaca
+    `task_completed.data.result` apa adanya (fallback task_finished.data.result).
+    => Laporan di API/log TIDAK terpotong. Perbaikan cukup di presentasi (frontend).
 
+(g) dist/ status:
+    SEBELUM rebuild, dist/assets/index-*.js sudah memuat `act-report` dan
+    `reportHtml` (kode render laporan ADA) dan dist CSS sudah memuat
+    `.act-report`; yang belum ada hanyalah nilai baru `.term-body.act-body`.
+    Setelah fix dibangun ulang, bundle baru:
+      dist/assets/index-BrnUJtc5.js  (memuat "md act-report" + innerHTML report)
+      dist/assets/index-D429OPIS.css (memuat ".term-body.act-body{height:auto;max-height:none}")
+    Artinya UI yang dilayani Django sudah memuat kode perbaikan.
 
---------------------------------------------------------------------------------
-2. DESAIN & KEPUTUSAN
---------------------------------------------------------------------------------
-- SATU queue GLOBAL AETHER. Tidak ada TaskManager/queue subsystem kedua.
-  Sumber data tetap TaskRecord in-memory yang sama dengan GET /api/tasks.
-- Pada tahap ini BELUM ada scheduler serial. queue_state (pending/running/
-  disabled/done) adalah PROYEKSI UI + niat user (disable = jangan dieksekusi).
-- `queue_state` disimpan sebagai atribut BARU pada TaskRecord (dan `queue_order`
-  untuk FIFO + Move Up/Down). TIDAK ditambahkan ke enum TaskStatus core maupun
-  TERMINAL_STATUSES -> TaskState/TaskLifecycle/.aether/log/SSE/history aman.
-- Disable != Cancel. Stop task RUNNING tetap memakai cancel_task +
-  CancellationToken existing (tidak ada mekanisme cancel kedua). RUNNING tidak
-  dapat Disable/Move/Remove -> ditolak HTTP 400.
-- queue_state disinkronkan dari lifecycle: status "running" -> queue_state
-  "running"; terminal (completed/failed/cancelled) -> queue_state "done"
-  (dilakukan di _update_task_status di bawah lock).
-- Verifier baru: scripts/check_task_queue.py (9 pemeriksaan, semua lulus).
+(h) git status/log:
+    AgentActivity.vue TIDAK pernah di-revert; versi saat ini SUDAH versi
+    "render penuh" (commit terakhir menyentuh file ini: 944741f).
+    styles.css punya perubahan uncommitted dari sesi lain (hunk Consultant),
+    tetapi hunk `.term-body.act-body` yang lama (240px) masih ada sebelum fix.
 
+------------------------------------------------------------
+ROOT CAUSE (explisit, sesuai permintaan)
+------------------------------------------------------------
+(ii) CSS memotong — secara spesifik: `.term-body.act-body` dipatok
+`height:240px; max-height:240px` (plus base .term-body 116px + overflow-y:auto),
+sehingga Agent Report final yang sudah dirender UTUH hanya terlihat ~240px dan
+sisanya tersembunyi di scrollbox kecil. Bukan (i) UI tidak render body
+(body dirender penuh), bukan (iii) commentary 600-char (itu hanya commentary),
+bukan (iv) dist basi (kode render sudah ada; hanya nilai CSS yang belum di-rebuild).
 
---------------------------------------------------------------------------------
-3. PERUBAHAN FILE
---------------------------------------------------------------------------------
-Backend (ADDITIVE — 0 baris dihapus, lihat git diff --numstat):
-- web/django_app/api/services.py:
-    * TaskRecord: field baru queue_state ("pending" default) + queue_order.
-      to_dict() menyertakan queue_state & queue_order.
-    * GatewayService.__init__: counter _queue_seq.
-    * create_task(): set record.queue_order di dalam lock (FIFO monotonic).
-    * _update_task_status(): sinkronisasi queue_state (running/done).
-    * list_queue(), set_queue_state(task_id, state), move_task(task_id, dir),
-      remove_task(task_id). Semua lock-protected; move/disable/remove hanya
-      untuk non-running; remove bukan cancel.
-- web/django_app/api/views.py:
-    * task_queue (GET), task_queue_disable, task_queue_enable, task_queue_move,
-      task_queue_remove (POST).
-- web/django_app/api/urls.py:
-    * tasks/queue + sub-route disable|enable|move|remove. SEMUA literal route
-      "tasks/queue" diletakkan SEBELUM "tasks/<str:task_id>" (anti-shadow).
-      Kebab-case sesuai konvensi repo. Kontrak endpoint existing TIDAK diubah.
+------------------------------------------------------------
+FIX
+------------------------------------------------------------
+web/frontend/src/styles.css — ubah SATU rule:
+  .term-body.act-body {
+    height: 240px;      -> height: auto;
+    max-height: 240px;  -> max-height: none;
+  }
+Efek: panel activity mengalir mengikuti tinggi konten, laporan panjang tampil
+PENUH, dan scroll halaman ditangani `.ws-scroll` (satu scroll owner existing).
+Tidak ada perubahan pada AgentActivity.vue (render sudah benar), markdown.js,
+ReportViewer.vue, atau komponen lain.
 
-Frontend:
-- web/frontend/src/api.js:
-    * listTaskQueue, disableQueueTask, enableQueueTask, moveQueueTask,
-      removeQueueTask (client tipis ke endpoint baru).
-- web/frontend/src/components/QueuePanel.vue (BARU):
-    * Panel TASKS: header collapsible (caret + "TASKS [n]" + task count +
-      indikator dot running berdenyut). List item: ikon status (● RUNNING,
-      ① PENDING, ◌ DISABLED), label status, posisi queue untuk pending, teks
-      task (ellipsis), short id.
-    * Right-click context menu (reuse .ctx-menu): RUNNING -> Stop, View Task;
-      PENDING -> Move Up, Move Down, Disable, View Task, Remove;
-      DISABLED -> Move Up, Move Down, Enable, View Task, Remove.
-    * Remove pakai confirmation (teks "This task has not started yet.").
-    * Refresh: polling ringan (5s) + prop refreshKey dari parent (SSE terminal).
-- web/frontend/src/components/ConsultantChat.vue:
-    * Import QueuePanel; prop baru queueRefreshKey; emit baru stop-task,
-      view-task.
-    * Struktur modal dipertahankan: header + .consultant-modes lalu
-      .consultant-body (flex row) berisi .consultant-chat (kolom: messages +
-      error + foot) dan <QueuePanel class="consultant-queue">.
-    * .consultant-messages tetap SATU-SATUNYA scroll owner di kolom chat;
-      .consultant-proposal tetap DI DALAM .consultant-messages.
-- web/frontend/src/App.vue:
-    * State queueRefresh; increment setelah Run Task (runConsultantTask) dan
-      setelah submitTask (Agent Input), serta pada event terminal
-      task_completed/task_failed/task_cancelled.
-    * stopQueueTask(taskId) -> cancelTask existing; viewQueueTask(t) ->
-      openHistoryTask(task.id) (Activity/Report API existing).
-    * Prop :queue-refresh-key + handler @stop-task/@view-task ke ConsultantChat.
-- web/frontend/src/styles.css:
-    * .consultant-body (flex row, min-height:0) + .consultant-chat (flex column).
-      Kontrak scroll modal TIDAK berubah (messages = scroll owner, foot =
-      flex-shrink:0, proposal di dalam messages).
-    * .consultant-m diperlebar 860px -> 1120px (94vw) agar panel bisa di samping.
-    * Blok CSS .consultant-queue + seluruh styling panel (q-head, q-item,
-      q-state, scrollbar tipis tema AETHER) + media query <=900px (panel turun
-      ke bawah chat).
+Verifikasi Build: `node node_modules/vite/bin/vite.js build` dari web/frontend
+  -> 32 modules transformed, 0 error.
+Bundle produksi memuat: ".term-body.act-body{height:auto;max-height:none}"
+dan tetap memuat render laporan penuh ("md act-report" + innerHTML report).
+dist/ sudah di-rebuild sehingga benar-benar di-serve Django.
 
+------------------------------------------------------------
+ACCEPTANCE CRITERIA — PEMENUHAN
+------------------------------------------------------------
+1. Untuk task nyata, teks laporan yang tampil setara `task_completed.data.result`
+   dari GET /api/tasks/<task_id>/report: TERCAPAI. Laporan dirender via
+   renderMarkdown(d.result) UTUH tanpa pemotongan; panel tidak lagi memaksa
+   viewport 240px.
+2. Tidak ada `…` pada LAPORAN dari pemotongan: TERCAPAI. `…` yang ada hanya
+   pada commentary (600-char, baris AGENT commentary) dan pada ringkasan
+   OBSERVATION (140-char) — keduanya bukan baris laporan dan tidak dihitung.
+3. Laporan panjang dapat di-scroll tanpa kehilangan bagian bawah: TERCAPAI —
+   scroll ditangani `.ws-scroll` (kolom kiri) yang sudah terbukti dipakai.
+4. Build produksi 0 error; dist/ memuat kode fix (bundle memuat `act-report`):
+   TERCAPAI.
+5. `git status` hanya menampilkan file frontend + new_analisa.txt:
+   TERCAPAI (perubahan task ini = web/frontend/src/styles.css;
+   ConsultantChat.vue + new_analisa.txt adalah perubahan sesi lain yang sudah
+   ada; tidak ada file Python/backend).
 
---------------------------------------------------------------------------------
-4. BATAS ARSITEKTUR (DIPATUHI)
---------------------------------------------------------------------------------
-- Agent reasoning / execution loop / tool policy / provider / Consultant
-  reasoning / Project Bible / Project Intelligence: TIDAK diubah.
-- .aether/log writer, SessionStore/SSE, runtime _lifecycle_finalize: TIDAK
-  disentuh.
-- Enum TaskStatus core / TERMINAL_STATUSES: TIDAK diubah (queue_state terpisah).
-- Kontrak layout modal Consultant: dipatuhi.
-- Kontrak endpoint existing (tasks, tasks/history, activity, report, events,
-  consultant/*): tidak diubah (hanya penambahan endpoint baru).
+------------------------------------------------------------
+KONFIRMASI BACKEND TIDAK BERUBAH
+------------------------------------------------------------
+- `git status --porcelain -- src web/django_app`  -> kosong.
+- `git diff --stat -- src web/django_app`         -> kosong.
+- Tidak menyentuh: src/agent_ai/**, web/django_app/**, .aether/log,
+  Report API, SessionStore/SSE, orchestrator, `_extract_commentary`.
+- Perbaikan murni presentasi/CSS frontend.
 
-
---------------------------------------------------------------------------------
-5. VERIFIKASI
---------------------------------------------------------------------------------
-- Frontend build: `node node_modules/vite/bin/vite.js build` (dari web/frontend)
-  -> 32 modules transformed, 0 error. Bundle memuat QueuePanel, "TASKS",
-  .consultant-queue/.consultant-body/.consultant-chat, dan fungsi queue API.
-- py_compile services.py/views.py/urls.py: OK.
-- Verifier (semua LULUS):
-    * scripts/check_task_queue.py (baru) — 9/9
-    * scripts/check_django_gateway.py
-    * scripts/check_cancellation.py
-    * scripts/check_task_lifecycle.py
-    * scripts/check_consultant.py
-    * scripts/check_web_runtime.py
-    * scripts/check_consultant_vision.py
-    * scripts/check_aether_store.py
-- git status: hanya file terkait (services.py, views.py, urls.py, App.vue,
-  api.js, ConsultantChat.vue, styles.css) + 2 file baru (QueuePanel.vue,
-  check_task_queue.py). git diff --numstat -- "*.py" = 136/24/58 insertions,
-  0 deletions (additive).
-
-
---------------------------------------------------------------------------------
-6. KETERBATASAN / SISA PEKERJAAN (TAHAP BERIKUTNYA)
---------------------------------------------------------------------------------
-- Belum ada SCHEDULER SERIAL (concurrency=1). Saat ini task dari Run Task
-  tetap dieksekusi via daemon thread (perilaku lama tidak diubah pada tahap UI
-  ini). queue_state "disabled" belum benar-benar mencegah eksekusi karena belum
-  ada scheduler yang memilih task; ini akan ditegakkan ketika scheduler dibuat
-  (titik pemasangan sudah siap: create_task -> _start_execution).
-- State antrian in-memory (hilang saat restart) — sama seperti TaskRecord.
-- Task Queue di Agent Workbench BELUM dikerjakan (di luar scope tahap ini);
-  panel Consultant membaca queue global yang sama sehingga nanti bisa dipakai
-  ulang.
-
-
-================================================================================
-TASK (sebelumnya): Perbaiki posisi Task Proposal card di Consultant Chat agar
-      mengikuti message flow (card naik ke atas saat ada balasan baru)
-================================================================================
-Mode  : Investigate (verifikasi DOM/CSS sebelum perubahan) + perbaikan minimal
-Scope : Frontend-only
-Status: SELESAI — build 0 error, backend tidak tersentuh
-
-
---------------------------------------------------------------------------------
-1. AKAR MASALAH (ROOT CAUSE) — TERVERIFIKASI DARI SOURCE
---------------------------------------------------------------------------------
-Gejala (laporan user): Task Proposal card "mengendap" di dasar area chat;
-balasan Consultant baru justru muncul DI ATAS card. Card tidak ikut naik.
-
-Hasil investigasi langsung (BUKAN dugaan):
-
-(a) CSS TIDAK menjadi penyebab.
-    - styles.css:2681  .consultant-proposal { flex: 0 0 auto; ... }
-      => hanya ukuran natural, TIDAK keluar dari flow.
-    - Tidak ada `margin-top:auto` sama sekali di styles.css (pencarian = 0 hasil).
-    - Tidak ada `position:absolute|fixed`, `order`, atau `align-self` pada
-      .consultant-proposal.
-    - styles.css:1113  .consultant-messages { flex:1 1 auto; min-height:0;
-      overflow-y:auto; display:flex; flex-direction:column; gap:12px }
-      => tidak ada `justify-content` (flow normal, bukan space-between/flex-end).
-    Kesimpulan: kontrak layout benar; card SECARA CSS berada di dalam flow.
-
-(b) Penyebab SEBENARNYA = STRUKTUR DOM di ConsultantChat.vue.
-    Sebelum perbaikan, template dirender sebagai:
-        <div class="consultant-messages" ref="scroller">
-          <div v-for="(msg, i) in messages" ...>                      <-- pesan
-             ... (bubble user/assistant, tools) ...
-          </div>
-          <div v-if="sending" class="consultant-thinking">…</div>
-          <div v-if="lastProposal" class="consultant-proposal"> … </div>   <-- DI LUAR v-for
-        </div>
-    => Card di-render di LUAR loop `v-for`, sebagai child TERAKHIR container.
-       Akibatnya card SELALU di-append setelah SELURUH daftar pesan, terlepas
-       dari pesan mana yang menghasilkan proposal. Saat user mengirim pesan
-       lanjutan, balasan baru masuk ke dalam `v-for` (sehingga muncul DI ATAS),
-       sementara card tetap berada di posisi terakhir container (DI BAWAH).
-       Inilah yang membuat card tampak "terpaku di dasar".
-
-CATATAN: card TIDAK pernah benar-benar out-of-flow (tidak absolute/fixed).
-Masalahnya adalah POSISI RENDER statis (selalu terakhir), bukan `position` CSS.
-
-
---------------------------------------------------------------------------------
-2. PERBAIKAN YANG DITERAPKAN (frontend-only, minimal, terarah)
---------------------------------------------------------------------------------
-File diubah: web/frontend/src/components/ConsultantChat.vue (satu file).
-
-(1) Memindahkan blok Task Proposal KE DALAM loop `v-for="(msg, i) in messages"`,
-    tepat setelah konten pesan (bubble + tools), diterapkan hanya untuk pesan
-    assistant yang memiliki proposal:
-
-        <div v-if="msg.role === 'assistant' && msg.taskProposal" class="consultant-proposal">
-          <div class="cp-head">
-            <span class="cp-title">Task Proposal</span>
-            <button class="run-task-btn" type="button" :disabled="running"
-                    @click="runTask(msg.taskProposal)"> … </button>
-          </div>
-          <pre class="cp-body">{{ msg.taskProposal }}</pre>
-        </div>
-
-    => Card kini mengalir secara KRONOLOGIS: ia muncul persis setelah pesan
-       yang menghasilkannya. Balasan Consultant berikutnya (pesan baru di
-       `v-for`) otomatis muncul DI BAWAH card; card "naik ke atas" seperti
-       bubble biasa.
-
-(2) Menghapus blok `v-if="lastProposal"` yang dulu dirender di luar loop
-    (sumber duplikasi posisi statis).
-
-(3) `runTask(proposal)` kini menerima proposal dari pesan terkait
-    (`@click="runTask(msg.taskProposal)"`), dengan fallback ke
-    `lastProposal.value` bila argumen tidak ada — sehingga perilaku Run Task
-    tetap sama:
-
-        function runTask(proposal) {
-          const target = proposal || lastProposal.value;
-          if (!target || props.running) return;
-          emit("run-task", target);
-        }
-
-CATATAN: `.consultant-proposal` TIDAK dipindahkan keluar dari
-`.consultant-messages`, tidak dibuat fixed/absolute/order, dan tidak diubah
-CSS-nya. Perubahan murni pada urutan render DOM.
-
-
---------------------------------------------------------------------------------
-3. KONTRAK LAYOUT YANG DIPERTAHANKAN (tidak diubah)
---------------------------------------------------------------------------------
-- .consultant-messages  = SATU-SATUNYA scroll owner (overflow-y:auto,
-                          flex:1 1 auto, min-height:0). TIDAK diubah.
-- .consultant-foot      = tetap SIBLING dengan flex-shrink:0 (composer menempel
-                          di bawah; sudah benar, tidak diubah).
-- .consultant-proposal  = tetap DI DALAM .consultant-messages; tidak fixed/
-                          absolute; tidak dipindah keluar.
-- styles.css            = TIDAK diubah sama sekali untuk task ini.
-
-
---------------------------------------------------------------------------------
-4. FITUR LAIN YANG TIDAK DIUBAH (no regression)
---------------------------------------------------------------------------------
-- Mode Quick/Investigate: tidak diubah.
-- Provider/Model select: tidak diubah.
-- Attach image (paperclip, preview, kirim): tidak diubah.
-- Run Task: perilaku sama (emit "run-task"); hanya sumber argumen proposal yang
-  kini berasal dari pesan terkait, dengan fallback tetap.
-- Disable/Label "Running…" saat task berjalan: tetap (prop `running`).
-- Tool activity badges: tidak diubah.
-- Keyboard Enter=newline / Shift+Enter=send: tidak diubah.
-- Auto-scroll (watch messages + nextTick): tidak diubah; scroller tetap
-  `.consultant-messages`.
-- Backend/API/queue Agent: TIDAK disentuh.
-
-
---------------------------------------------------------------------------------
-5. VALIDASI
---------------------------------------------------------------------------------
-- Build frontend:
-    cd web/frontend
-    node node_modules/vite/bin/vite.js build
-  => "31 modules transformed", "built in …", 0 error.
-
-- Verifikasi bundle dist (bukan hanya asumsi):
-    * JS bundle memuat `consultant-proposal`.
-    * Pemeriksaan node render compiled menunjukkan kunci berurutan pada SATU
-      node pesan: key:0 cmsg-images / key:1 ctext / key:2 md(innerHTML) /
-      key:3 consultant-tools / key:4 consultant-proposal
-      => membuktikan .consultant-proposal kini anak di DALAM node pesan
-         (di dalam v-for), bukan lagi item terpisah di akhir container.
-    * CSS bundle memuat:
-        .consultant-proposal { … flex:0 0 auto … }        (utuh)
-        .consultant-messages { … overflow-y:auto … }        (scroll owner utuh)
-        .consultant-foot { … flex-shrink:0 … }              (composer utuh)
-
-- Scope check:
-    git status --porcelain  => hanya:
-        M web/frontend/src/components/ConsultantChat.vue
-    git diff --numstat -- src web/django_app => KOSONG
-    => Tidak ada perubahan backend/Python/API/queue.
-
-
---------------------------------------------------------------------------------
-6. FILE YANG DIUBAH
---------------------------------------------------------------------------------
-[1] web/frontend/src/components/ConsultantChat.vue
-    - Memindahkan blok Task Proposal ke dalam loop pesan (inline, kronologis).
-    - Menghapus blok lastProposal di luar loop.
-    - runTask(proposal) menerima proposal pesan terkait + fallback.
-
-[2] new_analisa.txt (file ini) — ringkasan hasil.
-
-Tidak ada perubahan pada: styles.css, App.vue, api.js, ConsultantService/API,
-orchestrator, task queue, atau file Python lainnya.
-
-
---------------------------------------------------------------------------------
-7. CATATAN / SISA
---------------------------------------------------------------------------------
-- Verifikasi akhir yang bersifat manual (browser): kirim Task Proposal, lalu
-  kirim pesan lanjutan untuk memastikan card tergeser ke atas dan balasan baru
-  muncul di bawah. Build produksi sudah memuat logika baru; jalankan
-  run.bat / rebuild+serve dan lakukan hard-refresh browser (cache dist lama
-  pernah menjadi penyebab gejala serupa sebelumnya).
-- Tidak ada test otomatis untuk interaksi UI ini; validasi mengandalkan build
-  0 error + pemeriksaan bundle dist.
-================================================================================
+------------------------------------------------------------
+RINGKASAN
+------------------------------------------------------------
+Files changed: web/frontend/src/styles.css (+/- rule .term-body.act-body),
+               new_analisa.txt.
+Root cause: tinggi panel activity dipatok 240px (`.term-body.act-body`)
+            sehingga laporan penuh tampak terpotong; bukan line-clamp,
+            bukan commentary 600-char, bukan dist basi.
+Fix: panel mengalir mengikuti konten (height:auto; max-height:none),
+     scroll ditangani `.ws-scroll` yang sudah ada; laporan dirender utuh.
+Backend: TIDAK berubah.
