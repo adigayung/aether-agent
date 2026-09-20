@@ -236,9 +236,10 @@ const lastProposal = computed(() => {
   return null;
 });
 
-function runTask() {
-  if (!lastProposal.value || props.running) return;
-  emit("run-task", lastProposal.value);
+function runTask(proposal) {
+  const target = proposal || lastProposal.value;
+  if (!target || props.running) return;
+  emit("run-task", target);
 }
 
 function startNewSession() {
@@ -342,23 +343,24 @@ onMounted(() => {
               {{ t.success ? "✓" : "✗" }} {{ t.tool }}<template v-if="t.target"> {{ t.target }}</template>
             </span>
           </div>
+          <!-- Task Proposal mengalir sebagai bagian dari message flow: ia
+               dirender inline di dalam pesan yang menghasilkannya (bukan selalu
+               di akhir container), sehingga balasan Consultant berikutnya
+               muncul DI BAWAH card dan card ikut naik seperti bubble lain.
+               Card tetap berada di dalam area percakapan yang scrollable. -->
+          <div v-if="msg.role === 'assistant' && msg.taskProposal" class="consultant-proposal">
+            <div class="cp-head">
+              <span class="cp-title">Task Proposal</span>
+              <button class="run-task-btn" type="button" :disabled="running" @click="runTask(msg.taskProposal)">
+                <svg v-if="!running" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+                {{ running ? "Running…" : "Run Task" }}
+              </button>
+            </div>
+            <pre class="cp-body">{{ msg.taskProposal }}</pre>
+          </div>
         </div>
 
         <div v-if="sending" class="consultant-thinking">Consultant is investigating…</div>
-
-        <!-- Task Proposal adalah bagian dari message flow: ia hidup di dalam
-             area percakapan yang scrollable, bukan panel floating di atas
-             composer. Karena itu isinya bisa ikut ter-scroll sampai selesai. -->
-        <div v-if="lastProposal" class="consultant-proposal">
-          <div class="cp-head">
-            <span class="cp-title">Task Proposal</span>
-            <button class="run-task-btn" type="button" :disabled="running" @click="runTask">
-              <svg v-if="!running" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
-              {{ running ? "Running…" : "Run Task" }}
-            </button>
-          </div>
-          <pre class="cp-body">{{ lastProposal }}</pre>
-        </div>
       </div>
 
       <div v-if="error" class="wb-error">{{ error }}</div>

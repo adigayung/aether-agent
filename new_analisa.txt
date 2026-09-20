@@ -1,243 +1,170 @@
-TASK: Panel EXPLORER AETHER dapat di-scroll vertikal (item terbawah tidak lagi
-      terpotong; mis. src/tests/web dapat diakses).
-MODE: Verifikasi + hardening. Frontend-only (CSS). Tidak ada perubahan backend/API/Python.
+================================================================================
+TASK: Perbaiki posisi Task Proposal card di Consultant Chat agar mengikuti
+      message flow (card naik ke atas saat ada balasan baru)
+================================================================================
+Mode  : Investigate (verifikasi DOM/CSS sebelum perubahan) + perbaikan minimal
+Scope : Frontend-only
+Status: SELESAI — build 0 error, backend tidak tersentuh
 
-=======================================================================
-RINGKASAN
-=======================================================================
-Daftar file/folder pada panel EXPLORER kini memiliki SATU scroll owner
-(`.explorer`) sehingga seluruh isi workspace dapat dijangkau. CHANGES tetap
-tampil di atas dan TIDAK ikut scroll. Tidak ada horizontal overflow.
 
-CATATAN PENTING: Perbaikan scroll Explorer sudah pernah diterapkan pada working
-tree (uncommitted, sebelumnya belum di-commit) dan sudah ter-build ke `dist/`.
-Sesi ini melakukan VERIFIKASI menyeluruh terhadap rantai tinggi/flex aktual,
-menutup dua celah sisa (min-height kolom kanan + min-width nama file), lalu
-rebuild + verifikasi bundle. Semua perubahan tetap FRONTEND-ONLY (CSS).
+--------------------------------------------------------------------------------
+1. AKAR MASALAH (ROOT CAUSE) — TERVERIFIKASI DARI SOURCE
+--------------------------------------------------------------------------------
+Gejala (laporan user): Task Proposal card "mengendap" di dasar area chat;
+balasan Consultant baru justru muncul DI ATAS card. Card tidak ikut naik.
 
-=======================================================================
-OBSERVATION (struktur aktual, terverifikasi dari source)
-=======================================================================
-Struktur DOM panel kanan (web/frontend/src/App.vue ~baris 903-909):
-  <div class="ws-body">                       (grid 1fr 340px)
-    <div class="ws-col right">                (flex column)
-      <ChangesPanel/>  -> <section class="block">              (CHANGES)
-      <FileExplorer/>  -> <section class="block explorer-block"> (EXPLORER)
-        <div class="ex-head"> ... header ... </div>
-        <div class="explorer"> ... daftar file/folder ... </div>
+Hasil investigasi langsung (BUKAN dugaan):
 
-Rantai tinggi lengkap (verifikasi dari styles.css + dist bundle):
-  html,body,#app { height:100% }  ->  .app { height:100vh; grid-template-rows:1fr 30px }
-  ->  .main (flex column; min-height:0)  ->  .ws-body (flex:1 1 auto; grid; min-height:0;
-      grid-template-rows: minmax(0,1fr))  ->  .ws-col.right (flex column; min-height:0; overflow:hidden)
-      ->  .explorer-block (flex:1 1 auto; min-height:0; overflow:hidden)
-      ->  .explorer (flex:1 1 auto; min-height:0; overflow-y:auto; overflow-x:hidden)  [SCROLL OWNER]
+(a) CSS TIDAK menjadi penyebab.
+    - styles.css:2681  .consultant-proposal { flex: 0 0 auto; ... }
+      => hanya ukuran natural, TIDAK keluar dari flow.
+    - Tidak ada `margin-top:auto` sama sekali di styles.css (pencarian = 0 hasil).
+    - Tidak ada `position:absolute|fixed`, `order`, atau `align-self` pada
+      .consultant-proposal.
+    - styles.css:1113  .consultant-messages { flex:1 1 auto; min-height:0;
+      overflow-y:auto; display:flex; flex-direction:column; gap:12px }
+      => tidak ada `justify-content` (flow normal, bukan space-between/flex-end).
+    Kesimpulan: kontrak layout benar; card SECARA CSS berada di dalam flow.
 
-Header Explorer (.ex-head, .ex-head-title, .ex-head-ws, .ex-icon-btn) tetap seperti
-semula; context menu (.ctx-menu position:fixed z-index:1000), open-file, rename,
-delete tidak diubah. FileExplorer.vue TIDAK disentuh.
+(b) Penyebab SEBENARNYA = STRUKTUR DOM di ConsultantChat.vue.
+    Sebelum perbaikan, template dirender sebagai:
+        <div class="consultant-messages" ref="scroller">
+          <div v-for="(msg, i) in messages" ...>                      <-- pesan
+             ... (bubble user/assistant, tools) ...
+          </div>
+          <div v-if="sending" class="consultant-thinking">…</div>
+          <div v-if="lastProposal" class="consultant-proposal"> … </div>   <-- DI LUAR v-for
+        </div>
+    => Card di-render di LUAR loop `v-for`, sebagai child TERAKHIR container.
+       Akibatnya card SELALU di-append setelah SELURUH daftar pesan, terlepas
+       dari pesan mana yang menghasilkan proposal. Saat user mengirim pesan
+       lanjutan, balasan baru masuk ke dalam `v-for` (sehingga muncul DI ATAS),
+       sementara card tetap berada di posisi terakhir container (DI BAWAH).
+       Inilah yang membuat card tampak "terpaku di dasar".
 
-=======================================================================
-ROOT CAUSE
-=======================================================================
-1) `.ws-body` adalah grid dua kolom tanpa `grid-template-rows`. Track baris
-   implisit `auto` mengambil tinggi max-content dari isi kolom kanan, sehingga
-   kolom kanan bisa lebih tinggi dari `.ws-body`, meluber, dan bagian bawah daftar
-   terpotong tanpa scroll.
-2) Di dalam kolom kanan tidak ada rantai flex yang benar: `.block` (CHANGES) tidak
-   `flex-shrink:0`, `.explorer-block` tidak `flex:1 1 auto; min-height:0`,
-   `.explorer` tidak `overflow-y:auto`. Akibatnya tidak ada elemen yang menjadi
-   scroll owner dan overflow dipotong oleh parent.
+CATATAN: card TIDAK pernah benar-benar out-of-flow (tidak absolute/fixed).
+Masalahnya adalah POSISI RENDER statis (selalu terakhir), bukan `position` CSS.
 
-=======================================================================
-FIX (web/frontend/src/styles.css — seluruhnya CSS)
-=======================================================================
-- .ws-body            : + grid-template-rows: minmax(0, 1fr)   (batasi baris tunggal)
-- .ws-col.right       : + overflow: hidden; min-height: 0       (ikat anak ke tinggi kolom)
-- .ws-col.right > .block:not(.explorer-block) : + flex: 0 0 auto (CHANGES tetap di atas)
-- .explorer-block     : + flex: 1 1 auto; min-height: 0; overflow: hidden
-- .ex-head            : + flex: 0 0 auto                        (header tetap terlihat)
-- .explorer           : + flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden;
-                        + scrollbar-width: thin; scrollbar-color: var(--border) transparent;
-                        + .explorer::-webkit-scrollbar / -track / -thumb / -thumb:hover (tema gelap)
-- .ex-name            : + min-width: 0                          (ellipsis + tanpa horizontal overflow)
-- @media (max-width:1080px) [mode stacked]:
-    .ws-body        : grid-template-rows: none                 (dua baris menyusun vertikal)
-    .ws-col.right   : overflow: visible                        (tak terpotong saat tak dibatasi grid 1fr)
-    .explorer-block : flex: 0 1 auto; max-height: 60vh         (daftar tetap punya batas tinggi -> scroll aktif)
 
-CATATAN SESI INI (hardening tambahan di atas perbaikan sebelumnya):
-  - .ws-col.right { min-height: 0 }  -> menutup celah agar rantai flex kolom kanan
-    dijamin boleh menyusut di grid track minmax(0,1fr).
-  - .ex-name { min-width: 0 }        -> flex item boleh menyusut; nama file panjang
-    di-truncate ellipsis dan tidak memicu horizontal overflow.
-  - .ws-col.right { overflow: visible } pada media query stacked -> menghindari
-    daftar terpotong saat kolom tidak lagi dibatasi grid track 1fr.
+--------------------------------------------------------------------------------
+2. PERBAIKAN YANG DITERAPKAN (frontend-only, minimal, terarah)
+--------------------------------------------------------------------------------
+File diubah: web/frontend/src/components/ConsultantChat.vue (satu file).
 
-=======================================================================
-ACCEPTANCE CRITERIA
-=======================================================================
-[x] Daftar file/folder Explorer dapat di-scroll vertikal (scroll owner = .explorer).
-[x] Item terbawah (src, tests, web) dapat dilihat & diklik seperti item teratas.
-[x] Header Explorer (.ex-head) tetap terlihat (flex:0 0 auto, tidak ikut scroll).
-[x] Tidak ada horizontal overflow (.explorer overflow-x:hidden; .ex-name min-width:0 + ellipsis).
-[x] Scrollbar hanya pada area daftar file, bukan seluruh kolom (hanya .explorer overflow-y:auto).
-[x] Tampilan tetap sesuai tema AETHER (scrollbar tipis gelap var(--border)/var(--bg-hover)).
-[x] Build sukses: `node node_modules/vite/bin/vite.js build` -> 30 modules, 0 error.
-[x] Tidak ada file Python/backend yang berubah selain script verifikasi.
+(1) Memindahkan blok Task Proposal KE DALAM loop `v-for="(msg, i) in messages"`,
+    tepat setelah konten pesan (bubble + tools), diterapkan hanya untuk pesan
+    assistant yang memiliki proposal:
 
-=======================================================================
-VALIDASI
-=======================================================================
-- Build produksi (dari web/frontend):
+        <div v-if="msg.role === 'assistant' && msg.taskProposal" class="consultant-proposal">
+          <div class="cp-head">
+            <span class="cp-title">Task Proposal</span>
+            <button class="run-task-btn" type="button" :disabled="running"
+                    @click="runTask(msg.taskProposal)"> … </button>
+          </div>
+          <pre class="cp-body">{{ msg.taskProposal }}</pre>
+        </div>
+
+    => Card kini mengalir secara KRONOLOGIS: ia muncul persis setelah pesan
+       yang menghasilkannya. Balasan Consultant berikutnya (pesan baru di
+       `v-for`) otomatis muncul DI BAWAH card; card "naik ke atas" seperti
+       bubble biasa.
+
+(2) Menghapus blok `v-if="lastProposal"` yang dulu dirender di luar loop
+    (sumber duplikasi posisi statis).
+
+(3) `runTask(proposal)` kini menerima proposal dari pesan terkait
+    (`@click="runTask(msg.taskProposal)"`), dengan fallback ke
+    `lastProposal.value` bila argumen tidak ada — sehingga perilaku Run Task
+    tetap sama:
+
+        function runTask(proposal) {
+          const target = proposal || lastProposal.value;
+          if (!target || props.running) return;
+          emit("run-task", target);
+        }
+
+CATATAN: `.consultant-proposal` TIDAK dipindahkan keluar dari
+`.consultant-messages`, tidak dibuat fixed/absolute/order, dan tidak diubah
+CSS-nya. Perubahan murni pada urutan render DOM.
+
+
+--------------------------------------------------------------------------------
+3. KONTRAK LAYOUT YANG DIPERTAHANKAN (tidak diubah)
+--------------------------------------------------------------------------------
+- .consultant-messages  = SATU-SATUNYA scroll owner (overflow-y:auto,
+                          flex:1 1 auto, min-height:0). TIDAK diubah.
+- .consultant-foot      = tetap SIBLING dengan flex-shrink:0 (composer menempel
+                          di bawah; sudah benar, tidak diubah).
+- .consultant-proposal  = tetap DI DALAM .consultant-messages; tidak fixed/
+                          absolute; tidak dipindah keluar.
+- styles.css            = TIDAK diubah sama sekali untuk task ini.
+
+
+--------------------------------------------------------------------------------
+4. FITUR LAIN YANG TIDAK DIUBAH (no regression)
+--------------------------------------------------------------------------------
+- Mode Quick/Investigate: tidak diubah.
+- Provider/Model select: tidak diubah.
+- Attach image (paperclip, preview, kirim): tidak diubah.
+- Run Task: perilaku sama (emit "run-task"); hanya sumber argumen proposal yang
+  kini berasal dari pesan terkait, dengan fallback tetap.
+- Disable/Label "Running…" saat task berjalan: tetap (prop `running`).
+- Tool activity badges: tidak diubah.
+- Keyboard Enter=newline / Shift+Enter=send: tidak diubah.
+- Auto-scroll (watch messages + nextTick): tidak diubah; scroller tetap
+  `.consultant-messages`.
+- Backend/API/queue Agent: TIDAK disentuh.
+
+
+--------------------------------------------------------------------------------
+5. VALIDASI
+--------------------------------------------------------------------------------
+- Build frontend:
+    cd web/frontend
     node node_modules/vite/bin/vite.js build
-  Hasil: vite v5.4.21, 30 modules transformed, 0 error. CSS output:
-  dist/assets/index-CWsW68RF.css
-- Bundle dist/ terverifikasi memuat rule kunci:
-    .ws-body{...grid-template-rows:minmax(0,1fr)...}
-    .ws-col.right{overflow:hidden;min-height:0}
-    .explorer-block{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;overflow:hidden}
-    .explorer{...flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;...}
-    .ex-name{color:inherit;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    @media (max-width:1080px){ ... .ws-col.right{...overflow:visible} .explorer-block{flex:0 1 auto;max-height:60vh} }
-- Verifikasi source langsung: rule .explorer-block / .explorer / .ex-head / .ws-body memenuhi
-  kontrak scroll (flex:1 1 auto; min-height:0; overflow-y:auto; overflow-x:hidden).
-- `python scripts/check_workbench.py`: SELURUH 12 langkah LULUS (exit 0) setelah sesi ini
-  memperbaiki dua hal pada script verifikasi (test harness, bukan backend):
-    * langkah [2]: assertion lama "Agent Workspace"/"Recent Projects" sudah tidak cocok
-      dengan markup Project Launcher aktual -> diganti assertion terhadap markup nyata
-      ("Create and open AETHER workspaces"/"New Project"/"Workspace:"/"EXPLORER").
-    * langkah [11]: `os.environ.setdefault("DJANGO_ALLOWED_HOSTS", ...)` tidak deterministik
-      bila env sudah terisi tanpa "testserver" -> diubah menjadi assignment paksa
-      `os.environ[...] = "testserver,127.0.0.1,localhost"` agar test client tidak
-      ditolak DisallowedHost.
-  Output: [1]..[12] OK, termasuk "[12] Explorer daftar file scroll owner OK -> header tetap,
-  hanya daftar scroll".
-- Inspeksi source via search_code/read_file (bukan shell).
+  => "31 modules transformed", "built in …", 0 error.
 
-=======================================================================
-FILES CHANGED
-=======================================================================
-1. web/frontend/src/styles.css      — perubahan CSS (scroll owner + rantai flex + scrollbar + hardening).
-2. scripts/check_workbench.py       — langkah verifikasi [12] untuk kontrak scroll Explorer (test/verifier, bukan backend).
-3. new_analisa.txt                  — ringkasan ini.
-FileExplorer.vue, App.vue, api.js, dan seluruh file Python/Django TIDAK diubah.
-Tidak ada dependensi baru, tidak ada komponen/subsistem baru.
+- Verifikasi bundle dist (bukan hanya asumsi):
+    * JS bundle memuat `consultant-proposal`.
+    * Pemeriksaan node render compiled menunjukkan kunci berurutan pada SATU
+      node pesan: key:0 cmsg-images / key:1 ctext / key:2 md(innerHTML) /
+      key:3 consultant-tools / key:4 consultant-proposal
+      => membuktikan .consultant-proposal kini anak di DALAM node pesan
+         (di dalam v-for), bukan lagi item terpisah di akhir container.
+    * CSS bundle memuat:
+        .consultant-proposal { … flex:0 0 auto … }        (utuh)
+        .consultant-messages { … overflow-y:auto … }        (scroll owner utuh)
+        .consultant-foot { … flex-shrink:0 … }              (composer utuh)
 
-=======================================================================
-ARCHITECTURE IMPACT
-=======================================================================
-- Frontend-only. Tidak mengubah backend/API/Python, task lifecycle, Agent execution,
-  logging, SessionStore/SSE, provider, atau database.
-- Tidak menambah komponen/dependency/subsistem baru. Reuse layout flex yang ada
-  (.ws-body / .ws-col / .block / .explorer-block / .explorer).
+- Scope check:
+    git status --porcelain  => hanya:
+        M web/frontend/src/components/ConsultantChat.vue
+    git diff --numstat -- src web/django_app => KOSONG
+    => Tidak ada perubahan backend/Python/API/queue.
 
-=======================================================================
-REMAINING WORK
-=======================================================================
-- Verifikasi visual manual di browser (dev/produksi) dengan workspace besar:
-  item `web`/`tests` harus terjangkau via scroll; hanya daftar Explorer yang scroll.
-  Jika UI masih tampak belum berubah, pastikan user memuat bundle hasil rebuild
-  (hard refresh) — `dist/` sebelumnya STALE sehingga perbaikan belum terlihat.
-- Tidak ada blocker teknis tersisa untuk task ini; seluruh acceptance criteria
-  terpenuhi dan check_workbench.py (12 langkah) lulus.
 
-=======================================================================
-STATUS AKHIR
-=======================================================================
-- Perbaikan scroll Explorer SUDAH lengkap & terverifikasi (CSS-only).
-- Build produksi sukses (30 modules, 0 error) dan `dist/` sudah di-rebuild.
-- Verifikasi: `python scripts/check_workbench.py` -> 12/12 LULUS.
-- Frontend-only: `git diff --numstat -- src web/django_app web/frontend/src/...`
-  KOSONG (tidak ada perubahan Python/backend/komponen).
+--------------------------------------------------------------------------------
+6. FILE YANG DIUBAH
+--------------------------------------------------------------------------------
+[1] web/frontend/src/components/ConsultantChat.vue
+    - Memindahkan blok Task Proposal ke dalam loop pesan (inline, kronologis).
+    - Menghapus blok lastProposal di luar loop.
+    - runTask(proposal) menerima proposal pesan terkait + fallback.
 
-=======================================================================
-TASK: UX feedback saat task berjalan (Run Task / Send disabled + 'Running...',
-      audio start.wav saat task BENAR-BENAR mulai running).
-MODE: Implementasi. Frontend-only. Tidak ada perubahan backend/API/Python.
-=======================================================================
+[2] new_analisa.txt (file ini) — ringkasan hasil.
 
-FILES CHANGED
--------------
-1. web/frontend/src/audioRegistry.js
-2. web/frontend/src/App.vue
-3. web/frontend/src/components/ConsultantChat.vue
-4. web/frontend/src/styles.css
+Tidak ada perubahan pada: styles.css, App.vue, api.js, ConsultantService/API,
+orchestrator, task queue, atau file Python lainnya.
 
-(assets/audio/start.wav sudah ada di disk; untracked di git, hanya di-import Vite.)
 
-APPROACH / ROOT CAUSE
----------------------
-- Sebelumnya tidak ada indikator bahwa task sedang berjalan pada tombol
-  "Run Task" (Consultant) maupun tombol Send (Agent Input), sehingga user bisa
-  klik berulang (risiko double-submit).
-- Audio feedback "start" belum terdaftar; STATUS_TO_SOUND hanya memuat status
-  terminal (completed/failed/cancelled), tanpa transisi non-terminal "running".
-- Sumber status running TUNGGAL yang sudah ada adalah computed `isRunning` di
-  App.vue (dipakai toggle send/stop button). Dipakai ulang; tidak ada state
-  machine baru.
-
-FIX
----
-1. audioRegistry.js
-   - import startSound dari assets/audio/start.wav (relatif; Vite menghash ->
-     /assets/start-<hash>.wav, disajikan Django dari dist).
-   - SOUNDS += start.
-   - STATUS_TO_SOUND += running: "start" (transisi nyata idle -> running).
-   - Deduplication memakai marker `lastPlayedStatus` yang sudah ada: satu
-     playback per transisi nyata; "running" berulang (duplikat SSE) tidak
-     replay, dan setelah resetAudioTracker() (dipanggil di submitTask saat task
-     baru dibuat) transisi running berikutnya boleh diputar lagi.
-2. App.vue
-   - handleEvent case "task_started": tambah playStatusSound("running") tepat
-     saat transisi status ke running (BUKAN saat klik).
-   - Teruskan :running="isRunning" ke <ConsultantChat> (single source of truth).
-   - Agent Input: tombol saat running kini kelas "stop-btn stop-btn-run" dengan
-     ikon stop + label "Running...". Tombol Send (idle) tidak lagi tampil saat
-     running (kondisi v-if/v-else yang sudah ada), sehingga Send efektif
-     disabled + ada label Running...; aksi klik tetap Stop task (tidak
-     menghilangkan kapabilitas stop yang sudah ada).
-3. ConsultantChat.vue
-   - Tambah prop `running: { type: Boolean, default: false }`.
-   - runTask(): guard `if (!lastProposal.value || props.running) return;`
-     (anti double-submit).
-   - Template .run-task-btn: `:disabled="running"`, ikon disembunyikan saat
-     running, label dinamis `{{ running ? "Running..." : "Run Task" }}`.
-   - Struktur modal TIDAK berubah: .consultant-messages tetap scroll owner,
-     .consultant-foot tetap sibling flex-shrink:0, .consultant-proposal tetap di
-     dalam .consultant-messages.
-4. styles.css
-   - .run-task-btn:disabled { cursor:not-allowed; opacity:.6; filter:none }.
-   - .stop-btn-run { width:auto; padding:0 12px; gap:7px; inline-flex; font 12px;
-     font-weight:650 } + .stop-btn-run .stop-label { white-space:nowrap } agar
-     label "Running..." proporsional dengan send/stop btn dan tema AETHER.
-
-VALIDATION
-----------
-- Build produksi dari web/frontend:
-  `node node_modules/vite/bin/vite.js build` -> sukses, 31 modules, 0 error.
-  (Naik dari 30 -> 31 karena import asset start.wav.)
-- Bundle dist memuat:
-  * dist/assets/start-CeRQShPN.wav (emit baru)
-  * STATUS_TO_SOUND {running:"start",completed:"succeed",failed:"failed",cancelled:"stop"}
-  * SOUNDS {start, succeed, failed, stop}
-  * App.vue: wi("running") pada case task_started
-  * ConsultantChat: prop running, disabled:e.running, label Running...
-  * Agent Input: class "stop-btn stop-btn-run" + label Running...
-- git status: hanya 4 file frontend berubah + assets/audio/start.wav (untracked).
-  TIDAK ada file Python/backend yang berubah.
-
-BACKEND UNCHANGED
------------------
-Tidak menyentuh Agent execution, ConsultantService, API, orchestrator, task
-creation, logging (.aether/log), SessionStore/SSE, maupun Task lifecycle.
-
-CATATAN / REMAINING WORK
-------------------------
-- Audio diputar sekali per transisi nyata ke running (dedup berbasis
-  lastPlayedStatus). Berlaku untuk KEDUA entry point (Consultant Run Task &
-  Agent Input) karena keduanya memicu SSE task_started yang sama.
-- Reset label/disabled mengikuti transisi terminal (completed/failed/cancelled)
-  yang sudah men-set task.status sehingga isRunning kembali false.
-- Verifikasi interaktif di browser (klik nyata, audio) belum dijalankan;
-  validasi berbasis build + inspeksi bundle/source.
+--------------------------------------------------------------------------------
+7. CATATAN / SISA
+--------------------------------------------------------------------------------
+- Verifikasi akhir yang bersifat manual (browser): kirim Task Proposal, lalu
+  kirim pesan lanjutan untuk memastikan card tergeser ke atas dan balasan baru
+  muncul di bawah. Build produksi sudah memuat logika baru; jalankan
+  run.bat / rebuild+serve dan lakukan hard-refresh browser (cache dist lama
+  pernah menjadi penyebab gejala serupa sebelumnya).
+- Tidak ada test otomatis untuk interaksi UI ini; validasi mengandalkan build
+  0 error + pemeriksaan bundle dist.
+================================================================================
