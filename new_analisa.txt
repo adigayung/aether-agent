@@ -1,4 +1,81 @@
 ================================================================================
+TASK: UI AETHER Consultant — (1) tombol "Run Task" di BAWAH Task Proposal card
+      + hilangkan duplikasi teks Task; (2) LLM Model Sidebar di KIRI Consultant
+      Chat (highlight model aktif, pemilihan via mekanisme existing).
+================================================================================
+Mode   : Investigate (verifikasi source sebelum perubahan), frontend-only
+Scope  : web/frontend/src/components/ConsultantChat.vue + web/frontend/src/styles.css
+Status : SELESAI — build OK (32 modules, 0 error); TIDAK ada perubahan backend
+
+--------------------------------------------------------------------------------
+A. FILES CHANGED
+--------------------------------------------------------------------------------
+1) web/frontend/src/components/ConsultantChat.vue
+   - Tambah helper stripTaskProposal()/assistantText() + TASK_FENCE_RE.
+   - Bubble assistant memakai assistantText(msg) (blok ```task dibersihkan).
+   - Card .consultant-proposal: struktur title -> body -> tombol (button di
+     bawah, dibungkus .cp-foot).
+   - Tambah <aside class="consultant-models"> (LLM Model Sidebar) di dalam
+     .consultant-body, sebelum .consultant-chat.
+   - Tambah enabledModels(), selectProvider(), selectModel() yang HANYA
+     emit update:providerInstanceId / update:modelId (state existing App.vue).
+2) web/frontend/src/styles.css
+   - .cp-head (hanya title), tambah .cp-foot (button rata kanan, margin-top 10px).
+   - Tambah blok .consultant-models / .cm-side-* (sidebar, highlight model
+     aktif, scroll owner sendiri, scrollbar dark AETHER).
+   - @media (max-width:900px): tambahkan penyesuaian .consultant-models
+     (stack di atas, max-height 30%).
+
+--------------------------------------------------------------------------------
+B. ROOT CAUSE
+--------------------------------------------------------------------------------
+1) Duplikasi teks Task + tombol tampak "di atas kartu":
+   Backend (src/agent_ai/consultant/service.py) mengembalikan `reply` MENTAH
+   (masih memuat blok berpagar ```task) SEKALIGUS mengekstrak isi yang sama ke
+   field `task_proposal`. Frontend merender `reply` sebagai markdown (menampilkan
+   blok task) DAN merender card .consultant-proposal berisi teks yang sama ->
+   teks Task muncul DUA KALI. Karena .cp-head menaruh tombol Run Task berdamping
+   dengan title (justify-content: space-between) DI ATAS .cp-body, tombol tampak
+   "di atas kartu" yang sebenarnya adalah blok task duplikat di bubble.
+
+2) Tidak ada sidebar model: hanya dropdown Provider/Model di header.
+
+--------------------------------------------------------------------------------
+C. FIX APPLIED (frontend-only)
+--------------------------------------------------------------------------------
+1) stripTaskProposal() membersihkan blok ```task dari teks bubble assistant,
+   sehingga Task HANYA tampil sekali (di card). Bila bubble menjadi kosong
+   setelah dibersihkan, bubble tidak dirender (v-else-if="assistantText(msg)").
+2) Tombol Run Task dipindah ke .cp-foot (DI BAWAH .cp-body) => urutan card:
+   title -> body -> button, sesuai permintaan.
+3) LLM Model Sidebar kiri membaca props.providers (data LLM config yang SUDAH
+   ADA via GET /api/llm/providers -> App.vue llmProviders). Model aktif
+   (providerInstanceId + modelId) di-highlight. Klik model mengubah model
+   Consultant lewat emit update:providerInstanceId/update:modelId yang sama
+   dengan dropdown/New Task. Tidak ada endpoint atau provider logic baru.
+
+--------------------------------------------------------------------------------
+D. VALIDATION
+--------------------------------------------------------------------------------
+- Build: `node node_modules/vite/bin/vite.js build` (dari web/frontend) =>
+  32 modules transformed, 0 error.
+- Bundle check: dist CSS memuat .cp-foot, .consultant-models,
+  .cm-side-model.active; dist JS memuat regex ```task(?:-proposal) dan logika
+  selectModel (minified) + stripTaskProposal (minified W()).
+- git diff --numstat -- src web/django_app => KOSONG (tidak ada perubahan
+  backend/Python/API).
+- git status => hanya 2 file frontend berubah.
+
+--------------------------------------------------------------------------------
+E. SCOPE GUARANTEE
+--------------------------------------------------------------------------------
+- TIDAK mengubah Agent reasoning/loop/tool policy/queue/scheduler, provider
+  implementation, Project Bible/Intelligence, atau endpoint task creation.
+- TIDAK mengubah kontrak modal: .consultant-messages tetap scroll owner,
+  .consultant-foot tetap sibling flex-shrink:0, .consultant-proposal tetap di
+  DALAM .consultant-messages.
+
+================================================================================
 TASK: Panel "TASK LIST / TASK QUEUE" di area Consultant AETHER
       (tahap UI Task List + integrasi Run Task -> createTask -> tampil di TASKS)
 ================================================================================

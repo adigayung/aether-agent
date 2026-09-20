@@ -1062,6 +1062,137 @@ button {
   min-height: 0;
 }
 
+/* ---- LLM Model Sidebar (kiri Consultant Chat) ----
+   Menampilkan provider/model dari data LLM config yang sudah ada. Model aktif
+   di-highlight; memilih model mengubah model Consultant via state existing.
+   Sidebar punya scroll owner sendiri (hanya daftar model). */
+.consultant-models {
+  flex: 0 0 220px;
+  width: 220px;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border-soft);
+  background: rgba(0, 0, 0, 0.14);
+  overflow: hidden;
+}
+.cm-side-head {
+  display: flex;
+  align-items: center;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border-soft);
+  flex: 0 0 auto;
+}
+.cm-side-title {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  font-weight: 650;
+}
+.cm-side-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 8px;
+}
+/* Scrollbar tipis dark AETHER (konsisten dengan panel lain). */
+.cm-side-body {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.cm-side-body::-webkit-scrollbar {
+  width: 9px;
+}
+.cm-side-body::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 8px;
+}
+.cm-side-body::-webkit-scrollbar-thumb:hover {
+  background: var(--bg-hover);
+}
+.cm-side-empty {
+  font-size: 12px;
+  color: var(--text-faint);
+  padding: 6px 8px;
+}
+.cm-side-provider {
+  margin-bottom: 8px;
+}
+.cm-side-provider-btn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.cm-side-provider-btn:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+.cm-side-provider.active .cm-side-provider-btn {
+  color: var(--accent-2);
+}
+.cm-side-provider-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cm-side-models {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+}
+.cm-side-model-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  text-align: left;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.cm-side-model-btn:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+}
+.cm-side-model.active .cm-side-model-btn {
+  background: rgba(139, 92, 246, 0.16);
+  color: var(--text);
+  border: 1px solid rgba(139, 92, 246, 0.4);
+}
+.cm-side-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+.cm-side-model.active .cm-side-dot {
+  background: var(--accent);
+}
+.cm-side-model-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .consultant-head {
   display: flex;
   align-items: center;
@@ -2729,6 +2860,12 @@ select.input-a {
   border-radius: 8px;
   padding: 10px 12px;
 }
+/* Tombol Run Task berada DI BAWAH seluruh isi card (title -> body -> button). */
+.cp-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
 .run-task-btn {
   display: inline-flex;
   align-items: center;
@@ -2914,6 +3051,13 @@ select.input-a {
 @media (max-width: 900px) {
   .consultant-body {
     flex-direction: column;
+  }
+  .consultant-models {
+    flex: 0 0 auto;
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--border-soft);
+    max-height: 30%;
   }
   .consultant-queue {
     flex: 0 0 auto;

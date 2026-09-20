@@ -110,11 +110,54 @@ function onModelChange(e) {
   emit("update:modelId", String(e.target.value || ""));
 }
 
+// --- LLM Model Sidebar -----------------------------------------------------
+// Daftar model enabled per provider (data SUDAH ADA dari props.providers).
+function enabledModels(p) {
+  return (p.models || []).filter((m) => m.enabled !== false);
+}
+
+// Pilih provider dari sidebar: set provider instance. Bila provider sudah aktif,
+// pertahankan model; bila berganti provider, model di-reset (mekanisme sama
+// dengan dropdown existing via emit update:*).
+function selectProvider(providerId) {
+  if (providerId === props.providerInstanceId) return;
+  emit("update:providerInstanceId", providerId);
+  emit("update:modelId", "");
+}
+
+// Pilih model dari sidebar: set provider instance + model sekaligus. Ini adalah
+// SATU jalur state existing (App.vue) yang juga dipakai New Task & dropdown.
+function selectModel(providerId, modelIdValue) {
+  if (providerId !== props.providerInstanceId) {
+    emit("update:providerInstanceId", providerId);
+  }
+  if (modelIdValue === props.modelId) return;
+  emit("update:modelId", modelIdValue);
+}
+
 function scrollToBottom() {
   nextTick(() => {
     const el = scroller.value;
     if (el) el.scrollTop = el.scrollHeight;
   });
+}
+
+// Blok Task Proposal berpagar bahasa `task`/`task-proposal`.
+// Backend (consultant/service.py) mengekstrak blok ini menjadi field
+// `task_proposal`, TETAPI `reply` mentah masih memuat blok yang sama. Bila
+// keduanya dirender, teks Task muncul DUA KALI (di bubble balasan + di card
+// Task Proposal). Sesuai permintaan: hanya card yang menampilkan Task, jadi
+// blok berpagar `task` dibersihkan dari teks bubble assistant.
+const TASK_FENCE_RE = /```[ \t]*task(?:-proposal)?[ \t]*\r?\n[\s\S]*?```/gi;
+
+function stripTaskProposal(text) {
+  if (!text) return "";
+  return String(text).replace(TASK_FENCE_RE, "").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+// Teks bubble assistant tanpa blok Task Proposal (dihitung sekali per pesan).
+function assistantText(msg) {
+  return stripTaskProposal(msg.text);
 }
 
 watch(messages, scrollToBottom, { deep: true });
@@ -330,6 +373,54 @@ onMounted(() => {
       </div>
 
       <div class="consultant-body">
+        <!-- LLM Model Sidebar (KIRI): daftar provider/model dari data LLM config
+             yang SUDAH ADA (props.providers). Model aktif Consultant di-highlight.
+             Memilih model mengubah model Consultant via mekanisme existing
+             (emit update:providerInstanceId / update:modelId -> App.vue). -->
+        <aside class="consultant-models" aria-label="LLM model">
+          <div class="cm-side-head">
+            <span class="cm-side-title">LLM MODEL</span>
+          </div>
+          <div class="cm-side-body">
+            <div v-if="!providerOptions.length" class="cm-side-empty">
+              No provider configured.
+            </div>
+            <div
+              v-for="p in providerOptions"
+              :key="p.id"
+              class="cm-side-provider"
+              :class="{ active: p.id === providerInstanceId }"
+            >
+              <button
+                type="button"
+                class="cm-side-provider-btn"
+                :title="providerLabel(p)"
+                @click="selectProvider(p.id)"
+              >
+                <span class="cm-side-provider-name">{{ providerLabel(p) }}</span>
+              </button>
+              <ul class="cm-side-models">
+                <li
+                  v-for="m in enabledModels(p)"
+                  :key="m.id"
+                  class="cm-side-model"
+                  :class="{ active: p.id === providerInstanceId && m.id === modelId }"
+                >
+                  <button
+                    type="button"
+                    class="cm-side-model-btn"
+                    :title="m.model_name"
+                    @click="selectModel(p.id, m.id)"
+                  >
+                    <span class="cm-side-dot" aria-hidden="true"></span>
+                    <span class="cm-side-model-name">{{ m.model_name }}</span>
+                  </button>
+                </li>
+              </ul>
+            </div>
+          </div>
+        </aside>
+
         <div class="consultant-chat">
           <div class="consultant-messages" ref="scroller">
         <div v-for="(msg, i) in messages" :key="i" class="cmsg" :class="msg.role">
@@ -345,7 +436,12 @@ onMounted(() => {
           </div>
           <div v-if="msg.role === 'user'" class="ctext">{{ msg.text }}</div>
           <!-- eslint-disable-next-line vue/no-v-html -->
-          <div v-else class="consultant-md md" :class="{ failed: msg.failed }" v-html="renderMarkdown(msg.text)"></div>
+          <div
+            v-else-if="assistantText(msg)"
+            class="consultant-md md"
+            :class="{ failed: msg.failed }"
+            v-html="renderMarkdown(assistantText(msg))"
+          ></div>
           <div v-if="msg.role === 'assistant' && msg.tools && msg.tools.length" class="consultant-tools">
             <span v-for="(t, ti) in msg.tools" :key="ti" class="consultant-tool" :class="t.success ? 'ok' : 'err'">
               {{ t.success ? "✓" : "✗" }} {{ t.tool }}<template v-if="t.target"> {{ t.target }}</template>
@@ -355,16 +451,19 @@ onMounted(() => {
                dirender inline di dalam pesan yang menghasilkannya (bukan selalu
                di akhir container), sehingga balasan Consultant berikutnya
                muncul DI BAWAH card dan card ikut naik seperti bubble lain.
-               Card tetap berada di dalam area percakapan yang scrollable. -->
+               Card tetap berada di dalam area percakapan yang scrollable.
+               Urutan card: title -> body -> tombol Run Task di paling BAWAH. -->
           <div v-if="msg.role === 'assistant' && msg.taskProposal" class="consultant-proposal">
             <div class="cp-head">
               <span class="cp-title">Task Proposal</span>
+            </div>
+            <pre class="cp-body">{{ msg.taskProposal }}</pre>
+            <div class="cp-foot">
               <button class="run-task-btn" type="button" :disabled="running" @click="runTask(msg.taskProposal)">
                 <svg v-if="!running" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
                 {{ running ? "Running…" : "Run Task" }}
               </button>
             </div>
-            <pre class="cp-body">{{ msg.taskProposal }}</pre>
           </div>
         </div>
 
