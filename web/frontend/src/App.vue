@@ -13,6 +13,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import ProjectLauncher from "./components/ProjectLauncher.vue";
 import AgentActivity from "./components/AgentActivity.vue";
+import CodeEditor from "./components/CodeEditor.vue";
 import TaskComposer from "./components/TaskComposer.vue";
 import ChangesPanel from "./components/ChangesPanel.vue";
 import FileExplorer from "./components/FileExplorer.vue";
@@ -643,11 +644,28 @@ async function openExplorer() {
   }
 }
 
-// Klik file di File Explorer -> buka editor/modal (placeholder aman).
+// Kode editor (Monaco) — dibuka dari File Explorer / panel CHANGES.
+// `editorFile` = { path, name } dari Explorer (path relatif, bukan path baru).
+// Tidak ada penulisan file dari browser: semua lewat API file backend existing.
+const editorOpen = ref(false);
+const editorFile = ref(null);
+
 function openFileInEditor(file) {
-  // Tidak ada editor kedua: cukup tampilkan path terpilih sebagai info.
+  const path = file && (file.path || file.file_path);
+  if (!path) return;
   error.value = "";
-  runtime.activity = `File: ${file.path}`;
+  editorFile.value = { path, name: (file && file.name) || String(path).split("/").pop() };
+  editorOpen.value = true;
+}
+
+function closeCodeEditor() {
+  editorOpen.value = false;
+  editorFile.value = null;
+}
+
+// Feedback error editor memakai mekanisme error banner AETHER yang sudah ada.
+function onEditorError(message) {
+  error.value = message || "Editor error.";
 }
 
 async function enterWorkbench() {
@@ -968,6 +986,7 @@ onBeforeUnmount(() => {
             :project="activeProject"
             :refresh-key="explorerRefresh"
             @open-file="openFileInEditor"
+            @open-file-editor="openFileInEditor"
           />
         </div>
       </div>
@@ -1121,6 +1140,18 @@ onBeforeUnmount(() => {
       :status="reportStatus"
       :report="currentReport"
       @close="reportOpen = false"
+    />
+
+    <!-- ===================== CODE EDITOR MODAL (Monaco) ================ -->
+    <!-- `:key` per path: buka file lain = komponen baru, sehingga instance/
+         state file sebelumnya tidak bocor (Monaco di-dispose saat unmount). -->
+    <CodeEditor
+      v-if="editorOpen && editorFile"
+      :key="editorFile.path"
+      :path="editorFile.path"
+      :name="editorFile.name"
+      @close="closeCodeEditor"
+      @error="onEditorError"
     />
   </div>
 </template>

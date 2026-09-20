@@ -1,125 +1,162 @@
-=====================================================================
-SUMMARY — Provider/Model per-Task di Card Task Proposal + Tombol Copy
-Frontend-only. Backend TIDAK diubah (perubahan tidak diperlukan).
-=====================================================================
+===========================================================================
+AETHER — REAL CODE EDITOR (MONACO) VIA FILE EXPLORER
+Task: "Open with Editor" -> modal editor Monaco di dalam Workbench
+Status: IMPLEMENTED + VERIFIED (deterministik, tanpa browser/LLM)
+===========================================================================
 
-TASK
-----
-1) Kembalikan kontrol Provider + Model DI DALAM card Task Proposal Consultant
-   Chat, yang dipakai untuk MENJALANKAN task (Run Task) — TERPISAH dari
-   dropdown di header modal yang tetap untuk percakapan (chat).
-2) Tambahkan tombol Copy pada card Task Proposal agar konsisten dengan card
-   chat lain.
+1. FILE YANG DIUBAH / DITAMBAH
+---------------------------------------------------------------------------
+Backend (ADDITIVE, memakai tool AETHER existing):
+  M web/django_app/api/services.py
+      + GatewayService._active_project_root()  (helper root active project)
+      + GatewayService.read_project_file(path)  -> ReadFileTool AETHER
+      + GatewayService.write_project_file(path, content) -> WriteFileTool AETHER
+  M web/django_app/api/views.py
+      + file_content(request, service)  (GET baca / POST simpan)
+  M web/django_app/api/urls.py
+      + path("files/content", views.file_content, name="file_content")
 
-DEFAULT: provider/model card = pilihan header saat pertama; setelah diubah
-manual di card, pilihan card INDEPENDEN dari header (dan sebaliknya).
-
-FILES CHANGED
--------------
-- web/frontend/src/components/ConsultantChat.vue
-- web/frontend/src/App.vue
-- web/frontend/src/styles.css
-- new_analisa.txt (ringkasan ini)
-- web/frontend/dist/** (hasil rebuild produksi; artefak, bukan source)
-
-Tidak ada perubahan pada:
-- src/agent_ai/** (Python core, runtime, orchestrator, tools, consultant)
-- web/django_app/** (Django API/backend: services.py, views.py, urls.py)
-- .aether/log, SessionStore/SSE, Activity/Report API, ReportViewer
-Terverifikasi: `git status --porcelain` hanya menampilkan
-  M new_analisa.txt
+Frontend:
+  M web/frontend/package.json / package-lock.json  (+ monaco-editor dependency)
+  M web/frontend/src/api.js
+      + readFileContent(path), writeFileContent(path, content)
   M web/frontend/src/App.vue
-  M web/frontend/src/components/ConsultantChat.vue
+      + import + mount <CodeEditor> (v-if editorOpen, :key per path)
+      + state editorOpen / editorFile
+      + openFileInEditor() = buka modal editor (menggantikan placeholder dummy)
+      + binding @open-file-editor dari FileExplorer (action "Open with Editor")
   M web/frontend/src/styles.css
-(tidak ada file .py).
+      + section "CODE EDITOR (Monaco)": .modal.editor-m, .ed-head, .ed-title,
+        .ed-path, .ed-actions, .ed-save, .ed-body, .ed-monaco, .ed-msg,
+        .ed-status, .ed-lang, .ed-pos, .ed-err-inline, .modal.ed-confirm,
+        media query <=900px
+  A web/frontend/src/components/CodeEditor.vue      (modal editor Monaco)
+  A web/frontend/src/monacoSetup.js                 (worker + theme AETHER)
+  A web/frontend/src/editorLanguages.js             (extension -> language)
+  A scripts/check_code_editor.py                    (verifier task ini)
 
-TEMUAN VERIFIKASI (sebelum coding)
-----------------------------------
-1) Backend SUDAH mendukung override provider/model per-task — TIDAK perlu
-   perubahan backend:
-   - `GatewayService.create_task(task, project_id, metadata)` (services.py ~L770)
-     memvalidasi `metadata.provider_instance_id`/`model_id` via
-     `_validate_provider_selection()` (services.py ~L1054) dan meneruskannya ke
-     `task_executor.run(..., provider_instance_id=..., model_id=...)`
-     (services.py ~L1015/L1027).
-   - `views.py::tasks()` (POST /api/tasks) sudah meneruskan `metadata` apa adanya.
-   - `api.js::createTask(task, projectId, metadata)` sudah mengirim `metadata`.
-   - `App.vue::submitTask()` sudah merakit metadata `provider_instance_id` /
-     `model_id` dari state global.
-   => Cukup menambahkan kemampuan override (opsional) pada jalur frontend.
-   TIDAK ada blocker backend.
+Tidak diubah: FileExplorer.vue (action existing utuh), ChangesPanel.vue,
+AgentActivity/QueuePanel/ConsultantChat, runtime/loop/orchestrator, provider,
+permission policy, task lifecycle, .aether/log, SessionStore/SSE.
 
-2) Jalur lama Run Task hanya mengirim teks:
-   `ConsultantChat.runTask()` -> `emit('run-task', proposal)`
-   -> `App.vue::runConsultantTask(text)` -> `submitTask(text)`.
-   Card `.consultant-proposal` hanya punya tombol Run Task; dropdown
-   `.consultant-selects.inline` pernah ada lalu dihapus (riwayat user).
+2. DEPENDENCY YANG DITAMBAHKAN
+---------------------------------------------------------------------------
+  monaco-editor@0.52.2  (dependencies frontend, dipasang via
+  "C:\Program Files\nodejs\npm.CMD" install monaco-editor@0.52.2 --save
+  karena `npm` tidak ada di PATH subprocess AETHER).
+  Tidak ada dependency lain. Tidak ada LSP / language server.
 
-3) Pola copy yang SUDAH ADA (dipakai ulang, tidak membuat baru):
-   `.cmsg-actions` + `.copy-btn`, ikon SVG copy -> centang, label
-   Copy -> Copied, `navigator.clipboard.writeText(...).catch(()=>{})`,
-   reset ~1.4s.
+3. BAGAIMANA "Open with Editor" TERHUBUNG DENGAN EXPLORER
+---------------------------------------------------------------------------
+- FileExplorer.vue sudah punya item context menu "Open with Editor" yang
+  meng-emit("open-file-editor", { path, name }) dengan path relatif dari
+  Explorer (childPath(currentPath, entry.name)) -- TIDAK ada mekanisme
+  path/workspace baru.
+- Sebelumnya emit itu tidak punya listener (dead action). Sekarang:
+      <FileExplorer ... @open-file="openFileInEditor"
+                        @open-file-editor="openFileInEditor" />
+  Klik kiri file (seleksi + open) dan tombol Edit di panel CHANGES juga
+  memakai handler yang sama, sehingga placeholder dummy lama
+  ("File: <path>" di status) benar-benar digantikan editor nyata.
+- Alur lengkap:
+      Explorer -> klik kanan file -> "Open with Editor"
+      -> emit open-file-editor -> App.openFileInEditor()
+      -> editorFile={path,name}, editorOpen=true
+      -> <CodeEditor :key="path"> mount
+      -> GET /api/files/content?path=... (ReadFileTool AETHER)
+      -> Monaco menampilkan isi file dengan language sesuai extension.
+- Boundary: path tetap divalidasi di dalam active project root oleh
+  ReadFileTool/WriteFileTool AETHER yang sama dengan Explorer
+  (path traversal -> 400, tanpa active project -> 404).
 
-DESAIN / PERUBAHAN
-------------------
-ConsultantChat.vue:
-- State runner card (independen dari header):
-  `proposalProviderInstanceId`, `proposalModelId`, `proposalTouched`.
-  Watcher `immediate` menyinkronkan nilai dari prop header SELAMA belum
-  disentuh user; setelah disentuh (`proposalTouched=true`) card independen.
-- `proposalModelOptions` (filter model mengikuti provider card) via `modelsFor`.
-- Handler `onProposalProviderChange` (reset model ke model valid pertama) dan
-  `onProposalModelChange`.
-- `runTask()` kini emit payload { text, providerInstanceId, modelId }.
-- Copy card: `proposalCopied` + `copyProposal()` (pola .copy-btn, reset ~1.4s).
-- Template card: `.cp-foot` = `.cp-runner` (2 <select class="input-a">:
-  Provider + Model, di-DISABLE saat runDisabled) + tombol Run Task di kanan;
-  lalu baris `.cmsg-actions.cp-actions` berisi tombol Copy di kiri-bawah.
-  Card tetap DI DALAM `.consultant-messages` (kontrak layout tidak berubah).
+4. BAGAIMANA SAVE / DISCARD / CANCEL BEKERJA
+---------------------------------------------------------------------------
+- Dirty state: model Monaco memakai "versi tersimpan"
+  (model.getAlternativeVersionId()). Buka file TIDAK membuat dirty; undo
+  kembali ke kondisi tersimpan juga mengembalikan status "Saved".
+- Save (header atau Ctrl/Cmd+S):
+      editor.getValue() -> POST /api/files/content {path, content}
+      -> WriteFileTool AETHER (atomic write, boundary sama)
+      -> sukses: baseline versi diperbarui, dirty=false ("Saved"), emit saved
+      -> gagal: file TIDAK dianggap tersimpan, isi editor dipertahankan,
+         error tampil di footer editor + diteruskan ke banner error AETHER
+         yang sudah ada (tidak ada notification system baru).
+- Close (tombol X, klik backdrop, atau Escape):
+      tidak dirty  -> modal langsung tertutup (Monaco di-dispose)
+      dirty        -> modal konfirmasi "Unsaved Changes" AETHER:
+                        [Save]    -> simpan; berhasil = tutup, gagal = editor
+                                     tetap terbuka (tidak dianggap tersimpan)
+                        [Discard] -> buang perubahan, tutup
+                        [Cancel]  -> tetap di editor (perubahan dipertahankan)
+      Escape saat konfirmasi terbuka = Cancel.
+- Tidak ada jalur close yang menutup editor tanpa konfirmasi saat dirty
+  (X, backdrop, Escape, Ctrl+S semuanya lewat requestClose()).
 
-App.vue:
-- `submitTask(text, overrideProviderInstanceId=null, overrideModelId=null)`:
-  override MENANG atas pilihan global; bila kosong -> perilaku default.
-- `runConsultantTask(payload)`: menerima payload object {text, providerInstanceId,
-  modelId} ATAU string lama (backward compatible), lalu meneruskannya ke
-  `submitTask(text, providerId, modelId)`. Pilihan header (chat) TIDAK diubah.
+5. HASIL VERIFIKASI
+---------------------------------------------------------------------------
+  python scripts/check_code_editor.py  -> 12/12 OK
+    [1] GET /api/files/content baca file (root + subfolder)
+    [2] POST /api/files/content menulis file ke disk (existing + baru)
+    [3] path keluar workspace ditolak (read & write)
+    [4] file tidak ditemukan / input tidak lengkap -> 400 pesan jelas
+    [5] tanpa active project -> 404
+    [6] dependency monaco-editor + api read/write
+    [7] Explorer: "Open with Editor" + emit open-file-editor (action lain utuh)
+    [8] App.vue menghubungkan emit Explorer ke modal (:key per file)
+    [9] CodeEditor.vue: Monaco lazy, dirty, save/discard/cancel, dispose
+   [10] monacoSetup.js: worker + theme AETHER + opsi editor
+   [11] styles.css: style modal editor + kontrak scroll Explorer tetap
+   [12] deteksi language 24 nama file (termasuk path Windows)
 
-styles.css:
-- `.cp-foot` -> `justify-content: space-between` (runner kiri, Run Task kanan).
-- Baru: `.cp-runner`, `.cp-select`, `.cp-select .cs-label`, `.cp-select .input-a`,
-  `.cp-actions`.
-- Tidak menyentuh `.consultant-m`, `.consultant-messages` (scroll owner),
-  `.consultant-foot` (sibling flex-shrink:0), maupun kontrak `.copy-btn` chat.
+  python scripts/check_workbench.py -> 12/12 OK (termasuk SSR render App.vue
+    1828 bytes: Monaco TIDAK dievaluasi saat render tanpa browser)
+  python scripts/check_django_gateway.py -> OK 10/10
+  python scripts/check_filesystem_tools.py -> OK
+  python scripts/check_explorer_hidden_aether.py -> OK 5/5
+  python scripts/check_delete_button.py -> OK 5/5
+    (perlu DJANGO_ALLOWED_HOSTS=testserver,127.0.0.1,localhost -- pre-existing)
 
-KONTRAK YANG DIPERTAHANKAN
---------------------------
-- `.consultant-messages` tetap satu-satunya scroll owner
-  (flex:1 1 auto; min-height:0; overflow-y:auto).
-- `.consultant-foot` tetap sibling dengan flex-shrink:0.
-- `.consultant-proposal` tetap DI DALAM `.consultant-messages`.
-- Panel LLM MODEL (aside.consultant-models / cm-side-*) TIDAK dihidupkan kembali.
-- Fitur lain tidak berubah: mode Quick/Investigate, attach image,
-  Enter=newline / Shift+Enter=send, auto-scroll, tool activity, Run Task.
-- Tidak ada dropdown dobel di header.
+  Build produksi: node node_modules/vite/bin/vite.js build (dari web/frontend)
+    -> 1088 modules, 0 error.
+    Bundle utama: index-*.js 262 kB; Monaco LAZY: monacoSetup-*.js 3.33 MB
+    (dimuat hanya saat editor dibuka) + monacoSetup-*.css 133 kB.
+    Worker ter-emit: editor.worker, json.worker, css.worker, html.worker,
+    ts.worker -> diakses browser via /assets/*.js (Django menyajikan
+    /assets/**). Mode language service (json/css/html/ts) juga ter-split.
 
-VALIDASI
---------
-- Build frontend: dari web/frontend
-  `node node_modules/vite/bin/vite.js build` -> 32 modules, 0 error.
-  Bundel membuktikan:
-  - emit run-task = {text, providerInstanceId, modelId}.
-  - submitTask memakai override: `provider = override || global`,
-    `model = override || global`.
-  - CSS `.cp-runner`/`.cp-select`/`.cp-actions` dan tombol
-    "Copy task proposal" ada di bundel production.
-- Verifikasi Consultant: `python scripts/check_consultant.py` -> SEMUA PASS
-  (core, Bible, registry per-mode, boundary, session, gateway HTTP,
-  Task Proposal -> create_task, frontend mode).
-- `git status --porcelain` -> tidak ada file backend/Python berubah.
+  Pemeriksaan acceptance (A-H) yang bisa diotomasi tanpa browser:
+    A Open with Editor dari context menu -> jalur emit + handler terverifikasi.
+    B Isi file tampil di Monaco + language per extension -> API + mapping
+      language + opsi editor terverifikasi; render Monaco diverifikasi lewat
+      build/bundle (butuh browser untuk piksel).
+    C Edit -> Monaco default (folding, find/replace, multi-cursor, minimap).
+    D Save -> terverifikasi sampai level disk (isi file benar-benar berubah).
+    E Close tanpa edit -> tanpa konfirmasi (dirty=false baseline).
+    F Close saat dirty -> Save/Discard/Cancel terverifikasi statis di komponen.
+    G Save failure -> editor tidak ditutup, tidak dianggap tersimpan.
+    H Workbench tidak rusak -> check_workbench 12/12 + Explorer tidak diubah.
 
-KONFIRMASI BACKEND
-------------------
-TIDAK ADA perubahan backend. Override provider/model per-task sudah didukung
-backend sehingga hanya jalur frontend (consultant chat -> submitTask ->
-createTask metadata) yang disesuaikan. Default behavior task tanpa override
-tidak berubah.
+  Verifikasi runtime di browser (klik-klik) TIDAK dilakukan di environment ini
+  (tidak ada browser headless); jalur yang tersisa hanya visual/interaktif.
+
+6. MASALAH YANG MASIH DITEMUKAN
+---------------------------------------------------------------------------
+a. Batas body request gateway AETHER_GATEWAY_MAX_BODY_BYTES = 1.000.000 byte
+   (settings existing, TIDAK diubah). File yang dibaca sudah dibatasi 1 MB
+   oleh ReadFileTool; jika user memperbesar file mendekati 1 MB, POST save
+   bisa ditolak 400 oleh batas body. Perilakunya benar (editor tetap terbuka
+   + error jelas), tetapi batas ini perlu dinaikkan bila editor ingin
+   mendukung file besar. Tidak dilakukan di task ini agar tidak menyentuh
+   konfigurasi gateway global.
+b. `.vue` dipetakan ke grammar `html` dan `.toml` ke `ini` karena Monaco
+   basic-languages tidak menyediakan grammar khusus Vue/TOML (mapping tetap
+   sederhana dan mudah diperluas di editorLanguages.js).
+c. Auto-complete/validasi kaya hanya tersedia untuk json/css/scss/less/html/
+   js/ts (language service bawaan Monaco). Bahasa lain hanya syntax
+   highlighting + fitur editor standar (sesuai scope: tanpa LSP).
+d. Server Django yang sedang berjalan harus menyajikan dist/ hasil build
+   terbaru (sudah di-rebuild). Bila UI lama masih tampil, hard refresh browser
+   (index.html sudah no-cache, tapi sesi lama bisa menahan bundle lama).
+e. Fitur di luar scope tidak dikerjakan: tabs multi-file, split, Git diff,
+   formatter/linter, autosave, editor persistence, LSP.
+===========================================================================

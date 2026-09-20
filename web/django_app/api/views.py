@@ -294,6 +294,30 @@ def files(request: HttpRequest, service: GatewayService) -> JsonResponse:
 
 
 @csrf_exempt
+@require_http_methods(["GET", "POST"])
+@_handle
+def file_content(request: HttpRequest, service: GatewayService) -> JsonResponse:
+    """Isi file project aktif untuk Code Editor (Workbench).
+
+    GET  /api/files/content?path=...  -> baca isi file (ReadFileTool AETHER).
+    POST /api/files/content           -> simpan isi file (WriteFileTool AETHER),
+                                         body: {path, content}.
+
+    Backend tetap satu-satunya yang menyentuh filesystem: frontend TIDAK
+    menulis file dari browser. Path divalidasi terhadap active project root
+    oleh tool AETHER existing (workspace boundary sama dengan Explorer).
+    """
+    if request.method == "GET":
+        path = request.GET.get("path")
+        return _json_response(service.read_project_file(path))
+
+    body = _parse_json_body(request)
+    path = body.get("path")
+    content = body.get("content")
+    return _json_response(service.write_project_file(path, content))
+
+
+@csrf_exempt
 @require_http_methods(["GET", "POST", "DELETE"])
 @_handle
 def active_project(request: HttpRequest, service: GatewayService) -> JsonResponse:

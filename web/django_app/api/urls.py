@@ -41,6 +41,7 @@ urlpatterns = [
     path("reveal-in-explorer", views.reveal_in_explorer, name="reveal_in_explorer"),
     path("delete-entry", views.delete_entry, name="delete_entry"),
     path("files", views.files, name="files"),
+    path("files/content", views.file_content, name="file_content"),
     path("tasks", views.tasks, name="tasks"),
     # Task Queue API (TAMPILAN/kontrol UI antrian). Literal route "tasks/queue"
     # dan sub-route-nya HARUS mendahului "tasks/<str:task_id>" agar tidak

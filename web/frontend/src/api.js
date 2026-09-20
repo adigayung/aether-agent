@@ -115,6 +115,21 @@ export function listFiles(path = ".") {
   return request(`/files?path=${encodeURIComponent(path)}`);
 }
 
+// Code Editor (Workbench): baca isi file project aktif (ReadFileTool AETHER).
+// Frontend TIDAK membaca filesystem browser; isi file selalu dari backend.
+export function readFileContent(path) {
+  return request(`/files/content?path=${encodeURIComponent(path)}`);
+}
+
+// Code Editor (Workbench): simpan isi file project aktif (WriteFileTool AETHER).
+// Penulisan dilakukan backend di dalam workspace boundary existing.
+export function writeFileContent(path, content) {
+  return request("/files/content", {
+    method: "POST",
+    body: JSON.stringify({ path, content }),
+  });
+}
+
 // Buka Windows Explorer pada ACTIVE PROJECT (path dari backend, bukan frontend).
 export function openInExplorer() {
   return request("/open-in-explorer", { method: "POST" });

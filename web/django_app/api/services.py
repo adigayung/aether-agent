@@ -764,6 +764,78 @@ class GatewayService:
         except ToolError as exc:
             raise ValidationError(str(exc)) from exc
 
+    def _active_project_root(self):
+        """Root active project untuk operasi file workspace (Code Editor).
+
+        Satu sumber path (active project). Boundary workspace TIDAK dibuat
+        ulang: ReadFileTool/WriteFileTool AETHER yang memvalidasi path tetap di
+        dalam root ini (tidak ada mekanisme security kedua).
+
+        Raises:
+            NotFoundError: bila tidak ada active project.
+            ValidationError: bila active project tidak punya path.
+        """
+        from pathlib import Path as _Path
+
+        active = self.get_active_project()
+        if active is None:
+            raise NotFoundError("Tidak ada active project.")
+        root = active.get("root") or active.get("path")
+        if not root:
+            raise ValidationError("Active project tidak memiliki path.")
+        target = _Path(root)
+        if not target.exists() or not target.is_dir():
+            raise ValidationError(f"Path project tidak ditemukan: {root}")
+        return target
+
+    def read_project_file(self, path: str) -> Dict[str, Any]:
+        """Baca isi file project aktif via ReadFileTool AETHER.
+
+        Dipakai Code Editor (Workbench) untuk memuat isi file. Read-only dan
+        tidak ada abstraksi filesystem baru: tool AETHER existing dipakai apa
+        adanya (termasuk batas ukuran file + validasi workspace boundary).
+
+        Raises:
+            NotFoundError: bila tidak ada active project.
+            ValidationError: bila path kosong / di luar root / tidak ditemukan.
+        """
+        from agent_ai.tools.base import ToolError
+        from agent_ai.tools.filesystem import ReadFileTool
+
+        if not path:
+            raise ValidationError("Field 'path' wajib diisi.")
+
+        tool = ReadFileTool(root=self._active_project_root())
+        try:
+            return tool.execute(path=path)
+        except ToolError as exc:
+            raise ValidationError(str(exc)) from exc
+
+    def write_project_file(self, path: str, content: str) -> Dict[str, Any]:
+        """Simpan isi file project aktif via WriteFileTool AETHER.
+
+        Dipakai Code Editor (Workbench) untuk menyimpan hasil edit. Penulisan
+        dilakukan backend (bukan browser) memakai tool AETHER existing, jadi
+        validasi workspace boundary + penulisan atomic tetap sama.
+
+        Raises:
+            NotFoundError: bila tidak ada active project.
+            ValidationError: bila path kosong / di luar root / gagal ditulis.
+        """
+        from agent_ai.tools.base import ToolError
+        from agent_ai.tools.workspace import WriteFileTool
+
+        if not path:
+            raise ValidationError("Field 'path' wajib diisi.")
+        if content is None:
+            raise ValidationError("Field 'content' wajib diisi.")
+
+        tool = WriteFileTool(root=self._active_project_root())
+        try:
+            return tool.execute(path=path, content=content)
+        except ToolError as exc:
+            raise ValidationError(str(exc)) from exc
+
     # ------------------------------------------------------------------ #
     # Tasks
     # ------------------------------------------------------------------ #
