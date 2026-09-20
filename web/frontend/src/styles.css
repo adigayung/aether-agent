@@ -347,11 +347,13 @@ button {
 }
 /* Blok CHANGES (tanpa .explorer-block / .wb-queue): batasi tinggi maksimum
    agar EXPLORER selalu menerima sisa tinggi kolom. Daftar perubahan menjadi
-   scroll owner internal (.changes-body) mengikuti pola .ex-head/.explorer. */
+   scroll owner internal (.changes-body) mengikuti pola .ex-head/.explorer.
+   Alokasi ~40% memberi ruang lebih untuk daftar perubahan (kartu kini kompak
+   satu baris) sementara Explorer menyusut sedikit namun tetap bisa scroll. */
 .ws-col.right > .block:not(.explorer-block):not(.wb-queue) {
   display: flex;
   flex-direction: column;
-  max-height: 30%;
+  max-height: 40%;
   min-height: 96px;
 }
 .ws-col.right > .block:not(.explorer-block):not(.wb-queue) > .block-head {
@@ -653,76 +655,104 @@ button {
   }
 }
 
-/* ---- Files / changes ---- */
+/* ---- Files / changes: kartu kompak SATU BARIS per file (redesign) ---- */
+.changes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
 .file-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 11px 13px;
+  gap: 9px;
+  padding: 6px 9px;
   border: 1px solid var(--border-soft);
-  border-radius: 10px;
+  border-radius: 9px;
   background: rgba(255, 255, 255, 0.012);
-  margin-bottom: 9px;
-  transition: background 0.12s ease, border-color 0.12s ease;
+  min-width: 0;
+  transition: background 0.14s ease, border-color 0.14s ease;
   cursor: pointer;
 }
-.file-row:last-child {
-  margin-bottom: 0;
-}
 .file-row:hover {
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(255, 255, 255, 0.035);
+  border-color: var(--border);
 }
-.file-row.selected {
-  border-color: rgba(139, 92, 246, 0.5);
-  box-shadow: inset 2px 0 0 var(--accent);
+.file-row.open {
+  border-color: rgba(139, 92, 246, 0.45);
+  background: rgba(139, 92, 246, 0.07);
 }
-.file-body {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 0;
-  flex: 1 1 auto;
+/* Caret accordion: ▸ collapsed / ▾ expanded (pola caret proyek). */
+.file-caret {
+  flex: 0 0 auto;
+  width: 11px;
+  text-align: center;
+  font-size: 9px;
+  color: var(--text-faint);
+  transition: color 0.14s ease;
 }
-.file-meta {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+.file-row:hover .file-caret,
+.file-row.open .file-caret {
+  color: var(--text-dim);
 }
-.file-ico {
-  width: 46px;
-  height: 46px;
-  border-radius: 10px;
+/* Indikator status perubahan: A=added, M=modified, D=removed. */
+.file-status {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
   display: grid;
   place-items: center;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  color: var(--text-dim);
-  flex: 0 0 auto;
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
 }
+.file-status.created {
+  background: rgba(52, 211, 153, 0.16);
+  color: var(--ok);
+}
+.file-status.modified {
+  background: rgba(251, 191, 36, 0.16);
+  color: var(--warn);
+}
+.file-status.failed {
+  background: rgba(248, 113, 113, 0.16);
+  color: var(--err);
+}
+.file-status.idle {
+  background: var(--bg-hover);
+  color: var(--text-faint);
+}
+/* Nama file: satu baris + ellipsis (min-width:0 agar boleh menyusut). */
 .file-name {
+  flex: 1 1 auto;
+  min-width: 0;
   font-family: var(--mono);
-  font-size: 12.5px;
+  font-size: 12px;
   color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.file-path {
-  font-size: 11px;
-  color: var(--text-faint);
-  margin-top: 2px;
-}
-.file-tags {
+.file-stat {
+  flex: 0 0 auto;
   display: flex;
-  gap: 7px;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.file-stat .st-add {
+  color: var(--ok);
+}
+.file-stat .st-del {
+  color: var(--err);
 }
 .file-edit {
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   flex: 0 0 auto;
   display: grid;
   place-items: center;
-  border-radius: 8px;
+  border-radius: 7px;
   border: 1px solid transparent;
   background: transparent;
   color: var(--text-faint);
@@ -767,30 +797,26 @@ button {
   color: var(--text-faint);
 }
 
-/* ---- Change diff + result (ChangesPanel) ---- */
-.cp-diff {
-  margin-top: 12px;
-  border-top: 1px solid var(--border-soft);
-  padding-top: 12px;
+/* ---- Change diff (accordion; mengalir di scroll owner .changes-body) ---- */
+.file-diff {
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+  background: #0a0912;
+  padding: 8px 10px;
+  overflow: hidden;
 }
-.cp-diff-path {
-  font-size: 12px;
-  color: var(--text-dim);
-  font-family: var(--mono);
-  margin-bottom: 7px;
-}
-.cp-diff-body pre {
+.file-diff-body pre {
   margin: 0;
-  font-size: 12px;
   font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.55;
   color: var(--text-dim);
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 220px;
-  overflow-y: auto;
+  overflow-wrap: anywhere;
 }
-.cp-diff-note {
-  font-size: 12px;
+.file-diff-note {
+  font-size: 11.5px;
   color: var(--text-faint);
   font-style: italic;
 }
@@ -1106,10 +1132,10 @@ button {
   min-height: 0;
 }
 
-/* ---- Provider/Model dropdown (dulu di header & sidebar) ----
-   Kini dirender sebagai bagian dari alur pesan (di bawah card Task Proposal).
-   .consultant-selects.inline menyesuaikan agar tampil sebagai baris di dalam
-   .consultant-messages, bukan header. */
+/* ---- Provider/Model dropdown (HEADER Consultant Chat) ----
+   Dua dropdown (Provider + Model) dirender di header .consultant-head.
+   Model mengikuti provider terpilih. Satu-satunya tempat kontrol LLM
+   konsultan (tidak ada duplikat di dalam .consultant-messages). */
 .consultant-head {
   display: flex;
   align-items: center;
@@ -1134,15 +1160,6 @@ button {
   gap: 10px;
   flex: 1 1 auto;
   min-width: 0;
-}
-/* Varian inline: menyatu DI DALAM card Task Proposal (bukan bar terpisah di
-   dalam .consultant-messages). Sejajar kiri tombol Run Task pada .cp-foot. */
-.consultant-selects.inline {
-  flex: 1 1 auto;
-  min-width: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
 }
 .consultant-select {
   display: flex;
@@ -2414,13 +2431,13 @@ select.input-a {
      daftar kembali menjadi scroll owner (header tetap terlihat di atas). */
   .explorer-block {
     flex: 0 1 auto;
-    max-height: 60vh;
+    max-height: 52vh;
   }
   /* Mode stacked: kolom kanan tidak dibatasi grid track, jadi % untuk CHANGES
-     tidak bermakna. Beri batas tinggi eksplisit agar blok tetap ringkas dan
-     EXPLORER selalu terlihat. */
+     tidak bermakna. Beri batas tinggi eksplisit (piksel) agar blok tetap
+     ringkas namun tetap dapat menampung beberapa kartu perubahan. */
   .ws-col.right > .block:not(.explorer-block):not(.wb-queue) {
-    max-height: 240px;
+    max-height: 260px;
   }
 }
 
@@ -2846,12 +2863,12 @@ select.input-a {
   border-radius: 8px;
   padding: 10px 12px;
 }
-/* Footer card Task Proposal: Provider/Model (KIRI) sejajar dengan tombol
-   Run Task (KANAN) dalam satu baris. */
+/* Footer card Task Proposal: hanya tombol Run Task (pemilihan Provider/Model
+   kini di header Consultant Chat). Tombol dirapatkan ke kanan. */
 .cp-foot {
   display: flex;
   align-items: flex-end;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 10px;
   margin-top: 10px;
 }

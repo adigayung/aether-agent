@@ -99,23 +99,42 @@ const inputPlaceholder = computed(() =>
 const providerOptions = computed(() =>
   (props.providers || []).filter((p) => p.enabled !== false)
 );
-const modelOptions = computed(() => {
-  const inst = providerOptions.value.find((p) => p.id === props.providerInstanceId);
-  if (!inst) return [];
-  return (inst.models || []).filter((m) => m.enabled !== false);
-});
+// Model difilter: HANYA model milik provider instance yang sedang dipilih.
+function modelsFor(providerId) {
+  const inst = providerOptions.value.find((p) => p.id === providerId);
+  return inst ? (inst.models || []).filter((m) => m.enabled !== false) : [];
+}
+const modelOptions = computed(() => modelsFor(props.providerInstanceId));
 
 function providerLabel(p) {
   const type = p.provider_label || p.provider_type || "";
   return type ? `${p.name} (${type})` : p.name;
 }
+// Ubah Provider -> daftar model mengikuti provider baru dan pilih model valid
+// pertama (model lama milik provider lain tidak boleh tertinggal).
 function onProviderChange(e) {
-  emit("update:providerInstanceId", String(e.target.value || ""));
-  emit("update:modelId", "");
+  const nextId = String(e.target.value || "");
+  emit("update:providerInstanceId", nextId);
+  const models = modelsFor(nextId);
+  emit("update:modelId", models[0] ? models[0].id : "");
 }
 function onModelChange(e) {
   emit("update:modelId", String(e.target.value || ""));
 }
+
+// Jaga konsistensi: bila model terpilih tidak ada pada provider aktif (mis.
+// state dibagi dengan New Task composer), koreksi ke model valid pertama.
+watch(
+  () => [props.providerInstanceId, props.modelId],
+  () => {
+    if (!props.providerInstanceId) return;
+    const models = modelOptions.value;
+    if (!models.length) return;
+    if (!models.some((m) => m.id === props.modelId)) {
+      emit("update:modelId", models[0].id);
+    }
+  }
+);
 
 function scrollToBottom() {
   nextTick(() => {
@@ -365,6 +384,35 @@ onMounted(() => {
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a4 4 0 0 1 4 4c0 1.95-1.4 3.58-3.25 3.93L12 22l-.75-12.07A4.001 4.001 0 0 1 12 2z"/><circle cx="12" cy="6" r="1.5" fill="currentColor" stroke="none"/><path d="M9 14l-3 3 3 3M15 14l3 3-3 3"/></svg>
           AETHER Consultant
         </div>
+        <!-- Pemilihan LLM konsultan: dua dropdown di HEADER (satu-satunya tempat).
+             Provider dulu -> daftar Model menyesuaikan provider terpilih.
+             State dimiliki App.vue (single source of truth) sehingga pilihan
+             terakhir tetap terpakai selama sesi. -->
+        <div class="consultant-selects">
+          <label class="consultant-select">
+            <span class="cs-label">Provider</span>
+            <select class="input-a" :value="providerInstanceId" @change="onProviderChange">
+              <option v-if="!providerOptions.length" value="">No provider instance</option>
+              <option v-for="p in providerOptions" :key="p.id" :value="p.id">
+                {{ providerLabel(p) }}
+              </option>
+            </select>
+          </label>
+          <label class="consultant-select">
+            <span class="cs-label">Model</span>
+            <select
+              class="input-a"
+              :value="modelId"
+              :disabled="!providerInstanceId"
+              @change="onModelChange"
+            >
+              <option v-if="!modelOptions.length" value="">No model</option>
+              <option v-for="m in modelOptions" :key="m.id" :value="m.id">
+                {{ m.model_name }}
+              </option>
+            </select>
+          </label>
+        </div>
         <button class="consultant-new" type="button" title="New session" @click="startNewSession">
           New
         </button>
@@ -460,36 +508,15 @@ onMounted(() => {
                di akhir container), sehingga balasan Consultant berikutnya
                muncul DI BAWAH card dan card ikut naik seperti bubble lain.
                Card tetap berada di dalam area percakapan yang scrollable.
-               Urutan card: title -> body -> footer (Provider/Model di KIRI,
-               tombol Run Task di KANAN, sejajar). -->
+               Pemilihan Provider/Model TIDAK lagi di card ini, melainkan di
+               header Consultant Chat (satu tempat). Card: title -> body ->
+               footer (tombol Run Task). -->
           <div v-if="msg.role === 'assistant' && msg.taskProposal" class="consultant-proposal">
             <div class="cp-head">
               <span class="cp-title">Task Proposal</span>
             </div>
             <pre class="cp-body">{{ msg.taskProposal }}</pre>
             <div class="cp-foot">
-              <!-- Pemilihan Provider/Model menyatu DI DALAM card, di bawah,
-                   sejajar KIRI tombol Run Task. -->
-              <div class="consultant-selects inline">
-                <label class="consultant-select">
-                  <span class="cs-label">Provider</span>
-                  <select class="input-a" :value="providerInstanceId" @change="onProviderChange">
-                    <option v-if="!providerOptions.length" value="">No provider instance</option>
-                    <option v-for="p in providerOptions" :key="p.id" :value="p.id">
-                      {{ providerLabel(p) }}
-                    </option>
-                  </select>
-                </label>
-                <label class="consultant-select">
-                  <span class="cs-label">Model</span>
-                  <select class="input-a" :value="modelId" @change="onModelChange">
-                    <option v-if="!modelOptions.length" value="">No model</option>
-                    <option v-for="m in modelOptions" :key="m.id" :value="m.id">
-                      {{ m.model_name }}
-                    </option>
-                  </select>
-                </label>
-              </div>
               <button class="run-task-btn" type="button" :disabled="runDisabled" @click="runTask(msg.taskProposal)">
                 <svg v-if="!runDisabled" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
                 {{ runDisabled ? "Running…" : "Run Task" }}
