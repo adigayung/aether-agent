@@ -10,6 +10,7 @@
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { consult } from "../api.js";
 import { renderMarkdown } from "../markdown.js";
+import QueuePanel from "./QueuePanel.vue";
 
 const props = defineProps({
   providers: { type: Array, default: () => [] },
@@ -19,6 +20,9 @@ const props = defineProps({
   // Dipakai untuk men-disable "Run Task" + label "Running…" selama task
   // berjalan, agar tidak ada double-submit dari Task Proposal yang sama.
   running: { type: Boolean, default: false },
+  // Penanda refresh panel TASKS (dinaikkan App.vue setelah Run Task / event
+  // terminal task). Panel TASKS membaca SATU queue global yang sama.
+  queueRefreshKey: { type: Number, default: 0 },
 });
 
 const emit = defineEmits([
@@ -26,6 +30,8 @@ const emit = defineEmits([
   "update:providerInstanceId",
   "update:modelId",
   "run-task",
+  "stop-task",
+  "view-task",
 ]);
 
 const messages = ref([]);
@@ -323,7 +329,9 @@ onMounted(() => {
         </span>
       </div>
 
-      <div class="consultant-messages" ref="scroller">
+      <div class="consultant-body">
+        <div class="consultant-chat">
+          <div class="consultant-messages" ref="scroller">
         <div v-for="(msg, i) in messages" :key="i" class="cmsg" :class="msg.role">
           <span class="crole">{{ msg.role === "assistant" ? "AETHER Consultant" : "You" }}</span>
           <div v-if="msg.role === 'user' && msg.images && msg.images.length" class="cmsg-images">
@@ -413,6 +421,17 @@ onMounted(() => {
           </button>
         </div>
       </div>
+        </div><!-- /consultant-chat -->
+
+        <!-- TASKS panel: SATU queue global AETHER, ditampilkan di sebelah
+             chat Consultant. Bukan queue subsystem kedua. -->
+        <QueuePanel
+          class="consultant-queue"
+          :refresh-key="queueRefreshKey"
+          @stop-task="$emit('stop-task', $event)"
+          @view-task="$emit('view-task', $event)"
+        />
+      </div><!-- /consultant-body -->
     </div>
   </div>
 </template>

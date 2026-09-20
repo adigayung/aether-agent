@@ -175,6 +175,9 @@ function closeComposer() {
 // context dijalankan backend (endpoint Consultant). App hanya membuka modal dan
 // mengirim Task Proposal yang dihasilkan ke alur task Agent yang sudah ada.
 const consultantOpen = ref(false);
+// Panel TASKS di Consultant (SATU queue global AETHER). Penanda refresh untuk
+// QueuePanel; dinaikkan setelah Run Task / event terminal task.
+const queueRefresh = ref(0);
 function openConsultant() {
   consultantOpen.value = true;
 }
@@ -188,6 +191,25 @@ function closeConsultant() {
 async function runConsultantTask(text) {
   if (!text) return;
   await submitTask(text);
+  // Task baru (queue_state=pending) -> refresh panel TASKS.
+  queueRefresh.value += 1;
+}
+
+// Panel TASKS di Consultant (SATU queue global AETHER). Refresh dipicu setelah
+// Run Task / event terminal task. Bukan queue subsystem kedua.
+async function stopQueueTask(taskId) {
+  if (!taskId) return;
+  try {
+    await cancelTask(taskId);
+  } catch (e) {
+    error.value = e.message || "Failed to stop task.";
+  } finally {
+    queueRefresh.value += 1;
+  }
+}
+// View Task: buka task yang sama lewat alur history/activity existing.
+function viewQueueTask(t) {
+  if (t && t.task_id) openHistoryTask(t.task_id);
 }
 
 // Dot warna Agent di sidebar.
@@ -359,11 +381,13 @@ function handleEvent(evt) {
       runtime.activity = "";
       // Refresh File Explorer setelah agent selesai (file baru terlihat).
       explorerRefresh.value += 1;
+      queueRefresh.value += 1;
       playStatusSound("completed");
       refreshTaskHistory();
       break;
     case "task_failed":
       task.status = "failed";
+      queueRefresh.value += 1;
       playStatusSound("failed");
       refreshTaskHistory();
       break;
@@ -372,6 +396,7 @@ function handleEvent(evt) {
       // Execution benar-benar berhenti -> indikator Agent kembali idle.
       runtime.activity = "";
       runtime.tool = "";
+      queueRefresh.value += 1;
       playStatusSound("cancelled");
       refreshTaskHistory();
       break;
@@ -451,6 +476,9 @@ async function submitTask(text) {
     await refreshTasks();
     connectStream();
     composerOpen.value = false;
+    // Task baru -> panel TASKS (queue global) ikut refresh meski dibuat dari
+    // Agent Input (satu queue yang sama).
+    queueRefresh.value += 1;
   } catch (e) {
     error.value = e.message || "Failed to create task.";
   } finally {
@@ -1046,10 +1074,13 @@ onBeforeUnmount(() => {
       :provider-instance-id="selectedProviderInstanceId"
       :model-id="selectedModelId"
       :running="isRunning"
+      :queue-refresh-key="queueRefresh"
       @close="closeConsultant"
       @update:provider-instance-id="selectedProviderInstanceId = $event"
       @update:model-id="selectedModelId = $event"
       @run-task="runConsultantTask"
+      @stop-task="stopQueueTask"
+      @view-task="viewQueueTask"
     />
 
     <!-- ===================== AGENT REPORT MODAL ===================== -->

@@ -42,6 +42,30 @@ urlpatterns = [
     path("delete-entry", views.delete_entry, name="delete_entry"),
     path("files", views.files, name="files"),
     path("tasks", views.tasks, name="tasks"),
+    # Task Queue API (TAMPILAN/kontrol UI antrian). Literal route "tasks/queue"
+    # dan sub-route-nya HARUS mendahului "tasks/<str:task_id>" agar tidak
+    # di-shadow (task_id="queue").
+    path("tasks/queue", views.task_queue, name="task_queue"),
+    path(
+        "tasks/queue/<str:task_id>/disable",
+        views.task_queue_disable,
+        name="task_queue_disable",
+    ),
+    path(
+        "tasks/queue/<str:task_id>/enable",
+        views.task_queue_enable,
+        name="task_queue_enable",
+    ),
+    path(
+        "tasks/queue/<str:task_id>/move",
+        views.task_queue_move,
+        name="task_queue_move",
+    ),
+    path(
+        "tasks/queue/<str:task_id>/remove",
+        views.task_queue_remove,
+        name="task_queue_remove",
+    ),
     # Task History (reads .aether/log/ persistent store).
     # PENTING: route literal "tasks/history" HARUS mendahului
     # "tasks/<str:task_id>" agar tidak di-shadow (task_id="history").

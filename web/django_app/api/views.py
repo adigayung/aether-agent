@@ -363,6 +363,64 @@ def cancel_task(request: HttpRequest, service: GatewayService, task_id: str) -> 
 
 
 # ---------------------------------------------------------------------------
+# Task Queue API (TAMPILAN/kontrol UI antrian — belum ada scheduler serial)
+# ---------------------------------------------------------------------------
+@require_http_methods(["GET"])
+@_handle
+def task_queue(request: HttpRequest, service: GatewayService) -> JsonResponse:
+    """GET /api/tasks/queue -> daftar antrian task (pending/running/disabled).
+
+    Satu queue GLOBAL AETHER: sumber data tetap TaskRecord in-memory yang sama
+    dengan GET /api/tasks. Endpoint ini hanya memproyeksikan status antrian.
+    """
+    return _json_response({"tasks": service.list_queue()})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@_handle
+def task_queue_disable(request: HttpRequest, service: GatewayService, task_id: str) -> JsonResponse:
+    """POST /api/tasks/queue/<task_id>/disable -> tandai task jangan dieksekusi.
+
+    Disable != cancel: task tetap ada di antrian (queue_state="disabled") dan
+    tidak dihapus. Hanya berlaku untuk task yang belum running.
+    """
+    return _json_response(service.set_queue_state(task_id, "disabled"))
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@_handle
+def task_queue_enable(request: HttpRequest, service: GatewayService, task_id: str) -> JsonResponse:
+    """POST /api/tasks/queue/<task_id>/enable -> kembalikan task ke pending."""
+    return _json_response(service.set_queue_state(task_id, "pending"))
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@_handle
+def task_queue_move(request: HttpRequest, service: GatewayService, task_id: str) -> JsonResponse:
+    """POST /api/tasks/queue/<task_id>/move -> geser posisi task di antrian.
+
+    Body JSON: {"direction": "up"|"down"}. Hanya task non-running.
+    """
+    body = _parse_json_body(request)
+    direction = body.get("direction")
+    return _json_response({"tasks": service.move_task(task_id, direction)})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@_handle
+def task_queue_remove(request: HttpRequest, service: GatewayService, task_id: str) -> JsonResponse:
+    """POST /api/tasks/queue/<task_id>/remove -> hapus task dari antrian.
+
+    HANYA task non-running (running harus di-Stop/cancel). Ini bukan cancel.
+    """
+    return _json_response(service.remove_task(task_id))
+
+
+# ---------------------------------------------------------------------------
 # Task History API (reads .aether/log/ persistent store)
 # ---------------------------------------------------------------------------
 @require_http_methods(["GET"])

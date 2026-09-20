@@ -110,6 +110,15 @@ class TaskRecord:
     result: Optional[str] = None
     error: Optional[str] = None
     runtime: Dict[str, Any] = field(default_factory=dict)
+    # Status antrian (TAMPILAN/kontrol UI), TERPISAH dari `status` lifecycle.
+    # Nilai: "pending" | "running" | "disabled" | "done".
+    # SENGAJA bukan bagian dari enum TaskStatus core / TERMINAL_STATUSES, agar
+    # TaskState/TaskLifecycle/.aether/log/SSE/task history tidak terpengaruh.
+    # Pada tahap ini belum ada scheduler serial: nilai queue_state hanya
+    # merepresentasikan niat user (mis. disable = jangan dieksekusi).
+    queue_state: str = "pending"
+    # Urutan posisi di antrian (FIFO by creation; Move Up/Down mengubah nilai).
+    queue_order: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -123,6 +132,8 @@ class TaskRecord:
             "result": self.result,
             "error": self.error,
             "runtime": self.runtime,
+            "queue_state": self.queue_state,
+            "queue_order": self.queue_order,
         }
 
 
@@ -173,6 +184,8 @@ class GatewayService:
         # yang dibagikan ke runtime/orchestrator agar loop berhenti di safe
         # boundary. Token dihapus saat eksekusi selesai.
         self._cancel_tokens: Dict[str, "CancellationToken"] = {}
+        # Monotonic counter untuk urutan antrian (di belakang self._lock).
+        self._queue_seq = 0
 
     @property
     def task_executor(self) -> Any:
@@ -810,6 +823,8 @@ class GatewayService:
             session_id=session.session_id,
         )
         with self._lock:
+            self._queue_seq += 1
+            record.queue_order = self._queue_seq
             self._tasks[task_id] = record
             self._prepared[task_id] = prepared
 
@@ -988,6 +1003,12 @@ class GatewayService:
                 record.result = result
             if error is not None:
                 record.error = error
+            # Sinkronisasi queue_state (TAMPILAN antrian) dengan lifecycle status.
+            # Ini HANYA proyeksi UI; tidak mengubah semantics eksekusi Agent.
+            if status == "running":
+                record.queue_state = "running"
+            elif status in ("completed", "failed", "cancelled"):
+                record.queue_state = "done"
 
     def _emit(
         self,
@@ -1019,6 +1040,121 @@ class GatewayService:
         """Daftar task yang dibuat (in-memory)."""
         with self._lock:
             return [r.to_dict() for r in self._tasks.values()]
+
+    # ------------------------------------------------------------------ #
+    # Task Queue (TAMPILAN/kontrol UI — bukan scheduler eksekusi)
+    # ------------------------------------------------------------------ #
+    # CATATAN: pada tahap ini BELUM ada scheduler serial. queue_state adalah
+    # proyeksi UI dari TaskRecord (pending/running/disabled/done) + niat user
+    # (disable = jangan dieksekusi). TIDAK ada TaskManager/queue subsystem
+    # kedua: sumber data tetap self._tasks (satu queue GLOBAL AETHER).
+    _QUEUE_ACTIVE = ("pending", "running", "disabled")
+
+    def list_queue(self) -> List[Dict[str, Any]]:
+        """Daftar antrian task (aktif saja: pending/running/disabled).
+
+        Task terminal (queue_state == "done") TIDAK masuk antrian; riwayatnya
+        tetap tersedia lewat Task History API (existing).
+        """
+        with self._lock:
+            records = sorted(self._tasks.values(), key=lambda r: r.queue_order)
+        return [r.to_dict() for r in records if r.queue_state in self._QUEUE_ACTIVE]
+
+    def set_queue_state(self, task_id: str, queue_state: str) -> Dict[str, Any]:
+        """Set queue_state (disable/enable). TIDAK menyentuh eksekusi Agent.
+
+        Aturan:
+            - "disabled"/"pending" hanya boleh untuk task yang BELUM running
+              (queue_state running ditolak) — agar disable != cancel dan tidak
+              ada dua mekanisme penghentian.
+            - Task terminal (done) tidak dapat diubah.
+
+        Raises:
+            NotFoundError: bila task tidak ditemukan.
+            ValidationError: bila transisi tidak valid.
+        """
+        from api.services import ValidationError as _ValidationError
+
+        with self._lock:
+            record = self._tasks.get(task_id)
+            if record is None:
+                raise NotFoundError(f"Task '{task_id}' tidak ditemukan.")
+            if record.queue_state == "done":
+                raise _ValidationError(
+                    "Task sudah selesai dan tidak dapat diubah di antrian."
+                )
+            if record.queue_state == "running":
+                raise _ValidationError(
+                    "Task sedang berjalan; gunakan Stop (cancel) untuk menghentikannya."
+                )
+            if queue_state not in ("pending", "disabled"):
+                raise _ValidationError("queue_state harus 'pending' atau 'disabled'.")
+            record.queue_state = queue_state
+            return record.to_dict()
+
+    def move_task(self, task_id: str, direction: str) -> List[Dict[str, Any]]:
+        """Geser posisi task non-running di antrian (FIFO default).
+
+        Args:
+            task_id: id task yang digeser.
+            direction: "up" atau "down".
+
+        Raises:
+            NotFoundError: bila task tidak ditemukan.
+            ValidationError: bila task running/terminal atau arah tidak valid.
+        """
+        from api.services import ValidationError as _ValidationError
+
+        with self._lock:
+            record = self._tasks.get(task_id)
+            if record is None:
+                raise NotFoundError(f"Task '{task_id}' tidak ditemukan.")
+            if record.queue_state in ("running", "done"):
+                raise _ValidationError(
+                    "Hanya task yang belum berjalan yang dapat digeser di antrian."
+                )
+            ordered = sorted(
+                [r for r in self._tasks.values() if r.queue_state in self._QUEUE_ACTIVE],
+                key=lambda r: r.queue_order,
+            )
+            idx = next((i for i, r in enumerate(ordered) if r.task_id == task_id), None)
+            if idx is None:
+                raise _ValidationError("Task tidak berada di antrian aktif.")
+            if direction == "up" and idx > 0:
+                swap = ordered[idx - 1]
+                record.queue_order, swap.queue_order = swap.queue_order, record.queue_order
+            elif direction == "down" and idx < len(ordered) - 1:
+                swap = ordered[idx + 1]
+                record.queue_order, swap.queue_order = swap.queue_order, record.queue_order
+            elif direction not in ("up", "down"):
+                raise _ValidationError("direction harus 'up' atau 'down'.")
+        return self.list_queue()
+
+    def remove_task(self, task_id: str) -> Dict[str, Any]:
+        """Hapus task dari daftar/antrian (HANYA non-running).
+
+        Ini BUKAN cancel: cancel memakai CancellationToken existing. Remove
+        hanya membuang task yang belum berjalan dari daftar in-memory.
+
+        Raises:
+            NotFoundError: bila task tidak ditemukan.
+            ValidationError: bila task sedang berjalan.
+        """
+        from api.services import ValidationError as _ValidationError
+
+        with self._lock:
+            record = self._tasks.pop(task_id, None)
+            if record is None:
+                raise NotFoundError(f"Task '{task_id}' tidak ditemukan.")
+            if record.queue_state == "running":
+                # Kembalikan: running tidak boleh dihapus.
+                self._tasks[task_id] = record
+                raise _ValidationError(
+                    "Task sedang berjalan; gunakan Stop (cancel), bukan Remove."
+                )
+            self._prepared.pop(task_id, None)
+            self._cancel_tokens.pop(task_id, None)
+        return {"task_id": task_id, "removed": True}
 
     # ------------------------------------------------------------------ #
     # Task History (from .aether/log/ persistent store)

@@ -170,6 +170,44 @@ export function listTasks() {
   return request("/tasks");
 }
 
+// --- Task Queue (TAMPILAN/kontrol UI antrian) ------------------------------
+// Satu queue GLOBAL AETHER; sumber data = TaskRecord in-memory yang sama
+// dengan GET /api/tasks. Ini BUKAN subsystem kedua.
+
+// GET /api/tasks/queue -> antrian task aktif (pending/running/disabled).
+export function listTaskQueue() {
+  return request("/tasks/queue");
+}
+
+// POST /api/tasks/queue/<id>/disable -> tandai task jangan dieksekusi.
+export function disableQueueTask(taskId) {
+  return request(`/tasks/queue/${encodeURIComponent(taskId)}/disable`, {
+    method: "POST",
+  });
+}
+
+// POST /api/tasks/queue/<id>/enable -> kembalikan task ke pending.
+export function enableQueueTask(taskId) {
+  return request(`/tasks/queue/${encodeURIComponent(taskId)}/enable`, {
+    method: "POST",
+  });
+}
+
+// POST /api/tasks/queue/<id>/move -> geser posisi (direction: up|down).
+export function moveQueueTask(taskId, direction) {
+  return request(`/tasks/queue/${encodeURIComponent(taskId)}/move`, {
+    method: "POST",
+    body: JSON.stringify({ direction }),
+  });
+}
+
+// POST /api/tasks/queue/<id>/remove -> hapus task non-running dari antrian.
+export function removeQueueTask(taskId) {
+  return request(`/tasks/queue/${encodeURIComponent(taskId)}/remove`, {
+    method: "POST",
+  });
+}
+
 // --- Task History / Activity / Report (membaca .aether/log/) ---------------
 // Persistent source of truth = `.aether/log/`. Endpoint di bawah HANYA
 // membaca log (read-only); tidak ada storage/subsystem kedua di frontend.

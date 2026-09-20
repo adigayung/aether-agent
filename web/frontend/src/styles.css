@@ -1031,9 +1031,9 @@ button {
 
 /* ---- Consultant modal ---- */
 .modal.consultant-m {
-  max-width: 860px;
+  max-width: 1120px;
   height: calc(100vh - 48px);
-  width: 90vw;
+  width: 94vw;
   padding: 0;
   display: flex;
   flex-direction: column;
@@ -1041,6 +1041,25 @@ button {
   overflow: hidden;
   border-radius: 14px;
   margin: 24px auto;
+}
+
+/* Body = area di bawah header/mode: chat (kiri) + TASKS panel (kanan).
+   Kontrak modal tetap: .consultant-messages = scroll owner, .consultant-foot
+   = sibling flex-shrink:0 (kini di dalam .consultant-chat). */
+.consultant-body {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+.consultant-chat {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
 }
 
 .consultant-head {
@@ -2640,8 +2659,7 @@ select.input-a {
   background: #1c1830;
   border: 1px solid #2e2850;
   word-break: break-word;
-}
-.consultant-md.md p {
+}.consultant-md.md p {
   color: #f3eefb;
 }
 .consultant-md.md p:last-child {
@@ -2733,4 +2751,177 @@ select.input-a {
   opacity: 0.6;
   filter: none;
 }
+
+/* ---- TASKS panel (di sebelah Consultant Chat) ----
+   SATU queue global AETHER. Panel TIDAK mengambil alih scroll chat:
+   .consultant-queue punya scroll owner sendiri (hanya daftar task). */
+.consultant-queue {
+  flex: 0 0 300px;
+  width: 300px;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border-soft);
+  background: rgba(0, 0, 0, 0.14);
+  overflow: hidden;
+}
+.q-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border-soft);
+  cursor: pointer;
+  user-select: none;
+  flex: 0 0 auto;
+}
+.q-head:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.q-caret {
+  font-size: 11px;
+  color: var(--text-faint);
+  width: 12px;
+}
+.q-title {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 700;
+  color: var(--accent);
+}
+.q-badge {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.q-running-dot {
+  color: var(--accent-2);
+  font-size: 11px;
+  animation: qPulse 1.4s ease-in-out infinite;
+}
+@keyframes qPulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+.q-count {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.q-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+  padding: 6px;
+}
+.q-body::-webkit-scrollbar {
+  width: 9px;
+}
+.q-body::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 8px;
+}
+.q-body::-webkit-scrollbar-thumb:hover {
+  background: var(--bg-hover);
+}
+.q-empty {
+  padding: 14px 10px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.q-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.q-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  cursor: default;
+  transition: background 0.12s ease;
+  min-width: 0;
+}
+.q-item:hover {
+  background: var(--bg-hover);
+}
+.q-item.running {
+  border-color: rgba(34, 211, 238, 0.4);
+  background: rgba(34, 211, 238, 0.07);
+}
+.q-item.disabled {
+  opacity: 0.5;
+}
+.q-ico {
+  font-size: 12px;
+  flex: 0 0 auto;
+}
+.q-ico.running { color: var(--accent-2); }
+.q-ico.pending { color: var(--accent); }
+.q-ico.disabled { color: var(--text-faint); }
+.q-state {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  flex: 0 0 auto;
+  min-width: 54px;
+}
+.q-state.running { color: var(--accent-2); }
+.q-state.pending { color: var(--accent); }
+.q-state.disabled { color: var(--text-faint); }
+.q-pos {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  flex: 0 0 auto;
+}
+.q-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.q-item.disabled .q-text {
+  text-decoration: line-through;
+  color: var(--text-dim);
+}
+.q-id {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  flex: 0 0 auto;
+}
+.q-err {
+  padding: 8px 10px;
+  font-size: 11px;
+  color: #fca5a5;
+}
+/* Responsive: panel tasks turun ke bawah chat pada layar sempit. */
+@media (max-width: 900px) {
+  .consultant-body {
+    flex-direction: column;
+  }
+  .consultant-queue {
+    flex: 0 0 auto;
+    width: 100%;
+    border-left: none;
+    border-top: 1px solid var(--border-soft);
+    max-height: 40%;
+  }
+}
+
 
