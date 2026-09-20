@@ -183,10 +183,10 @@ function closeConsultant() {
 }
 
 // Task Proposal dari Consultant -> task Agent (alur task existing submitTask).
+// Modal Consultant SENGAJA tetap terbuka agar user dapat terus melihat
+// percakapan/aktivitas Consultant setelah task dikirim ke Agent.
 async function runConsultantTask(text) {
   if (!text) return;
-  consultantOpen.value = false;
-  activeNav.value = "agent";
   await submitTask(text);
 }
 

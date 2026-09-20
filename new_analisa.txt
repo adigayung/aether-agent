@@ -1,340 +1,137 @@
 ================================================================================
-AETHER — CONSULTANT CHAT VISUAL DESIGN (KONTRAS & SPACING)
-(Frontend-only: warna bg/text + ruang napas di dalam modal Consultant Chat)
-Scope: web/frontend/src/styles.css saja. Struktur/scroll layout TIDAK diubah.
+PERBAIKAN UX CONSULTANT CHAT (FRONTEND-ONLY) — 3 MASALAH
+AETHER Agent — web/frontend/
 ================================================================================
 
---------------------------------------------------------------------------------
 RINGKASAN
 --------------------------------------------------------------------------------
-Tujuan: menghilangkan kesan "sesak" pada chat box AETHER Consultant dengan
-meningkatkan KONTRAS WARNA (background & text) dan memberi SPACING/ruang napas,
-tanpa mengubah struktur layout, perilaku fitur, atau backend.
+Memperbaiki 3 masalah UX pada Consultant Chat:
+  (1) Klik "Run Task" tidak lagi menutup modal Consultant Chat.
+  (2) Celah/ruang kosong vertikal internal (bawah bar MODE, atas composer) lebih tipis.
+  (3) Box Consultant memiliki ukuran TETAP (lebar & tinggi konsisten) dari chat
+      kosong s/d penuh — tidak lagi memendek saat belum ada percakapan.
 
-Hipotesis lama (font/line-height kecil) TERBANTAHKAN: font sudah 14px dan
-line-height sudah 1.6. Akar masalah sebenarnya = kontras rendah + spacing rapat.
+Semua perubahan FRONTEND-ONLY. Tidak ada perubahan Python/backend, kontrak API,
+Agent execution, task lifecycle, logging, SessionStore/SSE, atau Project Bible.
 
+FILES CHANGED
 --------------------------------------------------------------------------------
-PERUBAHAN DITERAPKAN (web/frontend/src/styles.css)
+1. web/frontend/src/App.vue
+   - Fungsi runConsultantTask(text): menghapus dua baris yang menutup modal dan
+     memindahkan navigasi.
+       SEBELUM:
+         async function runConsultantTask(text) {
+           if (!text) return;
+           consultantOpen.value = false;   // menutup modal Consultant
+           activeNav.value = "agent";      // memindahkan nav ke view agent
+           await submitTask(text);
+         }
+       SESUDAH:
+         async function runConsultantTask(text) {
+           if (!text) return;
+           await submitTask(text);
+         }
+   - Menambah komentar penjelas bahwa modal sengaja dibiarkan terbuka.
+
+2. web/frontend/src/styles.css
+   - .modal.consultant-m:
+       max-height: calc(100vh - 100px)  ->  height: calc(100vh - 48px)
+       margin: 50px auto                ->  margin: 24px auto
+     (max-width:860px; width:90vw; display:flex; flex-direction:column;
+      overflow:hidden; border-radius:14px TETAP / tidak diubah)
+   - .consultant-head:      padding 14px 18px -> 11px 18px
+   - .consultant-messages:  padding 18px 22px -> 12px 22px ; gap 16px -> 12px
+   - .consultant-modes:     padding 10px 18px -> 8px 18px
+   - .consultant-foot:      padding 12px 18px -> 10px 18px
+
+ROOT CAUSE
 --------------------------------------------------------------------------------
-1) Bubble AETHER (.consultant-md, class "consultant-md md") dan bubble generik
-   (.ctext):
-   - background  : var(--bg-panel) #14121f  -> #1c1830   (lebih terang, terpisah dari latar modal)
-   - border      : var(--border-soft) #221d36 -> #2e2850 (lebih jelas)
-   - padding     : 9px 13px                 -> 12px 16px
+(1) Handler event `run-task` di App.vue (dipanggil oleh ConsultantChat.vue setelah
+    klik "Run Task") secara eksplisit menutup modal:
+       consultantOpen.value = false;
+       activeNav.value = "agent";
+    ConsultantChat.vue sendiri hanya emit("run-task", lastProposal.value) dan TIDAK
+    menutup modal. Modal dikontrol App.vue via v-show="consultantOpen". Jadi satu-
+    satunya penyebab modal tertutup adalah dua baris di handler App.vue.
 
-2) Bubble user (.cmsg.user .ctext):
-   - background  : rgba(139,92,246,0.22)    -> rgba(139,92,246,0.30)  (#8b5cf64d)
-   - border-color: rgba(139,92,246,0.40)    -> rgba(139,92,246,0.55)  (#8b5cf68c)
+(2) Celah vertikal internal terasa lebar karena padding/gap vertikal yang relatif
+    besar (.consultant-head 14px, .consultant-messages 18px, .consultant-modes 10px,
+    .consultant-foot 12px, gap pesan 16px). Keluhan "margin atas/bawah lebar"
+    berasal dari celah INTERNAL ini, bukan dari margin box (margin 50px auto memang
+    simetris).
 
-3) Warna teks:
-   - .ctext                     : #ffffff -> #f3eefb (putih lembut)
-   - .cmsg.user .ctext          : #ffffff -> #f3eefb
-   - .consultant-md.md p        : var(--text) #ece6f5 -> #f3eefb
-   Catatan: heading markdown (.md h1..h6) tetap memakai var(--text) (#ece6f5),
-   sudah lembut, tidak diubah.
+(3) Modal memakai `max-height` (bukan `height`) sehingga tingginya mengikuti isi:
+    saat chat kosong modal memendek, saat penuh memanjang -> ukuran box tidak
+    konsisten.
 
-4) Label role (.crole): #b0d4f0 -> #cdb9f5 (lebih kontras di latar gelap),
-   margin-bottom 2px -> 3px.
-
-5) Spacing / ruang napas:
-   - .consultant-messages  : gap 10px -> 16px ; padding 14px 18px -> 18px 22px
-   - .cmsg                 : gap 3px  -> 5px
-   - .ctext / .consultant-md: padding 9px 13px -> 12px 16px
-
-6) Batas panjang baris: .cmsg max-width 85% -> 78% (baris lebih nyaman dibaca).
-
+FIX
 --------------------------------------------------------------------------------
-YANG SENGAJA TIDAK DIUBAH (struktur/scroll/perilaku)
---------------------------------------------------------------------------------
-- .modal.consultant-m : max-width 860px; width 90vw; max-height calc(100vh-100px);
-  margin 50px auto; flex column; overflow hidden  -> TIDAK diubah.
-- .consultant-messages tetap scroll owner (flex:1 1 auto; min-height:0; overflow-y:auto).
-- .consultant-foot tetap sibling dengan flex-shrink:0.
-- .consultant-proposal tetap DI DALAM .consultant-messages.
-- Tidak ada min-height baru pada .consultant-messages.
-- Tidak ada perubahan pada ConsultantChat.vue (markup/stuktur) — hanya CSS.
-- Perilaku fitur (mode Quick/Investigate, provider/model, attach image,
-  Task Proposal + Run Task, keyboard Enter=newline / Shift+Enter=kirim,
-  auto-scroll) TIDAK disentuh.
-- Tidak ada dependency/icon library baru. Tidak ada refactor.
+(1) Hapus `consultantOpen.value = false;` dan `activeNav.value = "agent";` dari
+    runConsultantTask. submitTask() TIDAK menyentuh consultantOpen, sehingga task
+    tetap terkirim ke Agent sementara modal Consultant tetap terbuka dan tetap
+    berada di percakapan Consultant. (Tidak ditambahkan indikator baru agar tetap
+    minimal; prioritas utama modal tetap terbuka terpenuhi.)
 
---------------------------------------------------------------------------------
-FILE DIUBAH
---------------------------------------------------------------------------------
-- web/frontend/src/styles.css   (hanya warna bg/text + spacing; 2 blok rules)
-- new_analisa.txt               (catatan ini)
-(Tidak ada file Python/backend, App.vue, api.js, atau komponen lain yang diubah.)
+(2) Pangkas padding/gap vertikal internal secara proporsional (nilai di atas),
+    tanpa mengubah horizontal padding maupun struktur layout. Tetap rapi, tidak
+    sesak.
 
+(3) Ganti `max-height: calc(100vh - 100px)` menjadi `height: calc(100vh - 48px)`
+    dan turunkan margin box menjadi `24px auto` agar total tinggi + margin tetap
+    <= viewport (100vh - 48px + 2*24px = 100vh) sehingga tidak overflow pada
+    viewport pendek. Modal kini berukuran tetap sejak dibuka; .consultant-messages
+    (flex:1 1 auto; min-height:0; overflow-y:auto) mengisi sisa tinggi dan tetap
+    menjadi satu-satunya scroll owner.
+
+STRUKTUR YANG DIPERTAHANKAN (tidak diubah)
 --------------------------------------------------------------------------------
+- .consultant-messages tetap scroll owner (overflow-y:auto; flex:1 1 auto; min-height:0).
+- .consultant-foot tetap SIBLING dengan flex-shrink:0.
+- .consultant-proposal tetap DI DALAM .consultant-messages (tidak dipindahkan).
+- Perilaku fitur lain tidak berubah: mode Quick/Investigate, provider/model
+  selection, attach image, keyboard Enter=newline / Shift+Enter=kirim, auto-scroll,
+  tool activity, Task Proposal + Run Task.
+
 VALIDASI
 --------------------------------------------------------------------------------
-- Build: `node node_modules/vite/bin/vite.js build` dari web/frontend
-  -> 30 modules transformed, 0 error, sukses.
-- Bundle dist/assets/index-Bkf5H59I.css terverifikasi memuat nilai baru:
-  padding:18px 22px; gap:16px; max-width:78%; color:#cdb9f5;
-  color:#f3eefb; padding:12px 16px; background:#1c1830; border:1px solid #2e2850;
-  background:#8b5cf64d; border-color:#8b5cf68c.
-- Bundle juga memastikan struktur tetap: .modal.consultant-m max-width:860px,
-  .consultant-foot flex-shrink:0, .consultant-proposal utuh.
-- `git status --porcelain` => hanya ` M web/frontend/src/styles.css`
-  (tidak ada file Python/backend yang berubah).
+- Build produksi: dari web/frontend dijalankan
+    node node_modules/vite/bin/vite.js build
+  Hasil: vite v5.4.21, 30 modules transformed, built in ~1.09s, 0 error.
+  (npm tidak tersedia di subprocess AETHER; build via node langsung.)
+- Verifikasi bundle keluaran (dist/assets/index-*.css) memuat nilai baru:
+    .modal.consultant-m{max-width:860px;height:calc(100vh - 48px);width:90vw;...;margin:24px auto}
+    .consultant-head{...padding:11px 18px;...}
+    .consultant-messages{...padding:12px 22px;...gap:12px}
+    .consultant-modes{...padding:8px 18px;...}
+    .consultant-foot{...padding:10px 18px;...}
+- Verifikasi source App.vue: runConsultantTask hanya memanggil submitTask(text);
+  tidak lagi menyentuh consultantOpen/activeNav.
+- Tidak ada warning Vue baru terkait computed/modal (tidak ada penulisan ke
+  computed read-only yang ditambahkan).
 
+KONFIRMASI TIDAK ADA PERUBAHAN BACKEND
 --------------------------------------------------------------------------------
-DAMPAK ARSITEKTUR
---------------------------------------------------------------------------------
-- Nol. Perubahan murni presentational (CSS) di dalam modal Consultant Chat.
-- Tidak mengubah API, task lifecycle, SessionStore/SSE, .aether/log, provider,
-  maupun Agent execution.
+- Tidak ada file Python yang disentuh (tidak ada perubahan pada src/agent_ai/**,
+  web/django_app/**, api.js, orchestrator, task creation, Project Bible, logging,
+  SessionStore/SSE, TaskState/state machine).
+- Tidak ada perubahan kontrak API dan tidak ada dependensi baru.
+- Hanya 2 file berubah: web/frontend/src/App.vue dan web/frontend/src/styles.css.
 
---------------------------------------------------------------------------------
 ACCEPTANCE CRITERIA
 --------------------------------------------------------------------------------
-- Bubble AETHER & bubble user terlihat jelas terpisah dari latar modal.        [OK]
-- Warna teks nyaman (#f3eefb, bukan putih murni), label role lebih jelas.     [OK]
-- Spacing antar pesan / padding bubble / jarak blok lebih lega.               [OK]
-- Panjang baris dibatasi (max-width 78%).                                     [OK]
-- Build frontend sukses 0 error.                                              [OK]
-- Tidak ada file Python/backend berubah.                                      [OK]
-- Ringkasan ditulis ke new_analisa.txt.                                       [OK]
+[x] Item #1: Klik "Run Task" -> modal Consultant TIDAK tertutup; percakapan +
+    proposal tetap tampil; task tetap terkirim ke Agent (submitTask dipanggil).
+[x] Item #2: Celah vertikal di bawah bar MODE dan di atas composer lebih tipis
+    (padding/gap vertikal berkurang) tanpa layout rusak.
+[x] Item #3: Buka modal dengan chat kosong -> ukuran box tetap (height fixed)
+    seperti saat chat penuh, tidak memendek.
+[x] Struktur modal tetap: scroll hanya di .consultant-messages; composer tetap di
+    bawah; .consultant-proposal tetap di dalam .consultant-messages dan ikut scroll.
+[x] Fitur lain tidak berubah (mode, attach image, keyboard, provider/model, tools).
+[x] Build frontend sukses: 30 modules, 0 error.
 
-================================================================================
-AETHER — CONSULTANT VISION / MULTIMODAL IMAGE SUPPORT
-(Provider content-parts + Consultant image attach)
-Mode: ADDITIVE. Tidak ada arsitektur stabil yang di-rewrite.
-================================================================================
-
+CATATAN
 --------------------------------------------------------------------------------
-RINGKASAN
---------------------------------------------------------------------------------
-Tujuan: mengaktifkan kemampuan vision untuk AETHER Consultant dengan risiko
-minimal:
-  (1) menambah dukungan pesan multimodal (image content-parts) pada layer provider
-      yang SUDAH ADA, dan
-  (2) memungkinkan user melampirkan/mengirim image di chat AETHER Consultant,
-      sehingga image diteruskan ke LLM dan Consultant dapat "melihat"-nya.
-
-Hasil: SELESAI. Image dikirim sebagai content-parts format OpenAI-compatible
-(image_url dengan data URL base64) untuk provider OpenAI-compatible (OpenRouter,
-DeepSeek, OpenAI, dsb.), dan sebagai field `images` untuk Ollama. Pesan text-only
-berperilaku persis seperti sebelumnya (backward compatible). Modul vision existing
-(ImagePreprocessor) dipakai apa adanya untuk memproses/resize/kompresi gambar.
-
---------------------------------------------------------------------------------
-1. OBSERVATION (kondisi awal, terverifikasi dari source)
---------------------------------------------------------------------------------
-- src/agent_ai/vision/ LENGKAP dan provider-agnostic:
-    * input.py       : ImageInputLoader (deteksi MIME magic-bytes; boundary path).
-    * preprocessing.py: ImagePreprocessor.process() -> ProcessedImage +
-                        _build_payload() => {"type":"image","mime_type":...,
-                        "encoding":"base64","data":...} (payload internal AETHER).
-    * policy.py      : VisionPolicy + VISION_REQUIRED_CAPABILITIES (VISION+MULTIMODAL).
-    * models.py      : ImageInput/ProcessedImage/VisionRequest/VisionConfig.
-  Satu-satunya konsumen sebelumnya: scripts/check_vision.py.
-- src/agent_ai/providers/base.py: Message = {role, content:str} -> TEXT-ONLY.
-- src/agent_ai/providers/openai_compatible.py: _build_payload mengirim messages
-  text-only; literal 'image_url' = 0 hasil di repo.
-- src/agent_ai/core/types.py: ChatMessage.content = Optional[str] (text-only).
-- src/agent_ai/consultant/service.py: consult(message, provider, root, session_id,
-  max_steps, mode) -> memanggil orchestrator.run_continuous_loop(task_text).
-- web/django_app/api/{services.py,views.py}: consultant_consult menerima JSON
-  (message/session_id/provider_instance_id/model_id/project_id/mode).
-- web/frontend/src/{api.js, components/ConsultantChat.vue}: consult() text-only;
-  composer = <textarea> (sudah auto-grow dari perbaikan sebelumnya).
-
---------------------------------------------------------------------------------
-2. PROVIDER LAYER — Message content-parts (fondasi, ADDITIVE)
---------------------------------------------------------------------------------
-File: src/agent_ai/providers/base.py
-- Message menambah field opsional: parts: Optional[List[Dict[str, Any]]] = None.
-  Format internal AETHER provider-agnostic:
-    {"type":"image","mime_type":...,"encoding":"base64","data":...}
-  to_dict() menyertakan `parts` HANYA bila ada (text-only tidak berubah).
-
-File: src/agent_ai/providers/openai_compatible.py
-- _build_payload kini melewatkan setiap pesan melalui _to_openai_message().
-- _to_openai_message(): pesan tanpa parts -> diteruskan APA ADANYA (content tetap
-  string; perilaku request text-only identik dengan sebelumnya).
-  Pesan dengan parts image -> content diubah menjadi content blocks:
-    [{"type":"text","text":<content>},
-     {"type":"image_url","image_url":{"url":"data:<mime>;base64,<data>"}}]
-- _to_openai_content_part(): konversi satu part internal -> content part OpenAI.
-  Part {"type":"audio"} dsb. diabaikan; bagian teks tetap dipertahankan.
-- Streaming: provider ini TIDAK memakai jalur streaming (semua request via
-  requests.post non-stream). Tidak perlu fallback streaming khusus image.
-
-File: src/agent_ai/providers/ollama.py (degradasi aman, additive)
-- _to_ollama_message(): part image internal -> field `images` (list base64)
-  sesuai format multimodal Ollama; content list (bentuk OpenAI) -> teks gabungan.
-  Pesan text-only diteruskan apa adanya.
-
-Keputusan: format OpenAI-compatible `image_url` dipakai karena semua provider
-cloud AETHER (OpenRouter/DeepSeek/OpenAI) dulunya memakai skema OpenAI; Ollama
-diberi adapter terpisah agar tetap benar bila dipakai untuk vision.
-
---------------------------------------------------------------------------------
-3. CORE PIPELINE — membawa parts tanpa mengubah kontrak tool/loop
---------------------------------------------------------------------------------
-File: src/agent_ai/core/types.py
-- ChatMessage menambah field opsional: parts (content blocks image).
-- to_provider_dict() menyertakan `parts` (via _with_parts()) bila ada; pesan
-  text-only tidak berubah (tanpa field `parts`).
-- to_dict() menyertakan `parts` bila ada (untuk audit/debug).
-
-File: src/agent_ai/core/history.py
-- append_user_message(content, parts=None): menerima parts opsional.
-
-File: src/agent_ai/core/orchestrator.py
-- run_continuous_loop(task, ..., user_parts=None): parameter ADDITIVE.
-  user_parts diteruskan ke history.append_user_message(task, parts=user_parts).
-  Tidak ada perubahan pada keputusan completion, tool-calling, cancel, dan
-  jalur legacy run(). Semua pemanggil lama (tanpa user_parts) berperilaku sama.
-
-CATATAN BOUNDARY: core/ TIDAK meng-import vision (diverifikasi search: 0 hasil).
-Konversi payload vision -> content blocks terjadi di provider adapter; core hanya
-membawa struktur `parts` provider-agnostic.
-
---------------------------------------------------------------------------------
-4. CONSULTANT PIPELINE — images diproses modul vision existing
---------------------------------------------------------------------------------
-File: src/agent_ai/consultant/service.py
-- consult(..., images=None): parameter ADDITIVE.
-- _build_image_parts(images): modul vision existing dipakai APA ADANYA:
-    * decode base64 (validate=True) -> bytes,
-    * ImagePreprocessor().process(data, mime_type=mime) -> resize/kompresi bounded,
-    * kembalikan payload provider-agnostic ProcessedImage.payload sebagai part.
-  Tidak ada logika image baru/duplikat; tidak ada provider baru/loop baru.
-- Images dilampirkan sebagai parts pada pesan user awal lewat
-  orchestrator.run_continuous_loop(..., user_parts=...).
-- Tanpa images -> user_parts=None -> perilaku text-only tidak berubah.
-- Error vision (InvalidImageError/UnsupportedImageFormatError) diteruskan sebagai
-  exception jelas (bukan silent-fail).
-
---------------------------------------------------------------------------------
-5. API LAYER — field `images` opsional (JSON base64, minimal)
---------------------------------------------------------------------------------
-File: web/django_app/api/views.py (consultant_consult)
-- Meneruskan body.get("images") ke service.consult(images=...).
-
-File: web/django_app/api/services.py (GatewayService.consult + _normalize_consult_images)
-- consult(..., images=None): ADDITIVE.
-- _normalize_consult_images(): validasi bentuk (list of dict), batas 8 gambar,
-  batas ukuran per gambar (_MAX_CONSULT_IMAGE_BYTES = 8_000_000 estimasi decoded).
-  Bentuk item: {"data": <base64>, "mime_type": <str>, "filename": opsional}.
-- Error dipetakan ke ValidationError (HTTP 400) dengan pesan jelas:
-    * images bukan array -> 400,
-    * gambar invalid / format tak didukung (VisionError/ValueError) -> 400.
-- Varian JSON base64 dipilih (tanpa multipart, tanpa endpoint/sistem baru).
-
---------------------------------------------------------------------------------
-6. FRONTEND — attach image di chat Consultant
---------------------------------------------------------------------------------
-File: web/frontend/src/api.js
-- consult(message, {..., images}) -> mengirim body.images bila ada (tidak dikirim
-  bila kosong -> backward compatible).
-
-File: web/frontend/src/components/ConsultantChat.vue
-- Tambah tombol attach (`.attach-btn`, ikon paperclip SVG) di composer.
-- <input type="file" accept="image/jpeg,image/png,image/webp" multiple> tersembunyi.
-- onFilesPicked(): validasi tipe (jpeg/png/webp), batas 8 gambar, baca via
-  FileReader.readAsDataURL -> simpan {name, mimeType, dataUrl, base64}.
-- Preview thumbnail (`.attach-strip`/`.attach-item`/`.attach-thumb`) + tombol
-  hapus per gambar (`.attach-remove`) + removeAttachment(index).
-- send(): mengirim images bersama pesan berikutnya; pesan user menyimpan
-  msg.images (dataUrl) agar bubble user menampilkan thumbnail yang terkirim.
-- startNewSession(): membersihkan attachments.
-- Struktur modal DIPERTAHANKAN: .consultant-messages tetap scroll container,
-  .consultant-proposal tetap di dalamnya, mode selector/provider/model/Run Task/
-  tool activity tidak berubah. Composer kini punya baris preview + baris input.
-
-File: web/frontend/src/styles.css
-- .consultant-foot -> flex column (preview di atas, baris input di bawah);
-  .consultant-foot .attach-row -> flex row (attach-btn + textarea + send-btn).
-- Kelas baru: .attach-input, .attach-btn, .attach-strip, .attach-item,
-  .attach-thumb, .attach-remove, .cmsg-images, .cmsg-thumb (gaya AETHER dark,
-  compact). Tidak mengubah mekanisme scroll modal.
-
---------------------------------------------------------------------------------
-7. FILES CHANGED
---------------------------------------------------------------------------------
-src/agent_ai/providers/base.py
-src/agent_ai/providers/openai_compatible.py
-src/agent_ai/providers/ollama.py
-src/agent_ai/core/types.py
-src/agent_ai/core/history.py
-src/agent_ai/core/orchestrator.py
-src/agent_ai/consultant/service.py
-web/django_app/api/services.py
-web/django_app/api/views.py
-web/frontend/src/api.js
-web/frontend/src/components/ConsultantChat.vue
-web/frontend/src/styles.css
-scripts/check_consultant_vision.py   (baru, verifier)
-new_analisa.txt                      (file ini)
-
-TIDAK disentuh: AgentOrchestrator logic/completion, run_continuous_loop semantics
-(hanya param additive), ToolRegistry, PermissionPolicy, TaskState/state machine,
-SessionStore/SSE, .aether/log, Project Bible store, AgentRuntime.
-
---------------------------------------------------------------------------------
-8. VALIDATION
---------------------------------------------------------------------------------
-- py_compile semua file Python yang diubah: OK.
-- python scripts/check_consultant_vision.py : SELURUH LULUS
-    [1]  text-only payload tidak berubah
-    [1b] image content-part -> image_url data URL
-    [1c] part tak didukung diabaikan
-    [2]  ChatMessage/ConversationHistory membawa parts
-    [3]  run_continuous_loop meneruskan user_parts
-    [4]  ConsultantService memproses image + lampirkan ke pesan user
-    [5]  consult tanpa image tetap text-only
-    [5b] gambar tidak valid ditolak jelas (InvalidImageError)
-    [6]  Gateway meneruskan images
-    [6b/6c] validasi images + backward compatible
-    [7]  frontend attach image (api.js + ConsultantChat.vue)
-- python scripts/check_consultant.py : LULUS (1..7, termasuk mode & boundary).
-- python scripts/check_vision.py     : LULUS (1..15, boundary & provider-agnostic).
-- python scripts/check_conversation_history.py : LULUS.
-- python scripts/check_continuous_loop.py      : LULUS.
-- python scripts/check_orchestrator.py         : LULUS.
-- python scripts/check_provider_tools.py       : LULUS.
-- python scripts/check_session.py              : LULUS.
-- python scripts/check_task_lifecycle.py       : LULUS.
-- python scripts/check_executor.py             : LULUS.
-- python scripts/check_streaming.py            : LULUS (dengan DJANGO_ALLOWED_HOSTS).
-- python scripts/check_django_gateway.py       : LULUS (dengan DJANGO_ALLOWED_HOSTS).
-- Frontend build: `node node_modules/vite/bin/vite.js build` dari web/frontend
-  -> 30 modules transformed, 0 errors. (npm tidak tersedia di subprocess AETHER.)
-
-Pre-existing (BUKAN akibat perubahan ini; diverifikasi via `git stash`):
-- check_provider.py gagal: DeepSeek dianggap tersedia padahal API key kosong
-  (state credential/.env) — gagal identik pada HEAD tanpa perubahan.
-- check_workbench.py step [2] gagal pada assertion lama "Agent Workspace".
-- check_architecture.py item [5] gagal pada projects/environment.py (subprocess
-  probing). Item [1..4] LULUS.
-- check_ollama_native_tools.py SKIP (server Ollama tidak berjalan).
-
---------------------------------------------------------------------------------
-9. ARCHITECTURE IMPACT
---------------------------------------------------------------------------------
-- ADDITIVE. Tidak ada provider/service/loop/routing/store baru.
-- Consultant tetap memakai loop & provider yang sama (run_continuous_loop).
-- Modul vision existing dipakai apa adanya (tanpa duplikasi logika image).
-- Kontrak tool & PermissionPolicy Consultant tidak berubah.
-- core/ tidak bergantung ke vision; src/agent_ai tidak bergantung ke Django;
-  gateway hanya meneruskan data.
-- Pemetaan format: internal AETHER `parts` -> OpenAI `image_url` data URL
-  (cloud/OpenAI-compatible) dan -> Ollama `images` (list base64).
-
---------------------------------------------------------------------------------
-10. REMAINING WORK / CATATAN
---------------------------------------------------------------------------------
-- Routing capability: ModelCapability.VISION/MULTIMODAL TIDAK dipakai untuk
-  memvalidasi/memilih model pada jalur consult (routing model tidak diubah sesuai
-  constraint). Bila model non-vision dipakai, provider akan mengembalikan error
-  HTTP (dipetakan ke ProviderAPIError) dengan pesan yang dapat dibaca user —
-  bukan silent-fail. Validasi capability-aware dapat ditambahkan di iterasi lain.
-- Batas gambar: maksimum 8 gambar per pesan, estimasi 8 MB per gambar (decoded).
-- Persistensi gambar tidak disimpan ke .aether/log (hanya ada di payload request
-  dan di state chat frontend selama sesi browser).
-- Web access Consultant tetap belum tersedia (tidak diubah di task ini).
+- Pada viewport sangat pendek, margin box 24px auto + height calc(100vh - 48px)
+  menjaga modal tepat di dalam viewport (tidak overflow).
+- Tidak ada subsystem/komponen/dependency baru; perubahan minimal & tepat sasaran.
