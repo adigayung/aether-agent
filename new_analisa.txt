@@ -1,162 +1,280 @@
 ===========================================================================
-AETHER — REAL CODE EDITOR (MONACO) VIA FILE EXPLORER
-Task: "Open with Editor" -> modal editor Monaco di dalam Workbench
-Status: IMPLEMENTED + VERIFIED (deterministik, tanpa browser/LLM)
+AETHER — AGENT ACTIVITY PANEL: PRESENTASI KECIL (SPACING + WARNA)
+Task: (1) 1 spasi nama tool + command di baris Result, (2) timestamp putih,
+      (3) OBSERVATION orange muda, (4) pesan AGENT light cyan/soft blue.
+Status: FIXED + VERIFIED (frontend-only, deterministik; build + bundle check)
 ===========================================================================
 
-1. FILE YANG DIUBAH / DITAMBAH
+1. FILE YANG DIUBAH
 ---------------------------------------------------------------------------
-Backend (ADDITIVE, memakai tool AETHER existing):
-  M web/django_app/api/services.py
-      + GatewayService._active_project_root()  (helper root active project)
-      + GatewayService.read_project_file(path)  -> ReadFileTool AETHER
-      + GatewayService.write_project_file(path, content) -> WriteFileTool AETHER
-  M web/django_app/api/views.py
-      + file_content(request, service)  (GET baca / POST simpan)
-  M web/django_app/api/urls.py
-      + path("files/content", views.file_content, name="file_content")
+Frontend (frontend-only; TIDAK ada perubahan backend/Python):
 
-Frontend:
-  M web/frontend/package.json / package-lock.json  (+ monaco-editor dependency)
-  M web/frontend/src/api.js
-      + readFileContent(path), writeFileContent(path, content)
-  M web/frontend/src/App.vue
-      + import + mount <CodeEditor> (v-if editorOpen, :key per path)
-      + state editorOpen / editorFile
-      + openFileInEditor() = buka modal editor (menggantikan placeholder dummy)
-      + binding @open-file-editor dari FileExplorer (action "Open with Editor")
+  M web/frontend/src/components/AgentActivity.vue
+      - Baris TOOL   : separator nama tool + target/argument diperbaiki.
+      - Baris RESULT : separator nama tool + target/argument diperbaiki.
+      (Hanya ekspresi render; struktur/kondisi v-if TIDAK berubah.)
+
   M web/frontend/src/styles.css
-      + section "CODE EDITOR (Monaco)": .modal.editor-m, .ed-head, .ed-title,
-        .ed-path, .ed-actions, .ed-save, .ed-body, .ed-monaco, .ed-msg,
-        .ed-status, .ed-lang, .ed-pos, .ed-err-inline, .modal.ed-confirm,
-        media query <=900px
-  A web/frontend/src/components/CodeEditor.vue      (modal editor Monaco)
-  A web/frontend/src/monacoSetup.js                 (worker + theme AETHER)
-  A web/frontend/src/editorLanguages.js             (extension -> language)
-  A scripts/check_code_editor.py                    (verifier task ini)
+      - Tambah 3 CSS var di :root (single source of truth warna aktivitas):
+          --act-ts:    #eae6f5;  /* timestamp: near-white */
+          --act-agent: #8ad7ef;  /* pesan AGENT: light cyan / soft blue */
+          --act-obs:   #eab984;  /* konten OBSERVATION: soft orange muda */
+      - .act-ts memakai var(--act-ts) (sebelumnya var(--text-faint) = abu).
+      - Tambah rule .act-row.agent .act-text { color: var(--act-agent); }
+        dan .act-row.observation .act-text { color: var(--act-obs); }
 
-Tidak diubah: FileExplorer.vue (action existing utuh), ChangesPanel.vue,
-AgentActivity/QueuePanel/ConsultantChat, runtime/loop/orchestrator, provider,
-permission policy, task lifecycle, .aether/log, SessionStore/SSE.
+Catatan: `git diff --stat -- src web/django_app` KOSONG -> backend/Python,
+API, ToolExecutor, AgentRuntime, task lifecycle, logging/.aether/log,
+SessionStore/SSE, queue, dan payload event TIDAK disentuh.
 
-2. DEPENDENCY YANG DITAMBAHKAN
+2. SUMBER FORMATTING COMMAND YANG DIPERBAIKI (ROOT CAUSE)
 ---------------------------------------------------------------------------
-  monaco-editor@0.52.2  (dependencies frontend, dipasang via
-  "C:\Program Files\nodejs\npm.CMD" install monaco-editor@0.52.2 --save
-  karena `npm` tidak ada di PATH subprocess AETHER).
-  Tidak ada dependency lain. Tidak ada LSP / language server.
+Lokasi: web/frontend/src/components/AgentActivity.vue (template timeline).
 
-3. BAGAIMANA "Open with Editor" TERHUBUNG DENGAN EXPLORER
+SEBELUM (baris RESULT):
+  {{ item.success ? "✓" : "✗" }} {{ item.tool }}<template v-if="item.target"> <span class="act-target">{{ item.target }}</span></template>
+SEBELUM (baris TOOL):
+  <span class="fn">{{ item.tool }}</span><template v-if="item.target"> <span class="act-target">{{ item.target }}</span></template>
+
+Akar masalah: SATU spasi pemisah itu adalah text-node whitespace-only yang
+menjadi ANAK PERTAMA di dalam <template v-if="item.target">. Vue 3 (mode
+whitespace default "condense") MENGHAPUS leading/trailing whitespace node,
+sehingga spasi tersebut hilang saat compile. Bukti dari bundle sebelum fix:
+  ... I(m.tool),1), m.target?(...) ? w("span", ..., I(m.target),1) ...
+(tidak ada teks " " sebelum target) -> hasil "run_commandpython ...".
+
+SESUDAH (fix, dipakai di TOOL dan RESULT):
+  ...<span class="act-target">{{ " " + item.target }}</span>...
+Spasi dipindah KE DALAM ekspresi interpolasi, sehingga menjadi node
+interpolasi (bukan whitespace-only text node) dan PASTI ter-render.
+Spasi tetap KONDISIONAL: hanya muncul bila item.target ada (masih di dalam
+v-if="item.target"); bila argument kosong -> tidak ada spasi tambahan.
+
+Bukti dari bundle SETELAH fix (dist/assets/index-34IyEPZa.js):
+  TOOL   : w("span", sv, I(" "+m.target), 1)
+  RESULT : ... st(I(m.success?"✓":"✗")+" "+I(m.tool),1), ... w("span", iv, I(" "+m.target),1)
+=> "✓ run_command" + " " + "python scripts/check_code_editor.py".
+
+3. WARNA / STYLE YANG DIPAKAI
 ---------------------------------------------------------------------------
-- FileExplorer.vue sudah punya item context menu "Open with Editor" yang
-  meng-emit("open-file-editor", { path, name }) dengan path relatif dari
-  Explorer (childPath(currentPath, entry.name)) -- TIDAK ada mekanisme
-  path/workspace baru.
-- Sebelumnya emit itu tidak punya listener (dead action). Sekarang:
-      <FileExplorer ... @open-file="openFileInEditor"
-                        @open-file-editor="openFileInEditor" />
-  Klik kiri file (seleksi + open) dan tombol Edit di panel CHANGES juga
-  memakai handler yang sama, sehingga placeholder dummy lama
-  ("File: <path>" di status) benar-benar digantikan editor nyata.
-- Alur lengkap:
-      Explorer -> klik kanan file -> "Open with Editor"
-      -> emit open-file-editor -> App.openFileInEditor()
-      -> editorFile={path,name}, editorOpen=true
-      -> <CodeEditor :key="path"> mount
-      -> GET /api/files/content?path=... (ReadFileTool AETHER)
-      -> Monaco menampilkan isi file dengan language sesuai extension.
-- Boundary: path tetap divalidasi di dalam active project root oleh
-  ReadFileTool/WriteFileTool AETHER yang sama dengan Explorer
-  (path traversal -> 400, tanpa active project -> 404).
+  Timestamp [HH:MM:SS] : --act-ts    = #eae6f5 (near-white, opacity tinggi)
+                         .act-ts { color: var(--act-ts); }
+  OBSERVATION (konten) : --act-obs   = #eab984 (soft orange muda, non-neon)
+                         .act-row.observation .act-text { color: var(--act-obs); }
+  AGENT (pesan)        : --act-agent = #8ad7ef (light cyan / soft blue, non-neon)
+                         .act-row.agent .act-text { color: var(--act-agent); }
+  TIDAK memakai hijau untuk AGENT (hijau tetap untuk success/status:
+  .act-text.ok / .act-label.result / chip completed).
 
-4. BAGAIMANA SAVE / DISCARD / CANCEL BEKERJA
+Catatan cakupan: warna hanya menyasar KONTEN aktivitas:
+  - .act-row.agent  -> HANYA commentary (kind "agent").
+  - .act-row.observation -> seluruh konten observation (tool → summary).
+Label, timestamp, TOOL/RESULT, status (Task started/completed/failed/
+cancelled), dan report (.md .act-report) TIDAK berubah -> tidak ada regresi.
+
+4. VALIDASI
 ---------------------------------------------------------------------------
-- Dirty state: model Monaco memakai "versi tersimpan"
-  (model.getAlternativeVersionId()). Buka file TIDAK membuat dirty; undo
-  kembali ke kondisi tersimpan juga mengembalikan status "Saved".
-- Save (header atau Ctrl/Cmd+S):
-      editor.getValue() -> POST /api/files/content {path, content}
-      -> WriteFileTool AETHER (atomic write, boundary sama)
-      -> sukses: baseline versi diperbarui, dirty=false ("Saved"), emit saved
-      -> gagal: file TIDAK dianggap tersimpan, isi editor dipertahankan,
-         error tampil di footer editor + diteruskan ke banner error AETHER
-         yang sudah ada (tidak ada notification system baru).
-- Close (tombol X, klik backdrop, atau Escape):
-      tidak dirty  -> modal langsung tertutup (Monaco di-dispose)
-      dirty        -> modal konfirmasi "Unsaved Changes" AETHER:
-                        [Save]    -> simpan; berhasil = tutup, gagal = editor
-                                     tetap terbuka (tidak dianggap tersimpan)
-                        [Discard] -> buang perubahan, tutup
-                        [Cancel]  -> tetap di editor (perubahan dipertahankan)
-      Escape saat konfirmasi terbuka = Cancel.
-- Tidak ada jalur close yang menutup editor tanpa konfirmasi saat dirty
-  (X, backdrop, Escape, Ctrl+S semuanya lewat requestClose()).
+  Build produksi frontend (Windows, npm tidak tersedia):
+    cd web/frontend && node node_modules/vite/bin/vite.js build
+    -> v1089 modules transformed, 0 error, "built in 18.42s".
+    (dist/assets/index-34IyEPZa.js + dist/assets/index-dmSdkqPw.css)
 
-5. HASIL VERIFIKASI
+  Verifikasi bundle (grep pada dist/):
+    - CSS: --act-ts:#eae6f5; --act-agent:#8ad7ef; --act-obs:#eab984;
+           .act-ts{font-size:11px;color:var(--act-ts)}
+           .act-row.agent .act-text{color:var(--act-agent)}
+           .act-row.observation .act-text{color:var(--act-obs)}
+    - JS : I(" "+m.target) pada node TOOL (sv) dan RESULT (iv).
+
+  Verifikasi minimal sesuai requirement:
+    [1] run_command: "✓ run_command" + spasi + "python scripts/check_code_editor.py"
+        (target span merender I(" "+m.target)).
+    [2] read_file: nama tool + path/argument terpisah 1 spasi (pola sama).
+    [3] AGENT message: .act-row.agent .act-text -> light cyan (#8ad7ef).
+    [4] Timestamp pada beberapa event: .act-ts -> #eae6f5 (putih).
+    [5] Event panjang: .act-text / .act-target tetap white-space:pre-wrap;
+        overflow-wrap:anywhere; .act-body tetap overflow-x:hidden
+        -> wrapping benar, tanpa overflow horizontal. Spasi tidak merusak
+        wrapping karena tetap karakter spasi normal (bukan non-breaking).
+
+5. KONFIRMASI BATASAN
 ---------------------------------------------------------------------------
-  python scripts/check_code_editor.py  -> 12/12 OK
-    [1] GET /api/files/content baca file (root + subfolder)
-    [2] POST /api/files/content menulis file ke disk (existing + baru)
-    [3] path keluar workspace ditolak (read & write)
-    [4] file tidak ditemukan / input tidak lengkap -> 400 pesan jelas
-    [5] tanpa active project -> 404
-    [6] dependency monaco-editor + api read/write
-    [7] Explorer: "Open with Editor" + emit open-file-editor (action lain utuh)
-    [8] App.vue menghubungkan emit Explorer ke modal (:key per file)
-    [9] CodeEditor.vue: Monaco lazy, dirty, save/discard/cancel, dispose
-   [10] monacoSetup.js: worker + theme AETHER + opsi editor
-   [11] styles.css: style modal editor + kontrak scroll Explorer tetap
-   [12] deteksi language 24 nama file (termasuk path Windows)
+  - Frontend-only: `git status --porcelain` menunjukkan perubahan hanya di
+    web/frontend/src/components/AgentActivity.vue dan web/frontend/src/styles.css
+    (plus new_analisa.txt). Tidak ada file di src/** atau web/django_app/**.
+  - JANGAN diubah (tetap): ToolExecutor, AgentRuntime, task lifecycle,
+    logging/.aether/log, SessionStore/SSE, queue, struktur/hierarchy event,
+    format payload, dan Markdown report (.md .act-report).
+  - Tidak ada komponen/subsystem/dependency baru.
 
-  python scripts/check_workbench.py -> 12/12 OK (termasuk SSR render App.vue
-    1828 bytes: Monaco TIDAK dievaluasi saat render tanpa browser)
-  python scripts/check_django_gateway.py -> OK 10/10
-  python scripts/check_filesystem_tools.py -> OK
-  python scripts/check_explorer_hidden_aether.py -> OK 5/5
-  python scripts/check_delete_button.py -> OK 5/5
-    (perlu DJANGO_ALLOWED_HOSTS=testserver,127.0.0.1,localhost -- pre-existing)
-
-  Build produksi: node node_modules/vite/bin/vite.js build (dari web/frontend)
-    -> 1088 modules, 0 error.
-    Bundle utama: index-*.js 262 kB; Monaco LAZY: monacoSetup-*.js 3.33 MB
-    (dimuat hanya saat editor dibuka) + monacoSetup-*.css 133 kB.
-    Worker ter-emit: editor.worker, json.worker, css.worker, html.worker,
-    ts.worker -> diakses browser via /assets/*.js (Django menyajikan
-    /assets/**). Mode language service (json/css/html/ts) juga ter-split.
-
-  Pemeriksaan acceptance (A-H) yang bisa diotomasi tanpa browser:
-    A Open with Editor dari context menu -> jalur emit + handler terverifikasi.
-    B Isi file tampil di Monaco + language per extension -> API + mapping
-      language + opsi editor terverifikasi; render Monaco diverifikasi lewat
-      build/bundle (butuh browser untuk piksel).
-    C Edit -> Monaco default (folding, find/replace, multi-cursor, minimap).
-    D Save -> terverifikasi sampai level disk (isi file benar-benar berubah).
-    E Close tanpa edit -> tanpa konfirmasi (dirty=false baseline).
-    F Close saat dirty -> Save/Discard/Cancel terverifikasi statis di komponen.
-    G Save failure -> editor tidak ditutup, tidak dianggap tersimpan.
-    H Workbench tidak rusak -> check_workbench 12/12 + Explorer tidak diubah.
-
-  Verifikasi runtime di browser (klik-klik) TIDAK dilakukan di environment ini
-  (tidak ada browser headless); jalur yang tersisa hanya visual/interaktif.
-
-6. MASALAH YANG MASIH DITEMUKAN
+6. SISA / CATATAN
 ---------------------------------------------------------------------------
-a. Batas body request gateway AETHER_GATEWAY_MAX_BODY_BYTES = 1.000.000 byte
-   (settings existing, TIDAK diubah). File yang dibaca sudah dibatasi 1 MB
-   oleh ReadFileTool; jika user memperbesar file mendekati 1 MB, POST save
-   bisa ditolak 400 oleh batas body. Perilakunya benar (editor tetap terbuka
-   + error jelas), tetapi batas ini perlu dinaikkan bila editor ingin
-   mendukung file besar. Tidak dilakukan di task ini agar tidak menyentuh
-   konfigurasi gateway global.
-b. `.vue` dipetakan ke grammar `html` dan `.toml` ke `ini` karena Monaco
-   basic-languages tidak menyediakan grammar khusus Vue/TOML (mapping tetap
-   sederhana dan mudah diperluas di editorLanguages.js).
-c. Auto-complete/validasi kaya hanya tersedia untuk json/css/scss/less/html/
-   js/ts (language service bawaan Monaco). Bahasa lain hanya syntax
-   highlighting + fitur editor standar (sesuai scope: tanpa LSP).
-d. Server Django yang sedang berjalan harus menyajikan dist/ hasil build
-   terbaru (sudah di-rebuild). Bila UI lama masih tampil, hard refresh browser
-   (index.html sudah no-cache, tapi sesi lama bisa menahan bundle lama).
-e. Fitur di luar scope tidak dikerjakan: tabs multi-file, split, Git diff,
-   formatter/linter, autosave, editor persistence, LSP.
+  - Karena Django menyajikan dist/ hasil build, lakukan hard refresh browser
+    agar warna/spasi terlihat (dist sudah di-rebuild pada task ini).
+  - Warna .act-label.agent (label chip) tetap ungu (tidak diminta diubah);
+    permintaan hanya untuk warna KONTEN pesan AGENT.
+===========================================================================
+
+
+===========================================================================
+TASK: Task dari Agent Workbench harus masuk GLOBAL TASK QUEUE (sama dgn Consultant)
+===========================================================================
+
+1. HIPOTESIS vs TEMUAN AKTUAL (hasil inspeksi kode, bukan asumsi)
+---------------------------------------------------------------------------
+Hipotesis yang diberikan:
+  (a) ada jalur submit KEDUA untuk Agent Input (langsung _start_execution/auto_execute)
+  (b) frontend Workbench set status "running" secara optimistik setelah POST
+  (c) create_task punya CABANG beda per sumber task; hanya satu cabang mem-pump
+  (d) flag auto_execute dikirim berbeda oleh Workbench vs Consultant
+
+HASIL: yang BENAR adalah (b). (a), (c), (d) TERBUKTI TIDAK ADA.
+
+Bukti (file:line):
+  - (a) TIDAK ADA jalur submit kedua. Frontend hanya punya SATU fungsi submit:
+    web/frontend/src/App.vue::submitTask (L474). Kedua entry point memakainya:
+      * Agent Input (Workbench)  -> TaskComposer modal, template L1107
+        `@submit="submitTask"` (tanpa override provider/model).
+      * Consultant Run Task      -> App.vue::runConsultantTask (L202) yang juga
+        memanggil `await submitTask(text, overrideProviderId, overrideModelId)` (L209).
+    Backend juga satu: web/django_app/api/urls.py `tasks` -> views.tasks (L347) ->
+    service.create_task (views.py L364). Tidak ada endpoint/param "start_now",
+    "run_now", "auto_execute" dari request (pencarian literal = 0 hasil).
+  - (c) TIDAK ADA cabang berdasarkan sumber task. web/django_app/api/services.py::
+    create_task (L842) TIDAK PERNAH memanggil _start_execution lagi; di ujungnya
+    (L920-924) selalu: `if self.auto_execute: self._scheduler_pump()`.
+    Sebaliknya `_start_execution` (L1005) sekarang hanya dipertahankan untuk
+    kompatibilitas/verifier dan TIDAK dipanggil dari create_task.
+  - (d) Tidak ada flag queue-related di payload frontend. api.js::createTask (L166)
+    hanya mengirim {task, project_id?, metadata?}; metadata = provider_instance_id/
+    model_id/mode. Workbench dan Consultant memakai payload queue yang IDENTIK.
+  - (b) BENAR (akar masalah). web/frontend/src/App.vue::submitTask sebelumnya:
+        task.status = record.status || "prepared";
+    `record.status` dari gateway SELALU "prepared" (create_task membuat
+    TaskRecord(status="prepared"); promosi slot hanya mengubah `queue_state`).
+    Sementara `isRunning` (App.vue L136) menganggap "prepared" sebagai RUNNING:
+        ["running","prepared","planning","executing","validating"].includes(status)
+    Akibatnya task yang di backend ber-queue_state="pending" (menunggu slot)
+    tetap tampil "Running…" di Workbench (Stop button, composer disabled, chip
+    "Task: Running"), sehingga user melihat "task langsung running" dan tombol
+    yang tersedia adalah STOP/CANCEL (bukan Disable) -> persis keluhan
+    "tidak bisa entry pending/disabled".
+
+BUKTI EMPIRIS bahwa jalur Workbench sudah melewati queue yang sama (sebelum
+perubahan frontend apa pun): skenario baru [9] (POST /api/tasks via HTTP, layer
+yang sama dengan Workbench) LULUS pada kode backend yang ada ->
+  A (slot kosong)  -> queue_state="running"
+  B, C (slot dipakai) -> queue_state="pending"
+  disable/enable pada B dari Workbench -> OK
+  A selesai -> B running -> B selesai -> C running (FIFO, max concurrency=1)
+Jadi TIDAK ada perubahan backend yang diperlukan.
+
+2. AKAR MASALAH (ringkas)
+---------------------------------------------------------------------------
+Presentasi status optimistik di frontend: setelah POST /api/tasks, Workbench
+memakai `record.status` (lifecycle, selalu "prepared") dan mengabaikan
+`record.queue_state` (pending|running|disabled|done). Karena isRunning
+menghitung "prepared" sebagai running, task yang sebenarnya PENDING tampil
+sebagai RUNNING.
+
+3. PERUBAHAN YANG DILAKUKAN (minimal, additive, frontend-only)
+---------------------------------------------------------------------------
+A. web/frontend/src/App.vue :: submitTask (L492-503)
+   Status awal sekarang berasal dari KEBENARAN backend (queue_state), bukan
+   optimistik:
+       const queueState = record.queue_state;
+       if (queueState === "pending")       task.status = "queued";
+       else if (queueState === "running")  task.status = "running";
+       else                               task.status = record.status || "prepared";
+   -> task PENDING (menunggu execution slot) TIDAK lagi tampil running; promosi
+      ke running datang dari SSE `task_started` (atau queue_state="running" pada
+      respons POST). Kode status "queued" TIDAK ditambahkan ke isRunning, jadi
+      task pending tidak dianggap running dan TIDAK memunculkan Stop/Canel.
+
+B. web/frontend/src/App.vue :: agentStatus (chip header + dot sidebar)
+   Ditambah: `if (s === "queued") return { label: "Queued", cls: "queued" };`
+   (status "queued" memang sudah dikenal `lifecycleIndex` di App.vue; tidak ada
+   nilai enum baru di backend).
+
+C. web/frontend/src/App.vue :: taskTag (tag "Latest Task")
+   Ditambah: `if (s === "queued") return { label: "queued", cls: "queued" };`
+
+D. web/frontend/src/styles.css :: 2 rule kecil (konsisten tema AETHER, amber/
+   non-neon): `.chip.queued` dan `.tag.queued`. TIDAK ada rule lain diubah.
+
+E. scripts/check_task_queue_scheduler.py :: skenario baru [9]
+   `scenario_9_workbench_http_path()` — menguji JALUR SUBMIT WORKBENCH lewat
+   layer HTTP nyata (`POST /api/tasks` via Django test client, service di-patch
+   seperti verifier lain) dengan GatedExecutor, membuktikan:
+     (i)   Workbench submit saat slot kosong -> RUNNING
+     (ii)  Workbench submit saat task lain RUNNING -> PENDING (tidak dieksekusi)
+     (iii) task PENDING dari Workbench dapat di-disable lalu di-enable
+     (iv)  slot bebas -> task pending berikutnya RUNNING (FIFO, concurrency=1)
+   Docstring + pesan akhir script diperbarui.
+
+TIDAK diubah: web/django_app/**, src/**, api.js, ConsultantChat.vue, queue API,
+scheduler, TaskStatus core/TERMINAL_STATUSES, reasonin Agent, tool registry/
+policy, provider, .aether/log, SessionStore/SSE, task lifecycle finalize.
+
+4. HASIL VERIFIKASI
+---------------------------------------------------------------------------
+- `python scripts/check_task_queue_scheduler.py` -> 9/9 OK (8 skenario lama +
+  skenario baru [9] jalur Workbench HTTP). Output:
+    [9] Workbench POST /api/tasks -> GLOBAL queue sama
+        (running/pending/disable/enable/FIFO) OK
+- `python scripts/check_task_queue.py` -> 9/9 OK (kontrak queue API tidak berubah)
+- `python scripts/check_cancellation.py` -> 8/8 OK
+- `python scripts/check_task_lifecycle.py` -> OK (semua langkah)
+- `python scripts/check_consultant.py` -> OK (semua langkah, termasuk Task
+  Proposal -> create_task jalur Agent existing)
+- `python scripts/check_web_runtime.py` -> OK (POST /api/tasks -> runtime ->
+  events -> SSE)
+- `python scripts/check_django_gateway.py` -> 10/10 OK
+- `python scripts/check_workbench.py` -> 12/12 OK (termasuk SSR render App.vue
+  1828 bytes + kontrak scroll Explorer)
+  (check_web_runtime/check_django_gateway dijalankan dengan
+   DJANGO_ALLOWED_HOSTS=testserver,127.0.0.1,localhost — kebutuhan environment
+   yang sudah ada sebelumnya, bukan efek perubahan ini)
+- Build frontend: `node node_modules/vite/bin/vite.js build` dari web/frontend
+  -> 1089 modules transformed, 0 error. Bundle terverifikasi memuat logika baru:
+    * index-*.js : `queue_state==="pending"?status="queued"`, `"Queued"/"queued"`
+    * index-*.css: `.chip.queued{...}` dan `.tag.queued{...}`
+
+5. ACCEPTANCE (R1-R9)
+---------------------------------------------------------------------------
+  R1 melewati Global Task Queue yang sama        : TERPENUHI (verifikasi [9])
+  R2 submit saat tidak ada task -> Running       : TERPENUHI ([9] (i))
+  R3 submit saat ada task Running -> Pending     : TERPENUHI ([9] (ii))
+  R4 Pending Workbench dapat Disable/Enable      : TERPENUHI ([9] (iii))
+  R5 slot bebas -> pending berikutnya Running    : TERPENUHI ([9] (iv))
+  R6 tidak ada jalur eksekusi langsung Workbench : TERPENUHI (create_task selalu
+     _scheduler_pump; satu-satunya Thread ada di execution.py via pump)
+  R7 Consultant tidak berubah + tidak ada queue kedua : TERPENUHI
+     (check_consultant OK; src/** dan web/django_app/** tidak disentuh)
+  R8 enum/TERMINAL_STATUSES/Agent/log/SSE tidak berubah : TERPENUHI
+     (`git diff --stat -- src web/django_app` kosong; queue_state tetap field
+      terpisah; tidak ada nilai enum baru)
+  R9 new_analisa.txt diperbarui                  : TERPENUHI (seksi ini)
+
+catatan: acceptance "Workbench submit -> Pending" kini terlihat di UI sebagai
+status "queued" (bukan "running"). Perubahan ini ADDITIVE: status token "queued"
+sudah dipahami lifecycleIndex App.vue; tidak ada kontrak backend yang berubah.
+
+6. FILE YANG DIUBAH
+---------------------------------------------------------------------------
+  - web/frontend/src/App.vue              (submitTask + agentStatus + taskTag)
+  - web/frontend/src/styles.css           (+ .chip.queued, + .tag.queued)
+  - scripts/check_task_queue_scheduler.py (+ scenario_9 jalur Workbench HTTP)
+  - new_analisa.txt                       (seksi ini)
+  (File lain yang tampak modified di `git status` — AgentActivity.vue,
+   FileExplorer.vue, ExplorerTreeNode.vue — berasal dari sesi lain, bukan task
+   ini dan tidak diubah di sini.)
+
+7. SISA / CATATAN
+---------------------------------------------------------------------------
+  - Waiktu task pending, Agent Input menampilkan tombol Send (bukan
+    Stop/"Running…") karena task tersebut memang belum berjalan; menghentikan
+    task yang SEDANG running dilakukan dari panel TASKS (context menu Stop) —
+    perilaku ini konsisten dengan desain queue (Disable != Cancel).
+  - Django menyajikan dist/ hasil build -> hard refresh browser setelah rebuild.
 ===========================================================================

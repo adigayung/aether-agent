@@ -169,11 +169,11 @@ watch(timeline, scrollToLatest, { flush: "post" });
         <span v-if="item.kind === 'agent' || item.kind === 'status'" class="act-text">{{ item.text }}</span>
         <!-- tool call -->
         <span v-else-if="item.kind === 'tool'" class="act-text">
-          <span class="fn">{{ item.tool }}</span><template v-if="item.target"> <span class="act-target">{{ item.target }}</span></template>
+          <span class="fn">{{ item.tool }}</span><template v-if="item.target"><span class="act-target">{{ " " + item.target }}</span></template>
         </span>
         <!-- tool result -->
         <span v-else-if="item.kind === 'result'" class="act-text" :class="item.success ? 'ok' : 'err'">
-          {{ item.success ? "✓" : "✗" }} {{ item.tool }}<template v-if="item.target"> <span class="act-target">{{ item.target }}</span></template><template v-if="!item.success && item.error"> — {{ item.error }}</template>
+          {{ item.success ? "✓" : "✗" }} {{ item.tool }}<template v-if="item.target"><span class="act-target">{{ " " + item.target }}</span></template><template v-if="!item.success && item.error"> — {{ item.error }}</template>
         </span>
         <!-- observation -->
         <span v-else-if="item.kind === 'observation'" class="act-text">

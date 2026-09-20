@@ -145,6 +145,8 @@ const agentStatus = computed(() => {
   if (s === "running" || s === "prepared" || s === "planning" || s === "executing")
     return { label: "Running", cls: "running" };
   if (s === "validating") return { label: "Validating", cls: "running" };
+  // Menunggu execution slot di Global Task Queue (bukan running).
+  if (s === "queued") return { label: "Queued", cls: "queued" };
   if (s === "completed") return { label: "Completed", cls: "completed" };
   if (s === "failed") return { label: "Failed", cls: "failed" };
   if (s === "cancelled") return { label: "Stopping", cls: "warn" };
@@ -244,6 +246,7 @@ const taskTag = computed(() => {
   if (s === "completed") return { label: "completed", cls: "validated" };
   if (s === "failed") return { label: "failed", cls: "failed" };
   if (s === "cancelled") return { label: "stopped", cls: "modified" };
+  if (s === "queued") return { label: "queued", cls: "queued" };
   if (isRunning.value) return { label: "running", cls: "validated" };
   return { label: "idle", cls: "idle" };
 });
@@ -494,7 +497,20 @@ async function submitTask(text, overrideProviderInstanceId = null, overrideModel
     );
     task.id = record.task_id;
     task.text = record.task;
-    task.status = record.status || "prepared";
+    // Status awal = KEBENARAN backend, BUKAN optimistik. Task yang dikirim
+    // (Workbench Agent Input maupun Consultant Run Task) masuk SATU Global Task
+    // Queue; bila slot eksekusi sedang terpakai, backend mengembalikan
+    // queue_state="pending" -> task belum berjalan (menunggu slot) dan
+    // ditampilkan sebagai "queued", bukan "running". Promosi ke running datang
+    // dari SSE `task_started` (atau queue_state="running" pada respons ini).
+    const queueState = record.queue_state;
+    if (queueState === "pending") {
+      task.status = "queued";
+    } else if (queueState === "running") {
+      task.status = "running";
+    } else {
+      task.status = record.status || "prepared";
+    }
     resetAudioTracker();
     resetWorkspace();
     await refreshTasks();

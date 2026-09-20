@@ -19,6 +19,9 @@ Menguji:
        B RUNNING. Tidak ada eksekusi paralel.
     7. disable != cancel: disable pada task running ditolak.
     8. auto_execute=False: TIDAK ada eksekusi (kontrak verifier lain utuh).
+    9. Jalur submit Workbench (POST /api/tasks via HTTP) memakai GLOBAL queue
+       yang sama: RUNNING saat slot kosong, PENDING saat slot terpakai,
+       disable/enable pada pending, promosi FIFO saat slot bebas (concurrency=1).
 
 Jalankan:
     python scripts/check_task_queue_scheduler.py
@@ -350,6 +353,94 @@ def scenario_8_auto_execute_false() -> None:
     print("[8] auto_execute=False -> tidak ada eksekusi (kontrak utuh) OK")
 
 
+def scenario_9_workbench_http_path() -> None:
+    """Jalur submit Workbench (POST /api/tasks) memakai GLOBAL queue yang sama.
+
+    Agent Input (Workbench) dan Run Task (Consultant) memakai endpoint +
+    service yang SAMA: POST /api/tasks -> GatewayService.create_task. Skenario
+    ini membuktikan lewat layer HTTP (bukan hanya memanggil service langsung)
+    bahwa task dari Workbench:
+        (i)   RUNNING bila slot kosong,
+        (ii)  PENDING bila ada task lain RUNNING (tidak langsung dieksekusi),
+        (iii) PENDING dapat di-disable lalu di-enable (kembali mengantre),
+        (iv)  dipromosikan RUNNING saat slot bebas, tetap FIFO + concurrency=1.
+    """
+    import json
+    import os
+
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+    os.environ["DJANGO_ALLOWED_HOSTS"] = "testserver,127.0.0.1,localhost"
+
+    import django
+
+    django.setup()
+    from django.test import Client
+
+    import api.services as services_mod
+
+    ex = GatedExecutor()
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    store = ProjectStore(db_path=TMP_DIR / "wb_http.db")
+    svc = GatewayService(task_executor=ex, auto_execute=True, project_store=store)
+    # Views memakai get_service() -> instance default ini (jalur HTTP nyata).
+    services_mod._default_service = svc
+    client = Client()
+
+    def post_task(text: str) -> Dict[str, Any]:
+        resp = client.post(
+            "/api/tasks",
+            data=json.dumps({"task": text}),
+            content_type="application/json",
+        )
+        assert resp.status_code == 201, (resp.status_code, resp.content)
+        return resp.json()
+
+    # (i) Submit Workbench saat tidak ada task -> RUNNING (slot kosong).
+    a = post_task("workbench A")["task_id"]
+    ex.wait_started(a)
+    _wait_queue_state(svc, a, "running")
+    assert _running_count(svc) == 1
+
+    # (ii) Submit Workbench saat task lain RUNNING -> PENDING.
+    b = post_task("workbench B")
+    c = post_task("workbench C")
+    assert b["queue_state"] == "pending", b
+    assert c["queue_state"] == "pending", c
+    _wait_queue_state(svc, b["task_id"], "pending")
+    _wait_queue_state(svc, c["task_id"], "pending")
+    assert _running_count(svc) == 1, "harus tepat 1 RUNNING"
+    assert ex.started == [a], f"hanya A yang boleh mulai: {ex.started}"
+
+    # (iii) Pending dari Workbench dapat di-disable lalu di-enable.
+    resp = client.post(f"/api/tasks/queue/{b['task_id']}/disable")
+    assert resp.status_code == 200, (resp.status_code, resp.content)
+    assert resp.json()["queue_state"] == "disabled", resp.json()
+    resp = client.post(f"/api/tasks/queue/{b['task_id']}/enable")
+    assert resp.status_code == 200, (resp.status_code, resp.content)
+    assert resp.json()["queue_state"] == "pending", resp.json()
+    assert b["task_id"] not in ex.started
+
+    # (iv) Slot bebas -> task pending berikutnya (dari Workbench) RUNNING.
+    ex.release(a)
+    ex.wait_started(b["task_id"], timeout=5.0)
+    _wait_queue_state(svc, b["task_id"], "running")
+    _wait_queue_state(svc, c["task_id"], "pending")
+    ex.release(b["task_id"])
+    ex.wait_started(c["task_id"], timeout=5.0)
+    ex.release(c["task_id"])
+    _wait_queue_state(svc, c["task_id"], "done")
+    assert ex.started == [a, b["task_id"], c["task_id"]], ex.started
+    assert ex.max_active == 1, f"concurrency harus 1, dapat {ex.max_active}"
+
+    # Queue API (dibaca QueuePanel Workbench) melihat state antrian yang sama;
+    # semua task sudah terminal -> antrian aktif kosong.
+    assert client.get("/api/tasks/queue").json()["tasks"] == []
+    print(
+        "[9] Workbench POST /api/tasks -> GLOBAL queue sama "
+        "(running/pending/disable/enable/FIFO) OK"
+    )
+
+
 def main() -> int:
     print("=== Verifikasi Scheduler Serial GLOBAL (1 execution slot) ===")
     scenario_1_empty_slot()
@@ -360,9 +451,10 @@ def main() -> int:
     scenario_6_stop()
     scenario_7_disable_running_rejected()
     scenario_8_auto_execute_false()
+    scenario_9_workbench_http_path()
     print(
         "\n[OK] Global Task Queue + scheduler serial (1 slot, FIFO queue_order, "
-        "disable/enable enforced, Stop aman) bekerja."
+        "disable/enable enforced, Stop aman, jalur Workbench HTTP) bekerja."
     )
     return 0
 

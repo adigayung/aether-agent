@@ -4,6 +4,10 @@
 // filesystem baru di frontend. Root = active project root (bukan ".").
 import { computed, ref, watch } from "vue";
 import { listFiles } from "../api.js";
+// Node tree RECURSIVE (menggantikan rendering 2-level hard-coded). Komponen ini
+// merender satu baris lalu memanggil dirinya sendiri untuk anak-anaknya, jadi
+// kedalaman folder tidak lagi dibatasi di template.
+import ExplorerTreeNode from "./ExplorerTreeNode.vue";
 
 const props = defineProps({
   project: { type: Object, default: null },
@@ -137,33 +141,15 @@ function fileTypeColor(name) {
   return FILE_COLORS[icon] || null;
 }
 
-function isSpecialFile(name) {
-  const lower = name.toLowerCase();
-  return (
-    lower === "readme.md" ||
-    lower === "readme.markdown" ||
-    lower === "license" ||
-    lower === ".gitignore" ||
-    lower === ".env" ||
-    lower === ".env.example" ||
-    lower === "dockerfile" ||
-    lower === "makefile" ||
-    lower === "pyproject.toml" ||
-    lower === "package.json" ||
-    lower === "requirements.txt"
-  );
-}
-
 // Path helpers.
 function childPath(base, name) {
   return base === "." || !base ? name : `${base}/${name}`;
 }
 
-function absolutePath(base, name) {
-  if (!props.project) return name;
+function absoluteFromRel(rel) {
+  if (!props.project) return rel;
   const root = props.project.root || props.project.path || "";
-  const rel = childPath(base, name);
-  if (rel === ".") return root;
+  if (!rel || rel === ".") return root;
   return `${root}/${rel}`;
 }
 
@@ -184,25 +170,15 @@ async function load(path = ".") {
   }
 }
 
-async function toggleDir(entry) {
-  await toggleDirByPath(childPath(currentPath.value, entry.name));
-}
-
 const emit = defineEmits(["open-file", "open-file-editor"]);
+
 function openFile(fullPath, name) {
   selected.value = fullPath;
   emit("open-file", { path: fullPath, name });
 }
 
-function openChild(parentFull, child) {
-  const full = `${parentFull}/${child.name}`;
-  if (child.type === "dir") {
-    toggleDirByPath(full);
-  } else {
-    openFile(full, child.name);
-  }
-}
-
+// Expand/collapse SATU folder secara INDEPENDEN (map path -> anak).
+// Tidak ada batas kedalaman: anak folder mana pun bisa di-expand/collapse.
 async function toggleDirByPath(full) {
   if (expanded.value[full]) {
     const next = { ...expanded.value };
@@ -218,6 +194,15 @@ async function toggleDirByPath(full) {
   }
 }
 
+// Handler dari node tree recursive (ExplorerTreeNode).
+function handleToggle(full) {
+  toggleDirByPath(full);
+}
+
+function handleOpen(full, name) {
+  openFile(full, name);
+}
+
 function up() {
   if (currentPath.value === "." || !currentPath.value) return;
   const parts = currentPath.value.split("/");
@@ -226,7 +211,9 @@ function up() {
 }
 
 // --- Context Menu ---
-function onContextMenu(e, entry, type) {
+// fullPath = path penuh node (dari ExplorerTreeNode), jadi menu tetap benar
+// pada kedalaman berapa pun (bukan dihitung dari root saja).
+function onContextMenu(e, entry, fullPath, kind) {
   e.preventDefault();
   stopPropagation(e);
   const menuW = 180;
@@ -237,7 +224,7 @@ function onContextMenu(e, entry, type) {
   if (y + menuH > window.innerHeight) y = window.innerHeight - menuH - 4;
   if (x < 4) x = 4;
   if (y < 4) y = 4;
-  contextMenu.value = { x, y, entry, type };
+  contextMenu.value = { x, y, entry, type: kind, path: fullPath };
   contextOpen.value = true;
 }
 
@@ -250,38 +237,47 @@ function closeContextMenu() {
   contextMenu.value = null;
 }
 
+// Path penuh node yang jadi target context menu (dari ExplorerTreeNode).
+function ctxTargetPath(entry) {
+  const m = contextMenu.value;
+  if (m && m.path) return m.path;
+  return childPath(currentPath.value, entry.name);
+}
+
 function ctxOpen(entry) {
+  const full = ctxTargetPath(entry);
   closeContextMenu();
   if (entry.type === 'dir') {
-    toggleDirByPath(childPath(currentPath.value, entry.name));
+    toggleDirByPath(full);
   } else {
-    openFile(childPath(currentPath.value, entry.name), entry.name);
+    openFile(full, entry.name);
   }
 }
 
 function ctxOpenWithEditor(entry) {
+  const full = ctxTargetPath(entry);
   closeContextMenu();
   emit("open-file-editor", {
-    path: childPath(currentPath.value, entry.name),
+    path: full,
     name: entry.name,
   });
 }
 
 function ctxCopyPath(entry) {
+  const rel = ctxTargetPath(entry);
   closeContextMenu();
-  const rel = childPath(currentPath.value, entry.name);
   navigator.clipboard.writeText(rel).catch(() => {});
 }
 
 function ctxCopyFullPath(entry) {
+  const abs = absoluteFromRel(ctxTargetPath(entry));
   closeContextMenu();
-  const abs = absolutePath(currentPath.value, entry.name);
   navigator.clipboard.writeText(abs).catch(() => {});
 }
 
 function ctxReveal(entry) {
+  const abs = absoluteFromRel(ctxTargetPath(entry));
   closeContextMenu();
-  const abs = absolutePath(currentPath.value, entry.name);
   revealInExplorer(abs);
 }
 
@@ -307,8 +303,8 @@ function ctxRename(entry) {
 }
 
 function ctxDelete(entry) {
+  const rel = ctxTargetPath(entry);
   closeContextMenu();
-  const rel = childPath(currentPath.value, entry.name);
   if (!confirm(`Hapus "${entry.name}" dari project?`)) return;
   deleteEntry(rel, entry.type);
 }
@@ -375,115 +371,23 @@ watch(
       <div v-else-if="error" class="ex-empty ex-err">{{ error }}</div>
       <div v-else-if="!entries.length" class="ex-empty">Empty.</div>
 
+      <!-- Tree recursive: satu komponen node merender dirinya sendiri pada
+           kedalaman berapa pun (tidak ada batas level). -->
       <template v-else>
-        <template v-for="e in entries" :key="e.name">
-          <div
-            class="ex-row"
-            :class="{ 'ex-folder': e.type === 'dir', selected: selected === childPath(currentPath, e.name), 'ex-active': selected === childPath(currentPath, e.name) && e.type === 'file' }"
-            @click="e.type === 'dir' ? toggleDir(e) : openFile(childPath(currentPath, e.name), e.name)"
-            @contextmenu.prevent="onContextMenu($event, e, e.type === 'dir' ? 'folder' : 'file')"
-          >
-            <span class="ex-caret">{{ e.type === 'dir' ? (expanded[childPath(currentPath, e.name)] ? '▾' : '▸') : '' }}</span>
-            <span class="ex-ico" :class="e.type === 'dir' ? 'folder' : 'file'">
-              <!-- Folder icon SVG -->
-              <svg v-if="e.type === 'dir'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-
-              <!-- File type SVG icons -->
-              <svg v-else-if="fileTypeIcon(e.name) === 'python'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'html'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M7 8h4v8H7zM13 8h4v8h-4z" fill="currentColor" opacity="0.3"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'javascript'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2" fill="currentColor" opacity="0.2"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'typescript'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z" stroke-dasharray="2 2"/><path d="M8 12h4v4M8 12h4M12 12h4v4M12 12h4"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'vue'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3L2 9l10 6 10-6-10-6z"/><path d="M2 15l10 6 10-6M2 9l10 6 10-6"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'css'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M7 8h4v8H7zM13 8h4v8h-4z" fill="currentColor" opacity="0.3"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'json'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3h8l2 4-2 4h-4l2-4h-4l2 4h-4l-2-4z"/><path d="M8 13h8l2 4-2 4h-4l2-4h-4l2 4h-4l-2-4z"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'yaml'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z" stroke-dasharray="2 2"/><path d="M8 8h8M8 12h8M8 16h8"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'markdown'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M7 8v8M12 8v8M17 8v8" stroke-dasharray="1.5 1.5"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'text'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M7 8h10M7 12h10M7 16h6"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'xml'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M12 8l-4 4h8l-4 4"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'sql'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3h8v18H8z"/><path d="M11 8h2v8h-2zM8 11h2v2H8z"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'shell'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z" stroke-dasharray="2 2"/><path d="M8 12h8M8 10h2v4h-2z"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'batch'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M8 10h8M8 13h6M8 16h4"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'php'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3h8v18H8z"/><path d="M12 8v8"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'java'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v12M6 12h12"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'cpp'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M8 8h8v8H8z" fill="currentColor" opacity="0.15"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'csharp'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l9 9-9 9-9-9 9-9z"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'go'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 12h8M12 8v8"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'rust'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6l4 6-4 6-4-6 4-6z" fill="currentColor" opacity="0.2"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'ruby'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 8l4 8M16 8l-4 8"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'toml'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M7 8h10M7 12h10M7 16h10"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'config'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'env'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M8 12h8M12 8v8"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'license'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M8 8h8M8 12h6M8 16h4"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'gitignore'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 8l8 8M16 8l-8 8"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'env-example'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M8 12h8M12 8v8"/><path d="M8 8h8" stroke-dasharray="1.5 1.5"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'dockerfile'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M8 8h8v8H8z" fill="currentColor" opacity="0.15"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'makefile'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M7 10h10M7 14h6"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'pyproject'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M8 8h8v8H8z" fill="currentColor" opacity="0.15"/><path d="M8 11h8"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'package'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M12 6v12M6 12h12"/></svg>
-              <svg v-else-if="fileTypeIcon(e.name) === 'requirements'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M8 8h4v4h-4zM12 8h4v4h-4zM8 12h4v4h-4zM12 12h4v4h-4z"/></svg>
-              <!-- Generic file icon -->
-              <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
-            </span>
-            <span
-              class="ex-name"
-              :style="{ color: e.type === 'file' ? (fileTypeColor(e.name) || 'inherit') : 'inherit' }"
-              :title="e.name"
-            >{{ e.name }}</span>
-          </div>
-
-          <!-- Anak folder yang di-expand -->
-          <div
-            v-for="c in expanded[childPath(currentPath, e.name)] || []"
-            :key="childPath(currentPath, e.name) + '/' + c.name"
-            class="ex-row ex-child"
-            :class="{ 'ex-folder': c.type === 'dir', selected: selected === childPath(currentPath, e.name) + '/' + c.name, 'ex-active': selected === childPath(currentPath, e.name) + '/' + c.name && c.type === 'file' }"
-            @click="openChild(childPath(currentPath, e.name), c)"
-            @contextmenu.prevent="onContextMenu($event, c, c.type === 'dir' ? 'folder' : 'file')"
-          >
-            <span class="ex-caret">{{ c.type === 'dir' ? '▸' : '' }}</span>
-            <span class="ex-ico" :class="c.type === 'dir' ? 'folder' : 'file'">
-              <svg v-if="c.type === 'dir'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'python'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'html'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M7 8h4v8H7zM13 8h4v8h-4z" fill="currentColor" opacity="0.3"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'javascript'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2" fill="currentColor" opacity="0.2"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'typescript'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z" stroke-dasharray="2 2"/><path d="M8 12h4v4M8 12h4M12 12h4v4M12 12h4"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'vue'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3L2 9l10 6 10-6-10-6z"/><path d="M2 15l10 6 10-6M2 9l10 6 10-6"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'css'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M7 8h4v8H7zM13 8h4v8h-4z" fill="currentColor" opacity="0.3"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'json'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3h8l2 4-2 4h-4l2-4h-4l2 4h-4l-2-4z"/><path d="M8 13h8l2 4-2 4h-4l2-4h-4l2 4h-4l-2-4z"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'yaml'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z" stroke-dasharray="2 2"/><path d="M8 8h8M8 12h8M8 16h8"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'markdown'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M7 8v8M12 8v8M17 8v8" stroke-dasharray="1.5 1.5"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'text'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M7 8h10M7 12h10M7 16h6"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'xml'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M12 8l-4 4h8l-4 4"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'sql'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3h8v18H8z"/><path d="M11 8h2v8h-2zM8 11h2v2H8z"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'shell'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z" stroke-dasharray="2 2"/><path d="M8 12h8M8 10h2v4h-2z"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'batch'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M8 10h8M8 13h6M8 16h4"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'php'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3h8v18H8z"/><path d="M12 8v8"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'java'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v12M6 12h12"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'cpp'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M8 8h8v8H8z" fill="currentColor" opacity="0.15"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'csharp'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l9 9-9 9-9-9 9-9z"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'go'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 12h8M12 8v8"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'rust'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6l4 6-4 6-4-6 4-6z" fill="currentColor" opacity="0.2"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'ruby'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 8l4 8M16 8l-4 8"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'toml'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M7 8h10M7 12h10M7 16h10"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'config'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'env'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M8 12h8M12 8v8"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'license'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M8 8h8M8 12h6M8 16h4"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'gitignore'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 8l8 8M16 8l-8 8"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'env-example'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M8 12h8M12 8v8"/><path d="M8 8h8" stroke-dasharray="1.5 1.5"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'dockerfile'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M8 8h8v8H8z" fill="currentColor" opacity="0.15"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'makefile'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M7 10h10M7 14h6"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'pyproject'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M8 8h8v8H8z" fill="currentColor" opacity="0.15"/><path d="M8 11h8"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'package'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M12 6v12M6 12h12"/></svg>
-              <svg v-else-if="fileTypeIcon(c.name) === 'requirements'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M8 8h4v4h-4zM12 8h4v4h-4zM8 12h4v4h-4zM12 12h4v4h-4z"/></svg>
-              <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
-            </span>
-            <span
-              class="ex-name"
-              :style="{ color: c.type === 'file' ? (fileTypeColor(c.name) || 'inherit') : 'inherit' }"
-              :title="c.name"
-            >{{ c.name }}</span>
-          </div>
-        </template>
+        <ExplorerTreeNode
+          v-for="e in entries"
+          :key="e.name"
+          :entry="e"
+          :path="childPath(currentPath, e.name)"
+          :depth="0"
+          :dirs="expanded"
+          :selected="selected"
+          :icon-fn="fileTypeIcon"
+          :color-fn="fileTypeColor"
+          @toggle="handleToggle"
+          @open="handleOpen"
+          @context="onContextMenu"
+        />
       </template>
     </div>
 

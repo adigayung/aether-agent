@@ -19,6 +19,11 @@
   --ok: #34d399;
   --warn: #fbbf24;
   --err: #f87171;
+  /* Aksen Agent Activity timeline (dark theme, non-neon). Single source of
+     truth agar warna tidak tersebar sebagai hard-code hex. */
+  --act-ts: #eae6f5; /* timestamp: near-white, tetap terbaca */
+  --act-agent: #8ad7ef; /* pesan AGENT: light cyan / soft blue */
+  --act-obs: #eab984; /* konten OBSERVATION: soft orange muda */
   --mono: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   /* Token tambahan dipakai komponen AETHER (Launcher/Composer/Pages). */
@@ -303,6 +308,11 @@ button {
 .chip.failed {
   border-color: rgba(248, 113, 113, 0.35);
   color: #fca5a5;
+}
+/* Menunggu execution slot di Global Task Queue (belum running). */
+.chip.queued {
+  border-color: rgba(251, 191, 36, 0.35);
+  color: #fcd34d;
 }
 
 /* ---- Workspace body grid ---- */
@@ -790,6 +800,11 @@ button {
 .tag.failed {
   background: rgba(248, 113, 113, 0.14);
   color: var(--err);
+}
+/* Menunggu execution slot di Global Task Queue (belum running). */
+.tag.queued {
+  background: rgba(251, 191, 36, 0.14);
+  color: var(--warn);
 }
 .tag.idle,
 .tag.neutral {
@@ -2518,7 +2533,7 @@ select.input-a {
 }
 .act-ts {
   font-size: 11px;
-  color: var(--text-faint);
+  color: var(--act-ts);
 }
 .act-text {
   color: var(--text-dim);
@@ -2530,6 +2545,15 @@ select.input-a {
 }
 .act-text.err {
   color: var(--err);
+}
+/* Pesan AGENT (commentary) -> light cyan/soft blue; OBSERVATION -> orange
+   muda. Dipisah per baris (.act-row.agent / .act-row.observation) agar hanya
+   konten activity yang terdampak, bukan label/status lain. */
+.act-row.agent .act-text {
+  color: var(--act-agent);
+}
+.act-row.observation .act-text {
+  color: var(--act-obs);
 }
 .act-target {
   color: var(--text-faint);
