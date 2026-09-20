@@ -83,8 +83,11 @@ const tasks = ref([]);
 // Task History (persistent .aether/log/ via History API) — newest first.
 const taskHistory = ref([]);
 const selectedProjectId = ref("");
+// Target konfirmasi hapus project (page Projects, registry-only).
+const projectToDelete = ref(null);
 const submitting = ref(false);
 const error = ref("");
+const notice = ref("");
 const connected = ref(false);
 
 // Active Project (single-user local app; bukan login/session user).
@@ -684,8 +687,11 @@ async function refreshLauncherProjects() {
   try {
     const data = await getProjects();
     launcherProjects.value = data.projects || [];
+    // Page Projects memakai daftar yang sama (satu sumber data: GET /projects).
+    projects.value = launcherProjects.value;
   } catch {
     launcherProjects.value = [];
+    projects.value = [];
   }
 }
 
@@ -727,6 +733,58 @@ async function removeProject(projectId) {
     await deleteProject(projectId);
     await refreshLauncherProjects();
   } catch (e) {
+    error.value = e.message || "Failed to delete project.";
+  } finally {
+    launcherBusy.value = false;
+  }
+}
+
+// --- Projects page: Hapus Project (REGISTRY-ONLY) --------------------------
+// Hapus = hapus RECORD project dari daftar AETHER. TIDAK menghapus
+// folder/file project di disk (backend: DELETE /api/projects/<id> ->
+// ProjectStore.delete_project -> DELETE FROM projects, tanpa menyentuh
+// filesystem). Frontend hanya memicu endpoint yang sudah ada.
+let noticeTimer = null;
+
+function askProjectDelete(project) {
+  if (!project || !project.id) return;
+  error.value = "";
+  notice.value = "";
+  projectToDelete.value = project;
+}
+
+function cancelProjectDelete() {
+  projectToDelete.value = null;
+}
+
+async function confirmProjectDelete() {
+  const project = projectToDelete.value;
+  if (!project) return;
+  launcherBusy.value = true;
+  error.value = "";
+  try {
+    await deleteProject(project.id);
+    projectToDelete.value = null;
+    const wasActive = Boolean(activeProject.value && activeProject.value.id === project.id);
+    if (selectedProjectId.value === project.id) selectedProjectId.value = "";
+    if (wasActive) {
+      // Project aktif dihapus: backend sudah membersihkan active state ->
+      // kembalikan UI ke Project Launcher agar tetap konsisten.
+      activeProject.value = null;
+      if (lastProject.value && lastProject.value.id === project.id) lastProject.value = null;
+      task.id = "";
+      task.text = "";
+      task.status = "idle";
+      resetWorkspace();
+    }
+    await refreshLauncherProjects();
+    notice.value = `"${project.name}" dihapus dari daftar AETHER. File/folder di disk TIDAK dihapus.`;
+    if (noticeTimer) clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => {
+      notice.value = "";
+    }, 5000);
+  } catch (e) {
+    // Error: JANGAN hapus entri secara optimistik — entri tetap tampil.
     error.value = e.message || "Failed to delete project.";
   } finally {
     launcherBusy.value = false;
@@ -1210,13 +1268,16 @@ onBeforeUnmount(() => {
                 <div class="desc">{{ projects.length }} workspace(s)</div>
               </div>
             </div>
+            <div v-if="notice" class="wb-notice">{{ notice }}</div>
+            <div v-if="error" class="wb-error">{{ error }}</div>
             <div v-if="!projects.length" class="panel-body"><div class="wb-empty">No projects yet.</div></div>
             <table v-else class="aether-table">
               <thead>
                 <tr>
-                  <th style="width: 34%">Project</th>
-                  <th style="width: 46%">Path</th>
-                  <th style="width: 20%">GitHub Backup</th>
+                  <th style="width: 32%">Project</th>
+                  <th style="width: 42%">Path</th>
+                  <th style="width: 18%">GitHub Backup</th>
+                  <th class="th-actions"></th>
                 </tr>
               </thead>
               <tbody>
@@ -1235,6 +1296,19 @@ onBeforeUnmount(() => {
                     <span class="status-tag" :class="githubStatusClass(p)">
                       {{ githubStatusLabel(p) }}
                     </span>
+                  </td>
+                  <td class="td-actions">
+                    <!-- Hapus = hapus RECORD dari daftar AETHER saja.
+                         File/folder project di disk TIDAK dihapus. -->
+                    <button
+                      type="button"
+                      class="icon-btn danger"
+                      title="Hapus dari daftar AETHER (file/folder di disk tidak dihapus)"
+                      aria-label="Hapus project dari daftar AETHER"
+                      @click.stop="askProjectDelete(p)"
+                    >
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>
+                    </button>
                   </td>
                 </tr>
               </tbody>
@@ -1357,5 +1431,22 @@ onBeforeUnmount(() => {
       @close="closeCodeEditor"
       @error="onEditorError"
     />
+
+    <!-- ============ HAPUS PROJECT (konfirmasi, registry-only) ========== -->
+    <!-- Hapus = hapus dari DAFTAR AETHER. File/folder di disk TIDAK dihapus. -->
+    <div v-if="projectToDelete" class="modal-backdrop" @click.self="cancelProjectDelete">
+      <div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-title">Hapus "{{ projectToDelete.name }}"?</div>
+        <div class="modal-body">
+          Project dihapus dari daftar AETHER. File/folder di disk TIDAK dihapus.
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn-ghost" @click="cancelProjectDelete">Cancel</button>
+          <button type="button" class="btn-danger" :disabled="launcherBusy" @click="confirmProjectDelete">
+            Hapus
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>

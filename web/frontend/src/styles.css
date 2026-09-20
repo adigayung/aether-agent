@@ -1539,6 +1539,11 @@ select.input-a {
   font-size: 12.5px;
   margin-top: 6px;
 }
+.wb-notice {
+  color: var(--ok);
+  font-size: 12.5px;
+  margin-top: 6px;
+}
 
 /* ===================== STATUS BAR ===================== */
 .statusbar {
@@ -2259,6 +2264,22 @@ select.input-a {
   display: grid;
   gap: 10px;
 }
+/* Feedback (sukses/error) di halaman Projects: sejajarkan dengan panel-head. */
+.panel > .wb-notice,
+.panel > .wb-error {
+  padding: 10px 20px 0;
+  margin-top: 0;
+}
+/* Kolom aksi di tabel Projects (hapus = registry-only, bukan hapus file). */
+.aether-table thead th.th-actions {
+  width: 56px;
+}
+.aether-table tbody td.td-actions {
+  text-align: right;
+}
+.td-actions .row-actions {
+  justify-content: flex-end;
+}
 /* Detail project di halaman Projects (berisi GithubBackupPanel). */
 .proj-detail {
   border-top: 1px solid var(--border-soft);
@@ -2378,6 +2399,11 @@ select.input-a {
 .icon-btn:hover {
   color: var(--text);
   background: var(--bg-hover);
+}
+.icon-btn.danger:hover {
+  color: var(--err);
+  border-color: rgba(248, 113, 113, 0.45);
+  background: rgba(248, 113, 113, 0.12);
 }
 .kv {
   display: flex;
