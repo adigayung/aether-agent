@@ -63,11 +63,6 @@ const navItems = [
     icon: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
   },
   {
-    id: "history",
-    label: "History",
-    icon: "M12 8v4l3 2M3 12a9 9 0 1 0 3-6.7L3 8M3 4v4h4",
-  },
-  {
     id: "settings",
     label: "Settings",
     icon: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 7 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9H1a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 2.6 7a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H7a1.7 1.7 0 0 0 1-1.5V1a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V7a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z",
@@ -141,10 +136,19 @@ const hasActiveTask = computed(() => Boolean(task.id));
 // Stop agar Stop SELALU merujuk ke task yang benar-benar berjalan — bukan task
 // terakhir yang dikirim/dibuat/dipilih.
 const runningTaskId = ref("");
+// Item antrian aktif (pending/running/disabled) dari GET /api/tasks/queue.
+// Dipakai badge jumlah mode QUEUE di halaman Tasks. Sumber sama persis dengan
+// QueuePanel — BUKAN queue subsystem kedua.
+const queueItems = ref([]);
+// Badge QUEUE = jumlah item non-terminal (endpoint queue hanya mengembalikan
+// pending/running/disabled; task terminal tidak masuk antrian).
+const queueCount = computed(() => queueItems.value.length);
 async function refreshRunningTask() {
   try {
     const data = await listTaskQueue();
-    const running = (data.tasks || []).find((t) => t.queue_state === "running");
+    const items = data.tasks || [];
+    queueItems.value = items;
+    const running = items.find((t) => t.queue_state === "running");
     runningTaskId.value = running ? running.task_id : "";
   } catch {
     // Endpoint queue belum tersedia: pertahankan state existing (fallback).
@@ -171,11 +175,11 @@ const agentStatus = computed(() => {
   return { label: "Ready", cls: "ready" };
 });
 
-// Sidebar: Workspace (agent/tasks/projects/history) & Configuration (settings).
+// Sidebar: Workspace (agent/tasks/projects) & Configuration (settings).
 const workspaceNav = computed(() => navItems.filter((i) => i.id !== "settings"));
 const settingsItem = computed(() => navItems.find((i) => i.id === "settings") || {});
 function navBadge(id) {
-  if (id === "tasks" || id === "history") return taskHistory.value.length || null;
+  if (id === "tasks") return taskHistory.value.length || null;
   if (id === "projects") return projects.value.length || null;
   return null;
 }
@@ -205,6 +209,19 @@ const queueRefresh = ref(0);
 // refresh yang sudah ada (queueRefresh), yang sama dipakai panel TASKS.
 watch(queueRefresh, () => {
   refreshRunningTask();
+});
+
+// Mode halaman Tasks: QUEUE (live/actionable) vs HISTORY (arsip read-only).
+// SATU halaman, DUA fungsi berbeda — data queue & history TIDAK dicampur.
+// Default saat halaman dibuka = QUEUE.
+const taskPageMode = ref("queue");
+watch(activeNav, (nav) => {
+  if (nav === "tasks") {
+    taskPageMode.value = "queue";
+    // Segarkan kedua mode dari sumbernya masing-masing (queue API + History API).
+    refreshRunningTask();
+    refreshTaskHistory();
+  }
 });
 function openConsultant() {
   consultantOpen.value = true;
@@ -308,17 +325,15 @@ const lifecyclePct = computed(() => {
   return Math.round((idx / (LIFECYCLE_STEPS.length - 1)) * 100);
 });
 
-// Page header (tasks/projects/history/settings).
+// Page header (tasks/projects/settings).
 const pageTitle = computed(() => {
   if (activeNav.value === "tasks") return "Tasks";
-  if (activeNav.value === "history") return "History";
   if (activeNav.value === "projects") return "Projects";
   if (activeNav.value === "settings") return "Settings";
   return "Workbench";
 });
 const pageDesc = computed(() => {
-  if (activeNav.value === "tasks") return "Tasks executed in this workspace.";
-  if (activeNav.value === "history") return "Past tasks and their outcomes.";
+  if (activeNav.value === "tasks") return "Live task queue and past task history.";
   if (activeNav.value === "projects") return "Workspaces registered in AETHER.";
   if (activeNav.value === "settings") return "Configure providers and models used by the AETHER workbench.";
   return "";
@@ -1063,43 +1078,82 @@ onBeforeUnmount(() => {
             <p>{{ pageDesc }}</p>
           </div>
 
-          <!-- Tasks / History (persistent .aether/log/ via History API) -->
-          <section v-if="activeNav === 'tasks' || activeNav === 'history'" class="panel">
+          <!-- Tasks: SATU halaman, DUA mode (QUEUE live + HISTORY arsip).
+               Data TIDAK dicampur. Mode QUEUE memakai QueuePanel yang sama
+               (queue global AETHER), mode HISTORY memakai tabel history
+               existing (Report via ReportViewer). -->
+          <section v-if="activeNav === 'tasks'" class="panel">
             <div class="panel-head">
               <div>
-                <div class="title">{{ activeNav === 'history' ? 'History' : 'Tasks' }}</div>
-                <div class="desc">{{ taskHistory.length }} task(s) from persistent log</div>
+                <div class="title">Tasks</div>
+                <div class="desc">Live task queue and past task history.</div>
+              </div>
+              <div class="seg-tabs" role="tablist" aria-label="Tasks view">
+                <button
+                  class="seg-tab"
+                  :class="{ active: taskPageMode === 'queue' }"
+                  type="button"
+                  role="tab"
+                  :aria-selected="taskPageMode === 'queue'"
+                  @click="taskPageMode = 'queue'"
+                >
+                  Queue <span class="seg-badge">{{ queueCount }}</span>
+                </button>
+                <button
+                  class="seg-tab"
+                  :class="{ active: taskPageMode === 'history' }"
+                  type="button"
+                  role="tab"
+                  :aria-selected="taskPageMode === 'history'"
+                  @click="taskPageMode = 'history'"
+                >
+                  History <span class="seg-badge">{{ taskHistory.length }}</span>
+                </button>
               </div>
             </div>
-            <div v-if="!taskHistory.length" class="panel-body"><div class="wb-empty">No tasks yet.</div></div>
-            <table v-else class="aether-table">
-              <thead>
-                <tr>
-                  <th style="width: 52%">Task</th>
-                  <th style="width: 18%">Status</th>
-                  <th style="width: 18%">Updated</th>
-                  <th style="width: 12%"></th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="t in taskHistory" :key="t.task_id" class="clickable" @click="openHistoryTask(t.task_id)">
-                  <td>
-                    <div class="cell-name">
-                      <span class="avatar">T</span>
-                      <div>
-                        <div class="name">{{ t.task || "(no prompt)" }}</div>
-                        <div class="meta">{{ t.task_id }}</div>
+
+            <!-- MODE 1: QUEUE (live/actionable). v-show agar state antrian tetap
+                 hidup saat berpindah mode (tanpa reload / kehilangan state). -->
+            <QueuePanel
+              v-show="taskPageMode === 'queue'"
+              class="page-queue"
+              :refresh-key="queueRefresh"
+              @stop-task="stopQueueTask"
+              @view-task="viewQueueTask"
+            />
+
+            <!-- MODE 2: HISTORY (arsip read-only). -->
+            <div v-show="taskPageMode === 'history'">
+              <div v-if="!taskHistory.length" class="panel-body"><div class="wb-empty">No task history yet.</div></div>
+              <table v-else class="aether-table">
+                <thead>
+                  <tr>
+                    <th style="width: 52%">Task</th>
+                    <th style="width: 18%">Status</th>
+                    <th style="width: 18%">Updated</th>
+                    <th style="width: 12%"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="t in taskHistory" :key="t.task_id" class="clickable" @click="openHistoryTask(t.task_id)">
+                    <td>
+                      <div class="cell-name">
+                        <span class="avatar">T</span>
+                        <div>
+                          <div class="name">{{ t.task || "(no prompt)" }}</div>
+                          <div class="meta">{{ t.task_id }}</div>
+                        </div>
                       </div>
-                    </div>
-                  </td>
-                  <td><span class="status-tag" :class="statusTagClass(t.status)">{{ t.status }}</span></td>
-                  <td><span class="mono meta">{{ formatTs(t.last_timestamp) }}</span></td>
-                  <td class="row-actions">
-                    <button class="report-btn" type="button" title="View Agent Report" @click.stop="openReport(t.task_id)">Report</button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+                    </td>
+                    <td><span class="status-tag" :class="statusTagClass(t.status)">{{ t.status }}</span></td>
+                    <td><span class="mono meta">{{ formatTs(t.last_timestamp) }}</span></td>
+                    <td class="row-actions">
+                      <button class="report-btn" type="button" title="View Agent Report" @click.stop="openReport(t.task_id)">Report</button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </section>
 
           <!-- Projects -->
