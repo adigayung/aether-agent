@@ -2448,17 +2448,24 @@ select.input-a {
 /* Activity kini unified: commentary + tool call + tool result +
    observation dalam satu alur chronological. Panel scrollable, sedikit
    lebih tinggi dari sebelumnya agar timeline terbaca. */
-/* Activity timeline tidak lagi dikunci pada tinggi tetap 240px.
-   Sebelumnya `.act-body` memakai `height/max-height: 240px` sehingga Agent
-   Report final (task_completed.data.result) yang panjang tampak TERPOTONG:
-   isinya utuh tetapi hanya ~240px yang terlihat, sisanya tersembunyi di
-   scrollbox kecil di dalam panel. Sekarang panel mengalir mengikuti tinggi
-   kontennya (laporan penuh terlihat), dan scroll halaman ditangani oleh
-   `.ws-scroll` (scroll owner kolom kiri yang sudah ada). Tidak ada
-   truncate/ellipsis/line-clamp pada laporan. */
+/* Activity timeline DIBATASI tinggi maksimumnya agar card "aether — agent
+   activity" tidak terus tumbuh ke bawah mengikuti panjang event/report.
+   Sebelumnya `height:auto; max-height:none` (dipasang untuk menghilangkan
+   truncation report) membuat panel tanpa batas tinggi sehingga mendorong
+   konten lain. Sekarang:
+   - `max-height` wajar berbasis viewport (di-cap absolut) -> card berhenti
+     pada batas wajar, BUKAN tinggi fixed kecil `240px` seperti versi lama.
+   - `.term-body.act-body` menjadi SCROLL OWNER tunggal di dalam card
+     (`overflow-y:auto`) -> isi aktivitas/report dapat di-scroll sampai akhir.
+   Tidak ada truncate/ellipsis/line-clamp pada laporan: seluruh teks report
+   tetap ter-render penuh, yang dibatasi hanyalah area scroll-nya. Header
+   `.term-head` berada di luar area scroll (sibling di atas `.act-body`)
+   sehingga tetap terlihat. */
 .term-body.act-body {
   height: auto;
-  max-height: none;
+  max-height: min(60vh, 520px);
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 .act-row {
   display: flex;
@@ -2863,14 +2870,45 @@ select.input-a {
   border-radius: 8px;
   padding: 10px 12px;
 }
-/* Footer card Task Proposal: hanya tombol Run Task (pemilihan Provider/Model
-   kini di header Consultant Chat). Tombol dirapatkan ke kanan. */
+/* Footer card Task Proposal: pilihan runner (Provider + Model) di kiri,
+   tombol Run Task di kanan. Pilihan runner ini TERPISAH dari dropdown header
+   (yang mengontrol CHAT) dan dipakai untuk MENJALANKAN task ini. */
 .cp-foot {
   display: flex;
   align-items: flex-end;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 10px;
   margin-top: 10px;
+}
+.cp-runner {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.cp-select {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1 1 0;
+}
+.cp-select .cs-label {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.cp-select .input-a {
+  width: 100%;
+  padding: 5px 9px;
+  font-size: 12px;
+}
+/* Aksi Copy card Task Proposal: dirapatkan ke kiri-bawah, memakai pola
+   .cmsg-actions/.copy-btn yang sama dengan bubble chat. */
+.cp-actions {
+  margin-top: 8px;
 }
 .run-task-btn {
   display: inline-flex;

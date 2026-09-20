@@ -194,9 +194,18 @@ function closeConsultant() {
 const submittedTaskId = ref("");
 // task_id terakhir yang mencapai status terminal (completed/failed/cancelled).
 const terminalTaskId = ref("");
-async function runConsultantTask(text) {
+// Payload bisa object { text, providerInstanceId, modelId } (bentuk baru dari
+// card Task Proposal) ATAU string lama (backward compatible). Provider/model
+// dari card proposal (runner) dipakai untuk task ini; pilihan header (chat)
+// TIDAK diubah.
+async function runConsultantTask(payload) {
+  const text = typeof payload === "string" ? payload : payload && payload.text;
   if (!text) return;
-  await submitTask(text);
+  const overrideProviderId =
+    payload && typeof payload === "object" ? payload.providerInstanceId : null;
+  const overrideModelId =
+    payload && typeof payload === "object" ? payload.modelId : null;
+  await submitTask(text, overrideProviderId, overrideModelId);
   // Task baru (queue_state=pending) -> refresh panel TASKS + beri tahu
   // ConsultantChat task mana yang menjadi milik tombol Run Task.
   submittedTaskId.value = task.id || "";
@@ -461,7 +470,7 @@ async function refreshTaskHistory() {
 }
 
 // --- Task submit / stop (#50) ----------------------------------------------
-async function submitTask(text) {
+async function submitTask(text, overrideProviderInstanceId = null, overrideModelId = null) {
   error.value = "";
   submitting.value = true;
   try {
@@ -469,10 +478,13 @@ async function submitTask(text) {
     // diteruskan sebagai metadata ke mekanisme AETHER existing. Runtime
     // merakit provider + api_url + api_key + model dari DB ini (bukan .env).
     // Mode tetap routing signal.
+    // Override per-task (mis. dari card Task Proposal Consultant) MENANG atas
+    // pilihan global; bila tidak diisi -> perilaku default (pilihan global).
+    const providerId = overrideProviderInstanceId || selectedProviderInstanceId.value;
+    const modelId = overrideModelId || selectedModelId.value;
     const metadata = {};
-    if (selectedProviderInstanceId.value)
-      metadata.provider_instance_id = selectedProviderInstanceId.value;
-    if (selectedModelId.value) metadata.model_id = selectedModelId.value;
+    if (providerId) metadata.provider_instance_id = providerId;
+    if (modelId) metadata.model_id = modelId;
     if (selectedMode.value) metadata.mode = selectedMode.value;
     const record = await createTask(
       text,

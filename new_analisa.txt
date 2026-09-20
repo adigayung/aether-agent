@@ -1,102 +1,125 @@
-AETHER Workbench — Benahi & Redesain Panel CHANGES (kartu satu baris + accordion diff)
-========================================================================================
+=====================================================================
+SUMMARY — Provider/Model per-Task di Card Task Proposal + Tombol Copy
+Frontend-only. Backend TIDAK diubah (perubahan tidak diperlukan).
+=====================================================================
 
 TASK
-(1) Perbaiki rendering panel CHANGES (Workbench right column) yang tampak kacau
-    (kartu oversize, teks terpotong, scrollbar bertumpuk/nested).
-(2) Redesain kartu perubahan menjadi SATU BARIS per file yang ringkas + interaktif
-    (diff muncul saat diklik / accordion).
-(3) Beri CHANGES ruang lebih (~40%) dan pendekkan File Explorer sedikit.
-Frontend-only. Tidak menyentuh backend. Tidak merusak kontrak scroll Explorer.
+----
+1) Kembalikan kontrol Provider + Model DI DALAM card Task Proposal Consultant
+   Chat, yang dipakai untuk MENJALANKAN task (Run Task) — TERPISAH dari
+   dropdown di header modal yang tetap untuk percakapan (chat).
+2) Tambahkan tombol Copy pada card Task Proposal agar konsisten dengan card
+   chat lain.
 
---------------------------------------------------------------------------------
-AKAR MASALAH (ditemukan dari source, bukan asumsi)
---------------------------------------------------------------------------------
-1. Kartu oversize:
-   `.file-ico` berukuran 46x46px + `.file-body` dua baris (nama + meta/tag)
-   + padding 11px 13px  => tiap kartu tinggi ~68-72px. Dengan 3 file, daftar
-   melampaui tinggi blok (max-height:30%) sehingga kartu terakhir terpotong.
-2. Scroll ganda (nested):
-   `.cp-diff-body pre { max-height:220px; overflow-y:auto }` membuat scrollbox
-   KEDUA di dalam scroll owner `.changes-body` => muncul scrollbar bertumpuk.
-3. Gejala "kacau" pada diff:
-   diff path dirender ulang padahal nama file sudah tampil di baris, dan
-   container diff muncul tanpa accordion (selalu tampil begitu file diklik),
-   memperbesar kemungkinan overflow horizontal pada diff panjang/sempit.
-4. Alokasi tinggi: CHANGES dibatasi `max-height:30%` sehingga ruang daftar sempit.
+DEFAULT: provider/model card = pilihan header saat pertama; setelah diubah
+manual di card, pilihan card INDEPENDEN dari header (dan sebaliknya).
 
---------------------------------------------------------------------------------
-PERUBAHAN YANG DITERAPKAN (frontend-only)
---------------------------------------------------------------------------------
-File: web/frontend/src/components/ChangesPanel.vue
-- Kartu diubah menjadi SATU BARIS per file:
-    [caret ▸/▾] [status A/M/D berwarna] [nama file ellipsis] [+N / -N] [tombol Edit]
-- Accordion: `expandedIndex` (ref). Klik baris => buka/tutup diff-nya. Hanya SATU
-  baris terbuka pada satu waktu. Diff TIDAK dirender saat default (tertutup).
-- Diff dirender di dalam aliran `.changes-body` (bukan scrollbox terpisah) dan
-  memakai wrap (`pre-wrap` + `overflow-wrap:anywhere`) sehingga tidak ada
-  horizontal overflow.
-- Status indikator: A=added (hijau), M=modified (kuning), D=removed (merah);
-  fallback "•" untuk kind tak dikenal. `tagLabel` tetap dipakai sebagai tooltip.
-- Menghapus state `selected`/`selectedDiff` + blok `cp-diff` lama (diganti
-  struktur accordion). Tidak ada perubahan pada data/props/emit `open-file`.
+FILES CHANGED
+-------------
+- web/frontend/src/components/ConsultantChat.vue
+- web/frontend/src/App.vue
+- web/frontend/src/styles.css
+- new_analisa.txt (ringkasan ini)
+- web/frontend/dist/** (hasil rebuild produksi; artefak, bukan source)
 
-File: web/frontend/src/styles.css
-- `.file-row`: dipadatkan (gap 9px, padding 6px 9px, radius 9px) + state
-  hover/open lembut (border + background accent transparan, non-neon).
-- Elemen baru: `.file-caret`, `.file-status` (+ .created/.modified/.failed/.idle),
-  `.file-name` (min-width:0 => ellipsis satu baris), `.file-stat` (.st-add/.st-del).
-- `.file-edit` diperkecil 28px -> 24px.
-- Menghapus aturan mati: `.file-body`, `.file-ico`, `.file-meta`, `.file-tags`,
-  `.file-path`, `.file-row.selected`, `.cp-diff*`.
-- Diff baru: `.file-diff` + `.file-diff-body pre` (TANPA max-height/overflow =>
-  satu scroll owner) + `.file-diff-note`.
-- Alokasi tinggi: `.ws-col.right > .block:not(.explorer-block):not(.wb-queue)`
-  `max-height: 30% -> 40%` (CHANGES lebih tinggi; Explorer otomatis menyusut
-  karena flex:1 1 auto sisa).
-- Fallback media query <=1080px: `.explorer-block` max-height `60vh -> 52vh`
-  (Explorer sedikit lebih pendek), CHANGES `240px -> 260px`.
-- `.tag` (dipakai App.vue) TIDAK diubah.
+Tidak ada perubahan pada:
+- src/agent_ai/** (Python core, runtime, orchestrator, tools, consultant)
+- web/django_app/** (Django API/backend: services.py, views.py, urls.py)
+- .aether/log, SessionStore/SSE, Activity/Report API, ReportViewer
+Terverifikasi: `git status --porcelain` hanya menampilkan
+  M new_analisa.txt
+  M web/frontend/src/App.vue
+  M web/frontend/src/components/ConsultantChat.vue
+  M web/frontend/src/styles.css
+(tidak ada file .py).
+
+TEMUAN VERIFIKASI (sebelum coding)
+----------------------------------
+1) Backend SUDAH mendukung override provider/model per-task — TIDAK perlu
+   perubahan backend:
+   - `GatewayService.create_task(task, project_id, metadata)` (services.py ~L770)
+     memvalidasi `metadata.provider_instance_id`/`model_id` via
+     `_validate_provider_selection()` (services.py ~L1054) dan meneruskannya ke
+     `task_executor.run(..., provider_instance_id=..., model_id=...)`
+     (services.py ~L1015/L1027).
+   - `views.py::tasks()` (POST /api/tasks) sudah meneruskan `metadata` apa adanya.
+   - `api.js::createTask(task, projectId, metadata)` sudah mengirim `metadata`.
+   - `App.vue::submitTask()` sudah merakit metadata `provider_instance_id` /
+     `model_id` dari state global.
+   => Cukup menambahkan kemampuan override (opsional) pada jalur frontend.
+   TIDAK ada blocker backend.
+
+2) Jalur lama Run Task hanya mengirim teks:
+   `ConsultantChat.runTask()` -> `emit('run-task', proposal)`
+   -> `App.vue::runConsultantTask(text)` -> `submitTask(text)`.
+   Card `.consultant-proposal` hanya punya tombol Run Task; dropdown
+   `.consultant-selects.inline` pernah ada lalu dihapus (riwayat user).
+
+3) Pola copy yang SUDAH ADA (dipakai ulang, tidak membuat baru):
+   `.cmsg-actions` + `.copy-btn`, ikon SVG copy -> centang, label
+   Copy -> Copied, `navigator.clipboard.writeText(...).catch(()=>{})`,
+   reset ~1.4s.
+
+DESAIN / PERUBAHAN
+------------------
+ConsultantChat.vue:
+- State runner card (independen dari header):
+  `proposalProviderInstanceId`, `proposalModelId`, `proposalTouched`.
+  Watcher `immediate` menyinkronkan nilai dari prop header SELAMA belum
+  disentuh user; setelah disentuh (`proposalTouched=true`) card independen.
+- `proposalModelOptions` (filter model mengikuti provider card) via `modelsFor`.
+- Handler `onProposalProviderChange` (reset model ke model valid pertama) dan
+  `onProposalModelChange`.
+- `runTask()` kini emit payload { text, providerInstanceId, modelId }.
+- Copy card: `proposalCopied` + `copyProposal()` (pola .copy-btn, reset ~1.4s).
+- Template card: `.cp-foot` = `.cp-runner` (2 <select class="input-a">:
+  Provider + Model, di-DISABLE saat runDisabled) + tombol Run Task di kanan;
+  lalu baris `.cmsg-actions.cp-actions` berisi tombol Copy di kiri-bawah.
+  Card tetap DI DALAM `.consultant-messages` (kontrak layout tidak berubah).
+
+App.vue:
+- `submitTask(text, overrideProviderInstanceId=null, overrideModelId=null)`:
+  override MENANG atas pilihan global; bila kosong -> perilaku default.
+- `runConsultantTask(payload)`: menerima payload object {text, providerInstanceId,
+  modelId} ATAU string lama (backward compatible), lalu meneruskannya ke
+  `submitTask(text, providerId, modelId)`. Pilihan header (chat) TIDAK diubah.
+
+styles.css:
+- `.cp-foot` -> `justify-content: space-between` (runner kiri, Run Task kanan).
+- Baru: `.cp-runner`, `.cp-select`, `.cp-select .cs-label`, `.cp-select .input-a`,
+  `.cp-actions`.
+- Tidak menyentuh `.consultant-m`, `.consultant-messages` (scroll owner),
+  `.consultant-foot` (sibling flex-shrink:0), maupun kontrak `.copy-btn` chat.
 
 KONTRAK YANG DIPERTAHANKAN
-- `.explorer` tetap SATU-SATU scroll owner: flex:1 1 auto; min-height:0;
-  overflow-y:auto; overflow-x:hidden (tidak diubah).
-- `.ex-head { flex:0 0 auto }`, `.explorer-block` (flex:1 1 auto; min-height:0;
-  overflow:hidden), `.ws-body { grid-template-rows: minmax(0,1fr) }` tidak diubah.
-- `.wb-queue` (TASKS) tetap dikecualikan dari selektor aturan CHANGES.
-- `.changes-body` tetap SATU scroll owner untuk CHANGES (tidak ada scroll ganda).
-- Struktur/markup `.ex-head` (ex-head/ex-head-title/ex-head-ws/ex-icon-btn) dan
-  perilaku context menu/open/rename/delete TIDAK disentuh (FileExplorer.vue
-  tidak dimodifikasi).
-- Tidak ada komponen/subsistem/dependency baru; tidak ada file backend/Python.
+--------------------------
+- `.consultant-messages` tetap satu-satunya scroll owner
+  (flex:1 1 auto; min-height:0; overflow-y:auto).
+- `.consultant-foot` tetap sibling dengan flex-shrink:0.
+- `.consultant-proposal` tetap DI DALAM `.consultant-messages`.
+- Panel LLM MODEL (aside.consultant-models / cm-side-*) TIDAK dihidupkan kembali.
+- Fitur lain tidak berubah: mode Quick/Investigate, attach image,
+  Enter=newline / Shift+Enter=send, auto-scroll, tool activity, Run Task.
+- Tidak ada dropdown dobel di header.
 
---------------------------------------------------------------------------------
 VALIDASI
---------------------------------------------------------------------------------
-- Build frontend (dari web/frontend):
-    `node node_modules/vite/bin/vite.js build`
-  => 32 modules, 0 error. Bundle baru: dist/assets/index-CzZbGHeD.css.
-- Bundle produksi memuat aturan baru: `.changes-list`, `.file-status`,
-  `.file-diff-body pre`, `max-height:40%`, dan kontrak `.explorer` serta
-  `.ws-body{grid-template-rows:minmax(0,1fr)}` tetap utuh (dicek via grep bundle).
-- `python scripts/check_workbench.py` => 12/12 PASS, termasuk
-  "[12] Explorer daftar file scroll owner OK -> header tetap, hanya daftar scroll".
-- `git status --porcelain` => hanya file frontend + new_analisa.txt berubah.
-- `git diff --stat -- src web/django_app` => KOSONG (tidak ada perubahan backend).
+--------
+- Build frontend: dari web/frontend
+  `node node_modules/vite/bin/vite.js build` -> 32 modules, 0 error.
+  Bundel membuktikan:
+  - emit run-task = {text, providerInstanceId, modelId}.
+  - submitTask memakai override: `provider = override || global`,
+    `model = override || global`.
+  - CSS `.cp-runner`/`.cp-select`/`.cp-actions` dan tombol
+    "Copy task proposal" ada di bundel production.
+- Verifikasi Consultant: `python scripts/check_consultant.py` -> SEMUA PASS
+  (core, Bible, registry per-mode, boundary, session, gateway HTTP,
+  Task Proposal -> create_task, frontend mode).
+- `git status --porcelain` -> tidak ada file backend/Python berubah.
 
---------------------------------------------------------------------------------
-BUKTI BACKEND TIDAK TERSENTUH
---------------------------------------------------------------------------------
-git diff --stat -- src web/django_app  -> (kosong)
-Tidak ada perubahan pada: API, task execution, logging, SessionStore/SSE,
-AgentRuntime, TaskExecutor, TaskState, atau file Python apa pun.
-
---------------------------------------------------------------------------------
-CATATAN
---------------------------------------------------------------------------------
-- `web/frontend/src/components/ConsultantChat.vue` tampil sebagai "modified" di
-  git status, namun itu berasal dari perubahan sesi sebelumnya (di luar scope
-  task ini) dan tidak disentuh pada task ini.
-- Verifikasi visual interaktif (klik buka/tutup diff, scroll daftar) tetap
-  disarankan di browser; validasi otomatis di sini mencakup build + verifier
-  kontrak scroll + inspeksi bundle.
+KONFIRMASI BACKEND
+------------------
+TIDAK ADA perubahan backend. Override provider/model per-task sudah didukung
+backend sehingga hanya jalur frontend (consultant chat -> submitTask ->
+createTask metadata) yang disesuaikan. Default behavior task tanpa override
+tidak berubah.

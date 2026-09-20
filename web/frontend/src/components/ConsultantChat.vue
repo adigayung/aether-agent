@@ -136,6 +136,42 @@ watch(
   }
 );
 
+// --- Runner Task Proposal (provider/model untuk MENJALANKAN task) -----------
+// TERPISAH dari pilihan header (yang mengontrol CHAT). Default mengikuti
+// pilihan header; setelah user menyentuhnya sendiri, ia INDEPENDEN (perubahan
+// header tidak lagi mengubahnya, dan sebaliknya). Selama belum disentuh, ia
+// tetap mengikuti header agar default konsisten saat provider/model memuat.
+const proposalProviderInstanceId = ref("");
+const proposalModelId = ref("");
+const proposalTouched = ref(false);
+
+watch(
+  () => [props.providerInstanceId, props.modelId],
+  ([pid, mid]) => {
+    if (proposalTouched.value) return;
+    proposalProviderInstanceId.value = pid || "";
+    proposalModelId.value = mid || "";
+  },
+  { immediate: true }
+);
+
+// Model difilter mengikuti provider proposal (perilaku sama dengan header).
+const proposalModelOptions = computed(() =>
+  modelsFor(proposalProviderInstanceId.value)
+);
+
+function onProposalProviderChange(e) {
+  proposalTouched.value = true;
+  const nextId = String(e.target.value || "");
+  proposalProviderInstanceId.value = nextId;
+  const models = modelsFor(nextId);
+  proposalModelId.value = models[0] ? models[0].id : "";
+}
+function onProposalModelChange(e) {
+  proposalTouched.value = true;
+  proposalModelId.value = String(e.target.value || "");
+}
+
 function scrollToBottom() {
   nextTick(() => {
     const el = scroller.value;
@@ -188,6 +224,28 @@ async function copyMessage(msg, index) {
   copiedTimer = setTimeout(() => {
     copiedIndex.value = -1;
     copiedTimer = null;
+  }, 1400);
+}
+
+// --- Copy Task Proposal -----------------------------------------------------
+// Tombol Copy di card Task Proposal (kiri bawah), memakai pola .copy-btn yang
+// sama dengan bubble chat. Isi yang disalin = teks proposal yang tampil.
+const proposalCopied = ref(false);
+let proposalCopiedTimer = null;
+
+async function copyProposal(proposal) {
+  const text = proposal || lastProposal.value || "";
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(String(text));
+  } catch (e) {
+    return;
+  }
+  proposalCopied.value = true;
+  if (proposalCopiedTimer) clearTimeout(proposalCopiedTimer);
+  proposalCopiedTimer = setTimeout(() => {
+    proposalCopied.value = false;
+    proposalCopiedTimer = null;
   }, 1400);
 }
 
@@ -350,7 +408,14 @@ function runTask(proposal) {
   // "pending" agar tombol tidak bisa diklik dua kali.
   submittedTaskId.value = "__pending__";
   terminalTaskId.value = "";
-  emit("run-task", target);
+  // Bawa pilihan runner (provider/model DARI CARD PROPOSAL, bukan header) ke
+  // alur task existing. App.vue meneruskannya sebagai metadata task sehingga
+  // task benar-benar memakai provider/model ini.
+  emit("run-task", {
+    text: target,
+    providerInstanceId: proposalProviderInstanceId.value || "",
+    modelId: proposalModelId.value || "",
+  });
 }
 
 function startNewSession() {
@@ -508,18 +573,69 @@ onMounted(() => {
                di akhir container), sehingga balasan Consultant berikutnya
                muncul DI BAWAH card dan card ikut naik seperti bubble lain.
                Card tetap berada di dalam area percakapan yang scrollable.
-               Pemilihan Provider/Model TIDAK lagi di card ini, melainkan di
-               header Consultant Chat (satu tempat). Card: title -> body ->
-               footer (tombol Run Task). -->
+               Card memiliki pemilihan RUNNER (Provider/Model) SENDIRI yang
+               dipakai saat Run Task — terpisah dari dropdown header yang
+               mengontrol CHAT. Card: title -> body -> footer (runner + tombol
+               Run Task) -> aksi Copy. -->
           <div v-if="msg.role === 'assistant' && msg.taskProposal" class="consultant-proposal">
             <div class="cp-head">
               <span class="cp-title">Task Proposal</span>
             </div>
             <pre class="cp-body">{{ msg.taskProposal }}</pre>
+            <!-- Footer card: pilihan runner (Provider + Model) di kiri, tombol
+                 Run Task di kanan. Dipakai untuk MENJALANKAN task ini; pilihan
+                 header (chat) TIDAK berubah. Di-disable saat task milik card
+                 ini sedang berjalan (anti double-submit). -->
             <div class="cp-foot">
+              <div class="cp-runner">
+                <label class="cp-select">
+                  <span class="cs-label">Provider</span>
+                  <select
+                    class="input-a"
+                    :value="proposalProviderInstanceId"
+                    :disabled="runDisabled"
+                    @change="onProposalProviderChange"
+                  >
+                    <option v-if="!providerOptions.length" value="">No provider instance</option>
+                    <option v-for="p in providerOptions" :key="p.id" :value="p.id">
+                      {{ providerLabel(p) }}
+                    </option>
+                  </select>
+                </label>
+                <label class="cp-select">
+                  <span class="cs-label">Model</span>
+                  <select
+                    class="input-a"
+                    :value="proposalModelId"
+                    :disabled="runDisabled || !proposalProviderInstanceId"
+                    @change="onProposalModelChange"
+                  >
+                    <option v-if="!proposalModelOptions.length" value="">No model</option>
+                    <option v-for="m in proposalModelOptions" :key="m.id" :value="m.id">
+                      {{ m.model_name }}
+                    </option>
+                  </select>
+                </label>
+              </div>
               <button class="run-task-btn" type="button" :disabled="runDisabled" @click="runTask(msg.taskProposal)">
                 <svg v-if="!runDisabled" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
                 {{ runDisabled ? "Running…" : "Run Task" }}
+              </button>
+            </div>
+            <!-- Tombol Copy di kiri-bawah card (pola .cmsg-actions/.copy-btn
+                 sama dengan bubble chat). Isi = teks proposal yang tampil. -->
+            <div class="cmsg-actions cp-actions">
+              <button
+                type="button"
+                class="copy-btn"
+                :class="{ copied: proposalCopied }"
+                :title="proposalCopied ? 'Copied' : 'Copy task proposal'"
+                :aria-label="proposalCopied ? 'Copied' : 'Copy task proposal'"
+                @click="copyProposal(msg.taskProposal)"
+              >
+                <svg v-if="proposalCopied" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+                <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                <span class="copy-label">{{ proposalCopied ? "Copied" : "Copy" }}</span>
               </button>
             </div>
           </div>
