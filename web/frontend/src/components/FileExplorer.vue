@@ -23,6 +23,12 @@ const error = ref("");
 const expanded = ref({});
 // Path file terpilih (selected state).
 const selected = ref("");
+// Collapsible section (AETHER Workbench right column).
+// Default: EXPLORER TERBUKA. State hanya di frontend selama sesi aktif.
+const collapsed = ref(false);
+function toggleCollapse() {
+  collapsed.value = !collapsed.value;
+}
 // Context menu state.
 const contextMenu = ref(null);
 const contextOpen = ref(false);
@@ -351,22 +357,23 @@ watch(
 </script>
 
 <template>
-  <section class="block explorer-block">
-    <div class="ex-head">
+  <section class="block explorer-block" :class="{ collapsed }">
+    <div class="ex-head" @click="toggleCollapse">
+      <span class="sec-caret" aria-hidden="true">{{ collapsed ? "▸" : "▾" }}</span>
       <span class="ex-head-ico">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
       </span>
       <span class="ex-head-title">EXPLORER</span>
       <span class="ex-head-ws" :title="currentPath === '.' ? rootLabel : currentPath">{{ currentPath === "." ? rootLabel : currentPath }}</span>
-      <button class="ex-icon-btn" type="button" title="Refresh" @click="load(currentPath)">
+      <button class="ex-icon-btn" type="button" title="Refresh" @click.stop="load(currentPath)">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 4v5h-5"/></svg>
       </button>
-      <button v-if="currentPath !== '.'" class="ex-icon-btn" type="button" title="Up" @click="up">
+      <button v-if="currentPath !== '.'" class="ex-icon-btn" type="button" title="Up" @click.stop="up">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
       </button>
     </div>
 
-    <div class="explorer" @click="closeContextMenu" @contextmenu.prevent>
+    <div v-show="!collapsed" class="explorer" @click="closeContextMenu" @contextmenu.prevent>
       <div v-if="loading" class="ex-empty">Loading…</div>
       <div v-else-if="error" class="ex-empty ex-err">{{ error }}</div>
       <div v-else-if="!entries.length" class="ex-empty">Empty.</div>

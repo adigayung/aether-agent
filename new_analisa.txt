@@ -191,3 +191,104 @@ BATAS / CATATAN
   - Verifikasi UI interaktif (klik browser) tidak dilakukan di lingkungan ini;
     validasi = build produksi + inspeksi bundle + analisis alur source.
 ===========================================================================
+
+
+===========================================================================
+AETHER WORKBENCH — COLLAPSIBLE PANEL (TASK / CHANGES / EXPLORER)
+Tujuan: section TASKS, CHANGES, dan EXPLORER di kolom kanan Workbench dapat
+        dibuka/ditutup dengan klik header. Default: EXPLORER terbuka, TASK &
+        CHANGES tertutup. State hanya di frontend selama sesi (tanpa
+        backend/localStorage). Frontend-only.
+Status: FIXED + VERIFIED (vite build 0 error, check script PASS, SSR probe PASS)
+===========================================================================
+
+1. FILE YANG DIUBAH
+---------------------------------------------------------------------------
+Frontend (TIDAK ada perubahan backend/Python — `git diff --stat -- src
+web/django_app` kosong):
+
+  M web/frontend/src/components/FileExplorer.vue
+      - state lokal `const collapsed = ref(false)` (default TERBUKA) +
+        `toggleCollapse()`; header `.ex-head` clickable; chevron `.sec-caret`
+        (▾/▸); body `.explorer` -> `v-show="!collapsed"`.
+      - tombol header (Refresh/Up) memakai `@click.stop` agar tidak men-toggle.
+  M web/frontend/src/components/ChangesPanel.vue
+      - state lokal `const collapsed = ref(true)` (default TERTUTUP) +
+        toggle; `.block-head` clickable; chevron `.sec-caret`; body
+        `.changes-body` -> `v-show="!collapsed"`.
+  M web/frontend/src/components/QueuePanel.vue
+      - prop baru `defaultCollapsed` (default false) -> `collapsed =
+        ref(props.defaultCollapsed)`; header `.q-head` sudah clickable + caret
+        ▾/▸; body `.q-body` -> `v-show="!collapsed"`.
+  M web/frontend/src/App.vue
+      - `<QueuePanel ... :default-collapsed="true">` di Workbench right column
+        (TASK tertutup saat Workbench pertama dibuka). Consultant tetap tidak
+        mengirim prop ini (TASKS tetap terbuka di Consultant).
+  M web/frontend/src/styles.css
+      - `.sec-caret`, header clickable+hover, dan rule `.collapsed`
+        (.block / .explorer-block / .wb-queue) + padding header collapsed.
+
+  (baru) scripts/check_collapsible_panels.py — verifier frontend-only.
+
+2. COMPONENT / STATE YANG DIGUNAKAN
+---------------------------------------------------------------------------
+  - TIDAK ada sidebar/explorer/komponen baru. Memakai komponen existing:
+    QueuePanel.vue (TASK), ChangesPanel.vue (CHANGES), FileExplorer.vue
+    (EXPLORER) yang di-mount di `.ws-col.right` App.vue.
+  - State: satu `ref` boolean `collapsed` per section + `toggleCollapse()`
+    (di dalam komponen masing-masing). Tidak ada store/state baru.
+  - Chevron memakai karakter caret existing project (▸ collapsed / ▾ expanded),
+    konsisten dengan pola `.q-caret` / `.file-caret` yang sudah ada.
+
+3. BEHAVIOR DEFAULT
+---------------------------------------------------------------------------
+  EXPLORER = expanded   (FileExplorer.vue: collapsed = ref(false))
+  TASK     = collapsed  (App.vue: :default-collapsed="true")
+  CHANGES  = collapsed  (ChangesPanel.vue: collapsed = ref(true))
+
+4. HASIL VERIFIKASI
+---------------------------------------------------------------------------
+  a) `python scripts/check_collapsible_panels.py` -> PASS
+     [1] EXPLORER default EXPANDED + header toggle + chevron
+     [2] CHANGES default COLLAPSED + header toggle + chevron
+     [3a] TASK state awal mengikuti prop defaultCollapsed
+     [3b] Workbench TASK default COLLAPSED; Consultant TASK tidak diubah
+     [4] CSS chevron + collapsed rules + kontrak scroll Explorer utuh
+     [5] Backend/Python TIDAK berubah (git status -- src web/django_app kosong)
+  b) SSR probe (vite build --ssr; dijalankan lalu dihapus) — 11/11 OK:
+     - EXPLORER: `class="block explorer-block"` (tanpa `collapsed`), caret ▾,
+       body `.explorer` tampil (tanpa display:none).
+     - CHANGES: `changes-block collapsed`, caret ▸, `.changes-body`
+       `display:none` (v-show).
+     - TASK (Workbench, defaultCollapsed=true): `queue-block collapsed`,
+       caret ▸, `.q-body` `display:none`.
+     - TASK (Consultant, tanpa prop): expanded, caret ▾.
+  c) `python scripts/check_workbench.py` -> 12/12 OK (termasuk step [12]
+     kontrak scroll Explorer) — regresi: Explorer tetap berfungsi normal.
+  d) Body memakai `v-show` (bukan `v-if`) sehingga konten TIDAK di-unmount;
+     Explorer/Task/Changes tetap berfungsi setelah dibuka kembali.
+  e) Toggle independen: membuka satu section tidak menutup section lain.
+  f) Kontrak scroll Explorer utuh: `.explorer {flex:1 1 auto;min-height:0;
+     overflow-y:auto;overflow-x:hidden}`, `.ex-head {flex:0 0 auto}`,
+     `.ws-body {grid-template-rows:minmax(0,1fr)}` — tidak diubah.
+
+5. HASIL BUILD FRONTEND
+---------------------------------------------------------------------------
+  $ cd web/frontend && node node_modules/vite/bin/vite.js build
+      ✓ 1089 modules transformed; 0 error (hanya warning pre-existing
+        chunk > 500 kB untuk Monaco).
+  Bundle produksi (`dist/assets/index-*.css`) DIVERIFIKASI memuat:
+      `.sec-caret{...}`, `.ws-col.right>.block.collapsed...`,
+      `.ws-col.right>.block.explorer-block.collapsed`, dan
+      `.ws-col.right>.block.collapsed>.block-head,.ws-col.right>.block.
+      collapsed>.ex-head{margin-bottom:0}`.
+
+BATAS / CATATAN
+---------------------------------------------------------------------------
+  - Frontend-only. Agent loop/reasoning, tool/registry/policy, provider,
+    scheduler/queue, .aether/log, SessionStore/SSE, API — TIDAK diubah.
+  - Tidak ada persistence (localStorage/backend) untuk state collapse; state
+    hilang saat reload (sesuai ketentuan task).
+  - Verifikasi klik interaktif di browser tidak dilakukan di lingkungan ini;
+    validasi = build + verifier statis + SSR probe.
+===========================================================================

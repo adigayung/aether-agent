@@ -11,6 +11,13 @@ const props = defineProps({
 
 const emit = defineEmits(["open-file"]);
 
+// Collapsible section (AETHER Workbench right column).
+// Default: CHANGES tertutup. State hanya di frontend selama sesi aktif.
+const collapsed = ref(true);
+function toggleCollapse() {
+  collapsed.value = !collapsed.value;
+}
+
 // Accordion: hanya SATU baris terbuka pada satu waktu (index terpilih).
 // -1 = semua tertutup (diff TIDAK dirender secara default).
 const expandedIndex = ref(-1);
@@ -63,8 +70,9 @@ const validationClass = computed(() => {
 </script>
 
 <template>
-  <section class="block">
-    <div class="block-head">
+  <section class="block changes-block" :class="{ collapsed }">
+    <div class="block-head" @click="toggleCollapse">
+      <span class="sec-caret" aria-hidden="true">{{ collapsed ? "▸" : "▾" }}</span>
       <div class="block-title">Changes</div>
       <span class="chip chip-sm">{{ changes.length }} files</span>
     </div>
@@ -72,7 +80,7 @@ const validationClass = computed(() => {
     <!-- Body = SATU scroll owner (meniru pola .ex-head/.explorer): header tetap,
          kartu perubahan + diff + result mengalir & scroll di area ini saja.
          Tidak ada scrollbox bersarang di dalamnya. -->
-    <div class="changes-body">
+    <div v-show="!collapsed" class="changes-body">
       <div v-if="!changes.length" class="ex-empty">No changes yet.</div>
 
       <template v-else>

@@ -3342,5 +3342,73 @@ select.input-a {
   }
 }
 
+/* ===================================================================== */
+/* COLLAPSIBLE SECTIONS — Workbench right column (TASK / CHANGES /       */
+/* EXPLORER).                                                            */
+/* ===================================================================== */
+/* Tiap section punya state expanded/collapsed sendiri (state lokal di    */
+/* komponen, tanpa persistence backend/localStorage). Header dapat diklik */
+/* untuk toggle; chevron `▸` (collapsed) / `▾` (expanded) mengikuti state. */
+/* Default saat Workbench dibuka: EXPLORER expanded, TASK & CHANGES      */
+/* collapsed. Tidak ada perubahan pada scroll contract Explorer maupun   */
+/* logika Task Queue / Changes.                                          */
+
+/* Chevron bersama untuk header section (TASK sudah punya .q-caret sendiri). */
+.sec-caret {
+  flex: 0 0 auto;
+  width: 12px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-faint);
+  text-align: center;
+}
+
+/* Header CHANGES (.block-head) kini clickable. */
+.ws-col.right > .block > .block-head,
+.ws-col.right > .block > .ex-head {
+  cursor: pointer;
+  user-select: none;
+  border-radius: 6px;
+}
+.ws-col.right > .block > .block-head:hover,
+.ws-col.right > .block > .ex-head:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+/* Hierarki judul CHANGES tetap konsisten walau header clickable. */
+.ws-col.right > .block > .block-head .block-title {
+  flex: 1 1 auto;
+}
+
+/* Saat COLLAPSED: section hanya menampilkan header (tinggi natural) dan   */
+/* menyerahkan sisa tinggi kolom ke section lain (mis. Explorer). Body     */
+/* disembunyikan via v-show, jadi tidak ada scroll bersarang.              */
+/* Selector disamakan specificity dengan aturan CHANGES/aktif agar menang  */
+/* berdasarkan urutan (rule ini berada paling akhir file).                 */
+.ws-col.right > .block.collapsed:not(.explorer-block):not(.wb-queue) {
+  flex: 0 0 auto;
+  max-height: none;
+  min-height: 0;
+  overflow: hidden;
+}
+.ws-col.right > .block.explorer-block.collapsed {
+  flex: 0 0 auto;
+  max-height: none;
+}
+
+/* Padding header saat collapsed dipadatkan agar tampil seperti baris header. */
+.ws-col.right > .block.collapsed > .block-head,
+.ws-col.right > .block.collapsed > .ex-head {
+  margin-bottom: 0;
+}
+.ws-col.right > .block.collapsed:not(.explorer-block):not(.wb-queue) {
+  padding-top: 9px;
+  padding-bottom: 9px;
+}
+.ws-col.right > .block.explorer-block.collapsed {
+  padding-top: 9px;
+  padding-bottom: 9px;
+}
+
+
 
 

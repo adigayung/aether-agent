@@ -1040,6 +1040,7 @@ onBeforeUnmount(() => {
         <div class="ws-col right">
           <QueuePanel
             class="wb-queue"
+            :default-collapsed="true"
             :refresh-key="queueRefresh"
             @stop-task="stopQueueTask"
             @view-task="viewQueueTask"

@@ -20,13 +20,19 @@ import {
 const props = defineProps({
   // Penanda refresh dari parent (mis. setelah Run Task / event terminal).
   refreshKey: { type: Number, default: 0 },
+  // Default state collapsed saat komponen dipasang. Workbench memakai
+  // `true` (TASK tertutup saat pertama dibuka); Consultant tetap `false`
+  // agar perilaku panel TASKS di sana tidak berubah.
+  defaultCollapsed: { type: Boolean, default: false },
 });
 
 const emit = defineEmits(["stop-task", "view-task"]);
 
 const tasks = ref([]);
 const error = ref("");
-const collapsed = ref(false);
+// Default state collapse dikendalikan prop (lihat defaultCollapsed).
+// State hanya di frontend selama sesi (tanpa persistence backend/localStorage).
+const collapsed = ref(props.defaultCollapsed);
 const loading = ref(false);
 
 // Context menu state (reuse pola .ctx-menu existing di project).
