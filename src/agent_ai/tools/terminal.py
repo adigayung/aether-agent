@@ -8,6 +8,9 @@ Keamanan & desain:
     - Command Windows CMD builtins (dir, echo, set, dll.) dijalankan
       melalui shell=True (cmd.exe) secara otomatis.
     - Command native (python, git, npm, dll.) dijalankan dengan shell=False.
+    - Pada Windows, shim .cmd/.bat (mis. npm -> npm.CMD) di-resolve secara
+      eksplisit (PATHEXT-aware) karena CreateProcess tidak menerapkan
+      PATHEXT sehingga shim batch gagal di-resolve saat shell=False.
     - Shell syntax (&&, ||, |, >, >>) dideteksi dan dijalankan via shell.
     - Timeout wajib (default) agar agent tidak menggantung.
     - stdout/stderr/exit_code/duration ditangkap dan dikembalikan terstruktur.
@@ -30,6 +33,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -221,6 +225,39 @@ def _has_shell_operator_outside_quotes(command: str) -> bool:
     return False
 
 
+def _resolve_windows_shim(program: str, cwd: Path) -> Optional[str]:
+    """Resolve command Windows menjadi path shim ``.cmd``/``.bat`` (PATHEXT).
+
+    ``subprocess`` dengan ``shell=False`` memakai ``CreateProcess``. Berbeda
+    dari ``cmd.exe``, ``CreateProcess`` TIDAK menerapkan ``PATHEXT``: lookup
+    nama tanpa ekstensi hanya mencoba ``.exe``. Akibatnya command yang di
+    Windows hanya tersedia sebagai shim batch (mis. ``npm`` -> ``npm.CMD``)
+    gagal dengan ``FileNotFoundError`` walau bisa dijalankan dari terminal.
+
+    Fungsi ini mengembalikan path absolut HANYA bila ``program`` ter-resolve
+    ke file ``.cmd``/``.bat`` (kasus yang memang butuh shim). Untuk executable
+    biasa (``.exe``) atau command yang sudah ditangani, kembalikan ``None``
+    agar perilaku lama tidak berubah.
+    """
+    if os.name != "nt":
+        return None
+    if not program:
+        return None
+
+    # cmd.exe mencari current directory lebih dulu; ikutkan cwd efektif.
+    search = os.pathsep.join([str(cwd), os.environ.get("PATH", "")])
+    try:
+        resolved = shutil.which(program, path=search)
+    except (TypeError, ValueError):
+        return None
+
+    if not resolved:
+        return None
+    if Path(resolved).suffix.lower() in (".cmd", ".bat"):
+        return resolved
+    return None
+
+
 def _resolve_cwd(cwd: Optional[str], root: Path) -> Path:
     """Validasi dan kembalikan working directory yang aman.
 
@@ -352,6 +389,13 @@ class RunCommandTool(BaseTool):
                 )
             else:
                 argv = _split_command(str(command))
+                # Windows: resolusi shim .cmd/.bat yang tidak ditangani
+                # CreateProcess (mis. npm -> npm.CMD). Tanpa ini, command
+                # yang hanya ada sebagai shim batch gagal dijalankan.
+                if os.name == "nt":
+                    shim = _resolve_windows_shim(argv[0], cwd)
+                    if shim:
+                        argv[0] = shim
                 completed = subprocess.run(
                     argv,
                     cwd=str(cwd),

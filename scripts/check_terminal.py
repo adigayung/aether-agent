@@ -6,6 +6,7 @@ Jalankan:
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 import tempfile
@@ -87,6 +88,48 @@ def main() -> int:
         # 10) existing filesystem tools tetap bekerja.
         assert registry.has("read_file") and registry.has("write_file")
         print("existing tools tetap bekerja : OK")
+
+        # 11) BUG-01 regression: shim Windows .cmd/.bat (mis. npm -> npm.CMD)
+        #     harus dapat dijalankan walau shell=False (CreateProcess tidak
+        #     menerapkan PATHEXT). Hanya di Windows.
+        if os.name == "nt":
+            from agent_ai.tools.terminal import _resolve_windows_shim  # noqa: E402
+
+            npm = shutil.which("npm")
+            if npm:
+                r = run.execute(command="npm --version")
+                print(
+                    f"npm    : exit={r['exit_code']} success={r['success']} "
+                    f"outcome={r['outcome']} stdout={r['stdout'].strip()!r}"
+                )
+                assert r["success"] and r["exit_code"] == 0, r
+                assert r["stdout"].strip(), "npm --version harus menuliskan versi"
+            else:
+                print("[SKIP] npm tidak ada di PATH; regresi .cmd diuji via unit test")
+
+            # Resolver: .cmd/.bat -> path absolut; .exe/unknown -> None.
+            assert _resolve_windows_shim("npm", ws) is not None
+            assert _resolve_windows_shim("python", ws) is None
+            assert _resolve_windows_shim("definitely-not-a-real-cmd-xyz", ws) is None
+            print("resolver shim .cmd/.bat : OK")
+
+            # .bat lokal (di cwd workspace) juga ter-resolve tanpa PATH.
+            bat = ws / "local_shim.bat"
+            bat.write_text("@echo off\r\necho hi-from-bat\r\n", encoding="utf-8")
+            assert _resolve_windows_shim("local_shim.bat", ws) == str(bat)
+            r = run.execute(command="local_shim.bat")
+            assert r["success"] and "hi-from-bat" in r["stdout"], r
+            print("eksekusi .bat lokal : OK")
+
+        # 12) executable biasa (.exe) tidak terpengaruh resolusi shim.
+        r = run.execute(command=f'"{PY}" -c "print(456)"')
+        assert r["success"] and "456" in r["stdout"], r
+        print("executable normal (.exe) tetap bekerja : OK")
+
+        # 13) CMD builtin / operator tetap melalui shell=True seperti semula.
+        r = run.execute(command="echo hello-shell")
+        assert r["success"] and "hello-shell" in r["stdout"], r
+        print("CMD builtin (shell=True) tetap bekerja : OK")
 
         print()
         print("[OK] Terminal Executor bekerja (workspace cwd, timeout, output terstruktur).")
