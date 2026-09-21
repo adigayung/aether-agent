@@ -4,9 +4,11 @@ Menguji (deterministik, tanpa API key / model cloud):
 
     [1] Registry Agent memuat 4 capability:
         atlas_query, rig_query, project_map_status, refresh_project_map.
-    [2] Registry Consultant (mode investigate) memuat 3 capability READ-ONLY
-        (atlas_query, rig_query, project_map_status) dan TIDAK memuat
-        refresh_project_map. Mode quick tetap Bible-only.
+    [2] Registry Consultant memuat 3 capability Project Map READ-ONLY
+        (atlas_query, rig_query, project_map_status) di mode investigate MAUPUN
+        mode quick, dan TIDAK memuat refresh_project_map. Mode quick memakai
+        Bible + Map (tanpa tool source/runtime); investigate memakai Bible +
+        Map + Source + Runtime.
     [3] Tool loop: capability Project Map benar-benar dipanggil lewat mekanisme
         tool execution AETHER yang existing, dan hasilnya dikembalikan ke LLM
         sebagai tool result (Agent: continuous loop; Consultant: consult()).
@@ -331,10 +333,30 @@ def check_registries() -> None:
     print("[2] registry Consultant (investigate) = 3 capability read-only, tanpa refresh : OK")
 
     quick = set(build_consultant_registry(FIXTURE, mode="quick").list())
-    _expect(quick == {"update_project_bible"}, quick)
-    for name in AGENT_MAP_TOOLS:
-        _expect(name not in quick, "mode quick tidak boleh memuat '{}'".format(name))
-    print("[2b] registry Consultant (quick) tetap Bible-only : OK -> {}".format(sorted(quick)))
+    for name in CONSULTANT_MAP_TOOLS:
+        _expect(
+            name in quick,
+            "registry Consultant (quick) harus memuat '{}'".format(name),
+        )
+    for name in (
+        "refresh_project_map",
+        "read_file",
+        "search_code",
+        "list_files",
+        "run_command",
+    ):
+        _expect(
+            name not in quick,
+            "mode quick TIDAK boleh memuat '{}'".format(name),
+        )
+    _expect(
+        quick == set(CONSULTANT_MAP_TOOLS) | {"update_project_bible"},
+        quick,
+    )
+    print(
+        "[2b] registry Consultant (quick) = Bible + Map read-only "
+        "(tanpa source/refresh) : OK -> {}".format(sorted(quick))
+    )
 
     # Capability hanya boleh terdaftar sekali (tidak ada alias/duplikat).
     agent_list = build_registry(root=FIXTURE).list()
@@ -431,6 +453,102 @@ def check_consultant_tool_loop() -> None:
     _expect(tool_messages, "hasil tool harus dikembalikan ke LLM Consultant")
     _expect("pkg/core.py" in _join_messages(tool_messages), "tool result harus memuat hasil atlas")
     print("[3e] hasil tool dikembalikan ke LLM Consultant sebagai tool result : OK")
+
+
+def check_quick_tool_loop() -> None:
+    print()
+    print("-- Tool loop Consultant QUICK (Bible + Map, tanpa source) --")
+
+    # Quick PUNYA Project Map READ-ONLY dan dapat memanggilnya lewat loop
+    # existing (consult). Tidak ada loop/tool baru.
+    provider = ScriptedProvider(
+        [
+            _tool_response("atlas_query", query="TaskExecutor"),
+            _tool_response("rig_query", query="AgentRuntime.run", relation="callers"),
+            _final("Findings: TaskExecutor ada di pkg/core.py."),
+        ]
+    )
+    service = ConsultantService()
+    result = service.consult(
+        "Di mana TaskExecutor didefinisikan?",
+        provider=provider,
+        root=str(FIXTURE),
+        mode="quick",
+    )
+    _expect(result.status == "done", result.status)
+    _expect(result.mode == "quick", "mode harus quick, dapat {}".format(result.mode))
+    used = [event["tool"] for event in result.tool_events]
+    _expect("atlas_query" in used, "QUICK harus bisa memakai atlas_query: {}".format(used))
+    _expect("rig_query" in used, "QUICK harus bisa memakai rig_query: {}".format(used))
+    map_events = [
+        e
+        for e in result.tool_events
+        if e["tool"] in CONSULTANT_MAP_TOOLS and e.get("success") is not None
+    ]
+    _expect(
+        map_events and all(e["success"] is True for e in map_events),
+        "tool map QUICK harus sukses: {}".format(result.tool_events),
+    )
+    _expect(
+        "refresh_project_map" not in used,
+        "QUICK tidak boleh memakai refresh_project_map",
+    )
+    print("[3f] QUICK dapat memanggil atlas_query + rig_query via consult() : OK -> {}".format(used))
+
+    tool_messages = [
+        m for m in (provider.received_messages[-1] or []) if m.get("role") == "tool"
+    ]
+    _expect(tool_messages, "hasil tool harus dikembalikan ke LLM Quick")
+    _expect(
+        "pkg/core.py" in _join_messages(tool_messages),
+        "tool result QUICK harus memuat hasil atlas",
+    )
+    print("[3g] hasil tool QUICK dikembalikan ke LLM sebagai tool result : OK")
+
+    # Capability Quick benar-benar masuk ke tool definitions yang diterima LLM
+    # (bukan hanya registry internal) — pakai mekanisme registry existing.
+    offered = {getattr(t, "name", None) for t in (provider.received_tools[0] or [])}
+    _expect(
+        {"atlas_query", "rig_query", "project_map_status"} <= offered,
+        "tool definitions Quick harus memuat capability map: {}".format(offered),
+    )
+    for forbidden in (
+        "refresh_project_map",
+        "read_file",
+        "search_code",
+        "list_files",
+        "run_command",
+    ):
+        _expect(
+            forbidden not in offered,
+            "tool definitions Quick TIDAK boleh memuat '{}'".format(forbidden),
+        )
+    print(
+        "[3h] tool definitions Quick memuat map & tanpa source/refresh : OK -> {}".format(
+            sorted(name for name in offered if name)
+        )
+    )
+
+    # Quick tetap TIDAK punya tool source/runtime maupun refresh (struktural:
+    # tidak terdaftar di registry, sehingga executor menolaknya).
+    executor = ToolExecutor(
+        registry=build_consultant_registry(FIXTURE, mode="quick"),
+        permission_manager=build_consultant_permission_manager(),
+    )
+    blocked_calls = (
+        ("read_file", {"path": "pkg/core.py"}),
+        ("search_code", {"query": "TaskExecutor"}),
+        ("list_files", {"path": "."}),
+        ("run_command", {"command": "git status"}),
+        ("refresh_project_map", {"target": "both"}),
+    )
+    for name, args in blocked_calls:
+        payload = executor.execute_tool_call(ToolCall.create(name, args))
+        _expect(
+            not payload.is_success,
+            "QUICK tidak boleh mengeksekusi '{}'".format(name),
+        )
+    print("[3i] QUICK menolak read_file/search_code/list_files/run_command/refresh : OK")
 
 
 # --------------------------------------------------------------------------- #
@@ -660,6 +778,7 @@ def _run() -> int:
     check_registries()
     check_agent_tool_loop()
     check_consultant_tool_loop()
+    check_quick_tool_loop()
     check_no_automatic_query()
     check_no_full_map_injection()
     check_consultant_read_only()

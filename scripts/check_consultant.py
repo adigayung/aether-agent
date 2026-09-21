@@ -4,7 +4,10 @@ Menguji:
     1. Consultant core: reasoning loop menghasilkan reply + Task Proposal.
     2. Project Bible terpakai sebagai konteks AND tool update_project_bible
        menyimpan knowledge ke `<root>/.aether/bible/` (store existing).
-    3. Boundary: registry Consultant TIDAK memuat tool tulis/hapus/pindah.
+    3. Boundary: registry Consultant TIDAK memuat tool tulis/hapus/pindah dan
+       TIDAK memuat refresh_project_map. Mode quick memuat Project Map READ-ONLY
+       (atlas_query/rig_query/project_map_status) TANPA tool source/runtime
+       (read_file/search_code/list_files/run_command).
     4. Boundary: permission policy menolak write/delete-move.
     5. Boundary: run_command Consultant menolak command destruktif dan membaca
        (git read) diizinkan.
@@ -143,18 +146,35 @@ def _run(root: Path) -> int:
     assert "add(a,b)" in facts.read_text(encoding="utf-8"), "knowledge harus tersimpan di Bible"
     print("[2] Project Bible update OK -> .aether/bible/facts.md")
 
-    # 3) Boundary: registry INVESTIGATE (default) memuat tool investigasi,
-    #    tanpa tool tulis/hapus/pindah.
+    # 3) Boundary: registry INVESTIGATE (default) memuat tool source/runtime +
+    #    Project Map READ-ONLY, tanpa refresh dan tanpa tool tulis/hapus/pindah.
     reg = build_consultant_registry(root, mode="investigate")
     names = set(reg.list())
-    for forbidden in ("write_file", "edit_file", "delete_file", "move_file"):
+    for forbidden in (
+        "write_file",
+        "edit_file",
+        "delete_file",
+        "move_file",
+        "refresh_project_map",
+    ):
         assert forbidden not in names, f"registry tidak boleh memuat {forbidden}"
-    for required in ("list_files", "read_file", "search_code", "run_command", "update_project_bible"):
+    for required in (
+        "list_files",
+        "read_file",
+        "search_code",
+        "run_command",
+        "atlas_query",
+        "rig_query",
+        "project_map_status",
+        "update_project_bible",
+    ):
         assert required in names, f"registry harus memuat {required}"
     print(f"[3] registry INVESTIGATE OK -> {sorted(names)}")
 
-    # 3b) Boundary: registry QUICK TIDAK memuat tool investigasi project;
-    #     hanya update_project_bible (Bible read via konteks, Bible update via tool).
+    # 3b) Boundary: registry QUICK memuat Project Map READ-ONLY (atlas_query,
+    #     rig_query, project_map_status) + update_project_bible; TIDAK memuat
+    #     tool source/runtime (list_files/read_file/search_code/run_command)
+    #     maupun refresh_project_map / tool tulis.
     reg_quick = build_consultant_registry(root, mode="quick")
     names_quick = set(reg_quick.list())
     for forbidden in (
@@ -162,26 +182,53 @@ def _run(root: Path) -> int:
         "read_file",
         "search_code",
         "run_command",
+        "refresh_project_map",
         "write_file",
         "edit_file",
         "delete_file",
         "move_file",
     ):
         assert forbidden not in names_quick, f"QUICK tidak boleh memuat {forbidden}"
-    assert names_quick == {"update_project_bible"}, names_quick
-    print(f"[3b] registry QUICK OK -> {sorted(names_quick)} (tanpa tool investigasi)")
+    for required in (
+        "atlas_query",
+        "rig_query",
+        "project_map_status",
+        "update_project_bible",
+    ):
+        assert required in names_quick, f"QUICK harus memuat {required}"
+    assert names_quick == {
+        "atlas_query",
+        "rig_query",
+        "project_map_status",
+        "update_project_bible",
+    }, names_quick
+    print(
+        f"[3b] registry QUICK OK -> {sorted(names_quick)} "
+        "(Bible + Map read-only; tanpa source/refresh)"
+    )
 
-    # 3c) Prompt per-mode: Quick melarang investigasi; Investigate mengizinkannya.
+    # 3c) Prompt per-mode: Quick = Bible + Map (tanpa source/refresh);
+    #     Investigate mengizinkan tool source/runtime.
     quick_prompt = build_consultant_system_prompt("quick")
     inv_prompt = build_consultant_system_prompt("investigate")
     assert "AETHER Consultant" in quick_prompt and "AETHER Consultant" in inv_prompt
     assert "QUICK" in quick_prompt, "prompt quick harus menandai mode QUICK"
-    assert "TIDAK memiliki tool investigasi" in quick_prompt, quick_prompt
-    for tool_name in ("list_files", "read_file", "search_code", "run_command"):
+    for map_tool in ("atlas_query", "rig_query", "project_map_status"):
+        assert map_tool in quick_prompt, f"prompt quick harus menyebut tool map {map_tool}"
+    for tool_name in (
+        "list_files",
+        "read_file",
+        "search_code",
+        "run_command",
+        "refresh_project_map",
+    ):
         assert tool_name not in quick_prompt, f"prompt quick tidak boleh menyebut tool {tool_name}"
     assert "INVESTIGATE" in inv_prompt, "prompt investigate harus menandai mode"
     assert "search_code" in inv_prompt and "run_command" in inv_prompt, inv_prompt
-    print("[3c] prompt per-mode OK -> Quick tanpa investigasi, Investigate dengan tool project")
+    print(
+        "[3c] prompt per-mode OK -> Quick (Bible+Map, tanpa source) + "
+        "Investigate (Bible+Map+Source+Runtime)"
+    )
 
     # 4) Boundary: permission policy menolak write / delete-move.
     pm = build_consultant_permission_manager()

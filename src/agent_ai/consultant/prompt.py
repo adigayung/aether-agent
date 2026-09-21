@@ -6,12 +6,15 @@ selesai.
 
 Prompt dibangun per-MODE:
 
-    quick       -> hanya Project Bible + percakapan; tanpa investigasi project.
-    investigate -> Project Bible sebagai konteks awal, lalu boleh memakai tool
-                   project existing bila memang perlu verifikasi/investigasi.
+    quick       -> Project Bible + Project Map READ-ONLY (atlas_query,
+                   rig_query, project_map_status); TANPA tool source/runtime.
+    investigate -> Project Bible + Project Map + tool source/runtime existing
+                   (list_files, read_file, search_code, run_command) bila
+                   memang perlu verifikasi/investigasi.
 
 Catatan: pembatasan tool pada mode quick TIDAK hanya bersandar pada prompt.
-Registry tool (tools.py) benar-benar tidak mendaftarkan tool investigasi pada
+Registry tool (tools.py) benar-benar tidak mendaftarkan tool source/runtime
+(read_file/search_code/list_files/run_command) maupun refresh_project_map pada
 mode quick, sehingga tool tersebut tidak pernah ditawarkan ke LLM.
 """
 
@@ -62,22 +65,38 @@ def _mode_lines(mode: str) -> List[str]:
     if mode == MODE_QUICK:
         return [
             "",
-            "## Mode: QUICK (percakapan cepat berbasis Project Bible)",
-            "- Sumber informasi Anda HANYA: Project Bible (system message) dan",
-            "  percakapan konsultasi. Anda TIDAK memiliki tool investigasi project.",
-            "- JANGAN melakukan investigasi source/project. Jangan mengarang hasil",
-            "  inspeksi: pada mode ini tidak tersedia tool untuk menelusuri directory,",
-            "  membaca file, mencari source, atau menjalankan command.",
-            "- Bila jawaban butuh data yang tidak ada di Bible/percakapan, katakan",
-            "  apa yang belum diketahui dan sarankan user memakai mode Investigate.",
-            "- Tool yang tersedia: update_project_bible (menyimpan knowledge project",
-            "  yang sudah terverifikasi ke Project Bible).",
+            "## Mode: QUICK (percakapan cepat berbasis Project Bible + Project Map)",
+            "- Sumber informasi Anda: Project Bible (system message), percakapan",
+            "  konsultasi, dan PROJECT MAP READ-ONLY (struktur/navigasi project).",
+            "- Anda TIDAK memiliki tool untuk membaca SOURCE CODE atau menjalankan",
+            "  command. JANGAN mengarang isi source: pada mode ini tidak tersedia",
+            "  tool untuk menelusuri directory, membaca file, mencari source, atau",
+            "  menjalankan command.",
+            "- Tool Project Map (READ-ONLY; panggil HANYA bila perlu):",
+            "  * atlas_query(query, ...): menemukan LOKASI symbol/module/file",
+            "    (nama file + rentang baris) dan relasi dasarnya.",
+            "  * rig_query(query, relation, ...): relationship graph (callers,",
+            "    callees, imports, inherits, contains, depends_on, dsb.).",
+            "  * project_map_status(): status ringkas peta (available/missing/",
+            "    invalid + freshness).",
+            "  Hasil map = LOKASI/RELASI, BUKAN isi source. Bila butuh membaca",
+            "  kode, sarankan user memakai mode Investigate.",
+            "- Anda TIDAK dapat meregenerasi/mengubah peta (tidak ada refresh map).",
+            "- Bila jawaban butuh data yang tidak ada di Bible/percakapan/map,",
+            "  katakan apa yang belum diketahui dan sarankan user memakai mode",
+            "  Investigate.",
+            "- Tool yang tersedia: atlas_query, rig_query, project_map_status,",
+            "  update_project_bible (menyimpan knowledge project yang sudah",
+            "  terverifikasi ke Project Bible).",
             "",
             "## Cara kerja (Quick)",
             "1. Pahami pertanyaan user + Project Bible + percakapan sebelumnya.",
-            "2. Jawab ringkas, analitis, dan actionable berdasarkan knowledge yang ada.",
-            "3. Bila perlu, susun Task Proposal (tanpa investigasi project).",
-            "4. Simpan knowledge baru yang layak dipertahankan lewat",
+            "2. Bila perlu (lokasi/struktur/relasi kode), panggil atlas_query /",
+            "   rig_query / project_map_status. JANGAN panggil map untuk pertanyaan",
+            "   yang sudah bisa dijawab dari Bible.",
+            "3. Jawab ringkas, analitis, dan actionable berdasarkan knowledge + map.",
+            "4. Bila perlu, susun Task Proposal (tanpa membaca source).",
+            "5. Simpan knowledge baru yang layak dipertahankan lewat",
             "   update_project_bible (opsional, hanya bila memang ada knowledge baru).",
         ]
 

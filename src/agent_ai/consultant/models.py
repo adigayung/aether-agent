@@ -10,10 +10,12 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 #: Mode Consultant:
-#:   quick       -> percakapan cepat berbasis Project Bible + conversation saja
-#:                  (TANPA tool investigasi source/project).
+#:   quick       -> percakapan cepat berbasis Project Bible + Project Map
+#:                  READ-ONLY (atlas_query/rig_query/project_map_status);
+#:                  TANPA tool source/runtime (read_file/search_code/list_files/
+#:                  run_command) dan TANPA refresh_project_map.
 #:   investigate -> Project Bible sebagai konteks awal, lalu boleh memakai tool
-#:                  project existing bila perlu verifikasi/investigasi.
+#:                  source/runtime existing bila perlu verifikasi/investigasi.
 MODE_QUICK = "quick"
 MODE_INVESTIGATE = "investigate"
 

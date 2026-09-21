@@ -28,12 +28,13 @@ Prinsip (lihat juga `agent_ai.projects.project_map_query`):
 Wiring (Agent vs Consultant):
     - Agent (`agent_ai.tools.registry.build_registry`)  : 4 tool (termasuk
       `refresh_project_map`).
-    - Consultant (`agent_ai.consultant.tools.build_consultant_registry`,
-      mode INVESTIGATE)                                 : 3 tool READ-ONLY
-      (`atlas_query`, `rig_query`, `project_map_status`) TANPA
-      `refresh_project_map`, sehingga Consultant tetap read-only terhadap map.
+    - Consultant (`agent_ai.consultant.tools.build_consultant_registry`) :
+      3 tool READ-ONLY (`atlas_query`, `rig_query`, `project_map_status`) TANPA
+      `refresh_project_map` - tersedia baik di mode QUICK maupun INVESTIGATE,
+      sehingga Consultant tetap read-only terhadap map. Quick memakai Bible +
+      Map tanpa tool source/runtime; Investigate menambahkan source/runtime.
     - `build_project_map_tools()` / `build_project_map_registry()` dipakai
-      kedua registry tersebut agar konstruksi tool hanya punya satu sumber.
+      registry tersebut agar konstruksi tool hanya punya satu sumber.
 """
 
 from __future__ import annotations

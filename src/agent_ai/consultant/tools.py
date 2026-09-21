@@ -3,10 +3,14 @@
 Boundary Consultant: READ-ONLY terhadap CODE PROJECT, READ+UPDATE terhadap
 Project Bible. Karena itu registry Consultant DIKURASI dan bergantung MODE:
 
-    mode "quick"       -> HANYA update_project_bible.
-                          (Bible read lewat konteks; TANPA tool investigasi.)
-    mode "investigate" -> list_files, read_file, search_code, run_command,
-                          atlas_query, rig_query, project_map_status
+    mode "quick"       -> atlas_query, rig_query, project_map_status
+                          (Project Map READ-ONLY: paham struktur project lewat
+                          peta) + update_project_bible.
+                          Bible read lewat konteks; TANPA tool source/runtime
+                          (tidak ada read_file/search_code/list_files/
+                          run_command).
+    mode "investigate" -> atlas_query, rig_query, project_map_status,
+                          list_files, read_file, search_code, run_command
                           (READ-ONLY terhadap source/project) +
                           update_project_bible.
 
@@ -14,7 +18,13 @@ Tool tulis/hapus/pindah (`write_file`, `edit_file`, `delete_file`,
 `move_file`) SENGAJA tidak pernah didaftarkan, sehingga Consultant tidak dapat
 memodifikasi source lewat mekanisme tool. Demikian pula
 `refresh_project_map` (regenerate/menulis file map) TIDAK pernah didaftarkan:
-Consultant tetap read-only terhadap Project Map.
+Consultant tetap read-only terhadap Project Map (boleh query map, tidak boleh
+mengubah/meregenerasi map).
+
+Perbedaan utama Quick vs Investigate:
+    Quick       -> Bible + Map (atlas_query/rig_query/project_map_status).
+                   TIDAK membaca source/runtime.
+    Investigate -> Bible + Map + Source + Runtime (read-only).
 
 Modul ini TIDAK membuat subsystem baru:
     - read/search tools  : memakai tools filesystem existing.
@@ -297,8 +307,11 @@ def build_consultant_registry(
         provider/options: tidak dipakai saat ini (disediakan untuk ekstensi),
             dipertahankan agar signature stabil.
         mode: "quick" | "investigate" (nilai tak dikenal -> default quick).
-            - quick       : HANYA update_project_bible (Bible read via konteks +
-                            Bible update via tool). Tanpa tool investigasi project.
+            - quick       : capability Project Map READ-ONLY (atlas_query,
+                            rig_query, project_map_status) + update_project_bible
+                            (Bible read via konteks + Bible update via tool).
+                            TANPA tool source/runtime (read_file/search_code/
+                            list_files/run_command) dan TANPA refresh_project_map.
             - investigate : tool Consultant existing (list_files, read_file,
                             search_code, run_command) + capability Project Map
                             READ-ONLY (atlas_query, rig_query,
@@ -315,25 +328,28 @@ def build_consultant_registry(
 
     registry = ToolRegistry()
 
+    # Project Map READ-ONLY tersedia di SEMUA mode Consultant (quick maupun
+    # investigate): atlas_query, rig_query, project_map_status. `include_refresh
+    # =False` -> `refresh_project_map` TIDAK pernah tersedia untuk Consultant,
+    # sehingga Consultant tetap read-only terhadap Project Map (boleh query,
+    # tidak boleh regenerate/menulis). Quick memakai map tanpa boleh membaca
+    # source.
+    from agent_ai.tools.project_map import build_project_map_tools
+
+    for tool in build_project_map_tools(root=resolved, include_refresh=False):
+        registry.register(tool)
+
     if normalized == MODE_INVESTIGATE:
         from agent_ai.tools.filesystem import (
             ListFilesTool,
             ReadFileTool,
             SearchCodeTool,
         )
-        from agent_ai.tools.project_map import build_project_map_tools
 
         registry.register(ListFilesTool(root=resolved))
         registry.register(ReadFileTool(root=resolved))
         registry.register(SearchCodeTool(root=resolved))
         registry.register(ConsultantRunCommandTool(root=resolved))
-        # Project Map READ-ONLY (atlas_query, rig_query, project_map_status).
-        # `include_refresh=False` -> `refresh_project_map` TIDAK pernah
-        # tersedia untuk Consultant (tidak bisa regenerate/menulis map).
-        for tool in build_project_map_tools(
-            root=resolved, include_refresh=False
-        ):
-            registry.register(tool)
 
     # Project Bible update tersedia di SEMUA mode (satu-satunya jalur tulis
     # Consultant). Project Bible READ dilakukan via konteks system message.
