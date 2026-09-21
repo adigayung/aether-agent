@@ -77,14 +77,6 @@ function submit() {
   emit("submit", value);
   text.value = "";
 }
-
-function onKeydown(e) {
-  // Enter mengirim; Shift+Enter baris baru.
-  if (e.key === "Enter" && !e.shiftKey) {
-    e.preventDefault();
-    submit();
-  }
-}
 </script>
 
 <template>
@@ -94,8 +86,7 @@ function onKeydown(e) {
       v-model="text"
       class="composer-text"
       :disabled="disabled"
-      placeholder="Describe the task for AETHER…  (Enter to run, Shift+Enter for a new line)"
-      @keydown="onKeydown"
+      placeholder="Describe the task for AETHER…  (Enter for a new line)"
     ></textarea>
   </div>
 

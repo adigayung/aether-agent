@@ -168,16 +168,32 @@ const queueItems = ref([]);
 // Badge QUEUE = jumlah item non-terminal (endpoint queue hanya mengembalikan
 // pending/running/disabled; task terminal tidak masuk antrian).
 const queueCount = computed(() => queueItems.value.length);
+// CATATAN: `terminalTaskId` (task_id terakhir yang mencapai status terminal)
+// dideklarasikan di bagian Consultant di bawah; dipakai juga di sini agar
+// refresh antrian TIDAK memunculkan kembali task yang sudah berhenti.
 async function refreshRunningTask() {
   try {
     const data = await listTaskQueue();
     const items = data.tasks || [];
     queueItems.value = items;
-    const running = items.find((t) => t.queue_state === "running");
+    // Jangan anggap "running" task yang sudah kita ketahui terminal: respons
+    // antrian bisa saja masih memuat status lama tepat setelah task selesai.
+    const running = items.find(
+      (t) => t.queue_state === "running" && t.task_id !== terminalTaskId.value
+    );
     runningTaskId.value = running ? running.task_id : "";
   } catch {
     // Endpoint queue belum tersedia: pertahankan state existing (fallback).
   }
+}
+
+// Task yang berjalan sudah mencapai status terminal -> lepas target tombol Stop
+// SECARA SINKRON (tanpa menunggu refresh antrian async). Ini yang menjamin
+// tombol Stop LANGSUNG hilang saat task selesai/gagal/cancel, tanpa jendela
+// race. Hanya pemilik slot yang dilepas (bila diketahui).
+function releaseRunningTask(taskId) {
+  if (!runningTaskId.value) return;
+  if (!taskId || taskId === runningTaskId.value) runningTaskId.value = "";
 }
 
 // isRunning = ADA task yang sedang RUNNING (bukan apakah task yang sedang
@@ -550,8 +566,11 @@ function handleEvent(evt) {
       runtime.activity = "";
       // Refresh File Explorer setelah agent selesai (file baru terlihat).
       explorerRefresh.value += 1;
-      queueRefresh.value += 1;
+      // Task terminal: lepas target tombol Stop SECARA SINKRON (tombol langsung
+      // hilang), baru refresh antrian untuk memilih task running berikutnya.
       terminalTaskId.value = evt.task_id || task.id || "";
+      releaseRunningTask(terminalTaskId.value);
+      queueRefresh.value += 1;
       playStatusSound("completed");
       refreshTaskHistory();
       break;
@@ -559,8 +578,10 @@ function handleEvent(evt) {
       task.status = "failed";
       // Task gagal -> hentikan reasoning status.
       isReasoning.value = false;
-      queueRefresh.value += 1;
+      // Task terminal: tombol Stop langsung hilang (sinkron, tanpa race).
       terminalTaskId.value = evt.task_id || task.id || "";
+      releaseRunningTask(terminalTaskId.value);
+      queueRefresh.value += 1;
       playStatusSound("failed");
       refreshTaskHistory();
       break;
@@ -571,8 +592,10 @@ function handleEvent(evt) {
       // Execution benar-benar berhenti -> indikator Agent kembali idle.
       runtime.activity = "";
       runtime.tool = "";
-      queueRefresh.value += 1;
+      // Task terminal: tombol Stop langsung hilang (sinkron, tanpa race).
       terminalTaskId.value = evt.task_id || task.id || "";
+      releaseRunningTask(terminalTaskId.value);
+      queueRefresh.value += 1;
       playStatusSound("cancelled");
       refreshTaskHistory();
       break;
