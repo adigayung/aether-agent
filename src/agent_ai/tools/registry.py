@@ -113,6 +113,13 @@ def build_registry(root: "Path | None" = None) -> ToolRegistry:
 
     Returns:
         ToolRegistry baru berisi seluruh tool bawaan.
+
+    Catatan Project Map: capability `atlas_query`, `rig_query`,
+    `project_map_status`, dan `refresh_project_map` terdaftar di sini (Agent).
+    Tool ini hanya bekerja bila `root` project diketahui (lokasi
+    `<root>/.aether/map/`). Registry Consultant dibangun terpisah
+    (`agent_ai.consultant.tools.build_consultant_registry`) TANPA
+    `refresh_project_map`, sehingga Consultant tetap read-only terhadap map.
     """
     from pathlib import Path as _Path
 
@@ -121,6 +128,7 @@ def build_registry(root: "Path | None" = None) -> ToolRegistry:
         ReadFileTool,
         SearchCodeTool,
     )
+    from agent_ai.tools.project_map import build_project_map_tools
     from agent_ai.tools.terminal import RunCommandTool
     from agent_ai.tools.workspace import (
         DeleteFileTool,
@@ -139,6 +147,9 @@ def build_registry(root: "Path | None" = None) -> ToolRegistry:
     reg.register(DeleteFileTool(root=resolved))
     reg.register(MoveFileTool(root=resolved))
     reg.register(RunCommandTool(root=resolved))
+    # Project Map (Agent): termasuk refresh_project_map (Agent-only).
+    for tool in build_project_map_tools(root=resolved, include_refresh=True):
+        reg.register(tool)
     return reg
 
 

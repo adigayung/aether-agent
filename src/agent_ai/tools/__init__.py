@@ -12,6 +12,14 @@ from agent_ai.tools.filesystem import (
 )
 from agent_ai.tools.registry import ToolRegistry, registry
 from agent_ai.tools.terminal import RunCommandTool
+from agent_ai.tools.project_map import (
+    AtlasQueryTool,
+    ProjectMapStatusTool,
+    RefreshProjectMapTool,
+    RigQueryTool,
+    build_project_map_registry,
+    build_project_map_tools,
+)
 from agent_ai.tools.workspace import (
     DeleteFileTool,
     EditFileTool,
@@ -35,5 +43,11 @@ __all__ = [
     "DeleteFileTool",
     "MoveFileTool",
     "RunCommandTool",
+    "AtlasQueryTool",
+    "RigQueryTool",
+    "ProjectMapStatusTool",
+    "RefreshProjectMapTool",
+    "build_project_map_tools",
+    "build_project_map_registry",
 ]
 

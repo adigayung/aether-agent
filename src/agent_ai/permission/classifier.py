@@ -5,7 +5,8 @@ TIDAK mengeksekusi apa pun. Ia hanya memetakan nama action/tool (dan argumen
 bila perlu) ke ActionClass.
 
 Sumber klasifikasi:
-    - Peta nama tool bawaan (read-only / write / delete-move / command).
+    - Peta nama tool bawaan (read-only / write / delete-move / command /
+      project-map).
     - Heuristik nama action untuk tool kustom (mis. mengandung "delete"/"move").
     - Argumen (mis. action "run_command" -> COMMAND_EXECUTION).
 
@@ -40,6 +41,21 @@ _DELETE_MOVE_TOOLS = frozenset({
 #: Tool command/terminal bawaan (lihat tools/terminal.py).
 _COMMAND_TOOLS = frozenset({
     "run_command",
+})
+
+#: Tool Project Map read-only (lihat tools/project_map.py): navigasi codebase
+#: (atlas) + relationship graph (rig) + status map. Tidak mengubah apa pun.
+_PROJECT_MAP_READ_TOOLS = frozenset({
+    "atlas_query",
+    "rig_query",
+    "project_map_status",
+})
+
+#: Tool Project Map yang MENULIS file map di dalam project
+#: (`<root>/.aether/map/*.json`) lewat engine Atlas/RIG (lihat
+#: tools/project_map.py + projects/project_map.py). Hanya Agent yang punya.
+_PROJECT_MAP_WRITE_TOOLS = frozenset({
+    "refresh_project_map",
 })
 
 #: Kata kunci nama action untuk heuristik tool kustom.
@@ -80,6 +96,10 @@ class ActionClassifier:
             return ActionClass.DELETE_MOVE
         if name in _COMMAND_TOOLS:
             return ActionClass.COMMAND_EXECUTION
+        if name in _PROJECT_MAP_READ_TOOLS:
+            return ActionClass.READ_ONLY
+        if name in _PROJECT_MAP_WRITE_TOOLS:
+            return ActionClass.WORKSPACE_WRITE
 
         # 2) Heuristik nama action (untuk tool kustom).
         #    Urutan penting: delete/move diperiksa sebelum write/read.

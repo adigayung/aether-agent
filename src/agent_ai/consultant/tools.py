@@ -5,15 +5,21 @@ Project Bible. Karena itu registry Consultant DIKURASI dan bergantung MODE:
 
     mode "quick"       -> HANYA update_project_bible.
                           (Bible read lewat konteks; TANPA tool investigasi.)
-    mode "investigate" -> list_files, read_file, search_code, run_command
-                          (READ-ONLY terhadap source) + update_project_bible.
+    mode "investigate" -> list_files, read_file, search_code, run_command,
+                          atlas_query, rig_query, project_map_status
+                          (READ-ONLY terhadap source/project) +
+                          update_project_bible.
 
 Tool tulis/hapus/pindah (`write_file`, `edit_file`, `delete_file`,
 `move_file`) SENGAJA tidak pernah didaftarkan, sehingga Consultant tidak dapat
-memodifikasi source lewat mekanisme tool.
+memodifikasi source lewat mekanisme tool. Demikian pula
+`refresh_project_map` (regenerate/menulis file map) TIDAK pernah didaftarkan:
+Consultant tetap read-only terhadap Project Map.
 
 Modul ini TIDAK membuat subsystem baru:
     - read/search tools  : memakai tools filesystem existing.
+    - Project Map        : memakai capability existing (tools/project_map.py),
+                           hanya versi READ-ONLY (tanpa refresh).
     - run_command        : memakai RunCommandTool existing (Windows-aware).
     - Bible              : memakai BibleStore / IntelligenceLearner existing.
 """
@@ -294,7 +300,10 @@ def build_consultant_registry(
             - quick       : HANYA update_project_bible (Bible read via konteks +
                             Bible update via tool). Tanpa tool investigasi project.
             - investigate : tool Consultant existing (list_files, read_file,
-                            search_code, run_command) + update_project_bible.
+                            search_code, run_command) + capability Project Map
+                            READ-ONLY (atlas_query, rig_query,
+                            project_map_status) + update_project_bible.
+                            TANPA refresh_project_map.
 
     Returns:
         ToolRegistry berisi tool yang AMAN untuk Consultant (tanpa tool tulis).
@@ -312,11 +321,19 @@ def build_consultant_registry(
             ReadFileTool,
             SearchCodeTool,
         )
+        from agent_ai.tools.project_map import build_project_map_tools
 
         registry.register(ListFilesTool(root=resolved))
         registry.register(ReadFileTool(root=resolved))
         registry.register(SearchCodeTool(root=resolved))
         registry.register(ConsultantRunCommandTool(root=resolved))
+        # Project Map READ-ONLY (atlas_query, rig_query, project_map_status).
+        # `include_refresh=False` -> `refresh_project_map` TIDAK pernah
+        # tersedia untuk Consultant (tidak bisa regenerate/menulis map).
+        for tool in build_project_map_tools(
+            root=resolved, include_refresh=False
+        ):
+            registry.register(tool)
 
     # Project Bible update tersedia di SEMUA mode (satu-satunya jalur tulis
     # Consultant). Project Bible READ dilakukan via konteks system message.
