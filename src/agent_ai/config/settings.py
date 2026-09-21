@@ -65,6 +65,15 @@ class OllamaConfig:
     host: str = field(default_factory=lambda: _get("OLLAMA_HOST", "http://127.0.0.1:11434"))
     model: str = field(default_factory=lambda: _get("OLLAMA_MODEL", "qwen2.5-coder:7b"))
     timeout: int = field(default_factory=lambda: _get_int("OLLAMA_TIMEOUT", 120))
+    #: Context window (token) yang diminta ke server Ollama lewat option
+    #: `num_ctx`. Default server Ollama KECIL (~4096) dan prompt yang melebihi
+    #: kapasitas dipotong DARI DEPAN tanpa error: system prompt + awal konteks
+    #: (mis. Project Bible pada Consultant) hilang sehingga model menjawab
+    #: generik/halusinasi. Menyetel `num_ctx` membuat Ollama benar-benar
+    #: menerima konteks yang dikirim — perilakunya setara provider lain yang
+    #: memakai context window modelnya sendiri. 0 = tidak mengirim num_ctx
+    #: (pakai default server). Override: env `OLLAMA_NUM_CTX`.
+    num_ctx: int = field(default_factory=lambda: _get_int("OLLAMA_NUM_CTX", 32768))
 
 
 @dataclass(frozen=True)

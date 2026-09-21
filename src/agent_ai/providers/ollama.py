@@ -20,11 +20,23 @@ from agent_ai.providers.base import (
     ProviderResponseError,
     ToolChoice,
     ToolDefinition,
+    build_provider_api_error,
 )
 from agent_ai.providers.retry import (
     InfrastructureRetryPolicy,
     post_with_infrastructure_retry,
 )
+
+
+#: Token yang disisakan dari anggaran prompt untuk hal non-pengetahuan
+#: (system prompt Consultant/Agent, definisi tool, pertanyaan user, dan output).
+_OLLAMA_PROMPT_RESERVE_TOKENS = 4096
+
+#: Ollama memotong prompt yang melebihi kapasitas pada sekitar SEPARUH `num_ctx`
+#: (terukur pada Ollama lokal: num_ctx=16384 -> prompt dievaluasi maksimum
+#: ~8194 token; num_ctx=32768 -> ~16386 token). Anggaran prompt dihitung
+#: konservatif dari num_ctx/2 agar konteks tidak terpotong oleh server.
+_OLLAMA_PROMPT_BUDGET_DIVISOR = 2
 
 
 class OllamaProvider(BaseProvider):
@@ -49,6 +61,32 @@ class OllamaProvider(BaseProvider):
         if self.retry_policy is None:
             self.retry_policy = InfrastructureRetryPolicy.from_settings()
         return self.retry_policy
+
+    # ------------------------------------------------------------------ #
+    # Context window (parity dengan provider lain)
+    # ------------------------------------------------------------------ #
+    def knowledge_budget_tokens(self) -> Optional[int]:
+        """Anggaran token untuk konteks pengetahuan (Project Bible, dsb.).
+
+        Ollama memakai context window SERVER-SIDE yang defaultnya jauh lebih
+        kecil daripada konteks yang dikirim AETHER, dan memotong prompt dari
+        DEPAN tanpa error. Provider lain (cloud) memakai context window
+        modelnya sendiri, sehingga konteks yang sama "kebetulan" diterima.
+
+        Anggaran dihitung dari `num_ctx` yang memang dikirim provider ini
+        (lihat `_build_payload`), dikurangi cadangan untuk system prompt/tool/
+        output, sehingga AgentOrchestrator dapat memotong konteks pengetahuan
+        secara terkendali dan system prompt tidak pernah hilang.
+
+        Returns:
+            Anggaran token konteks pengetahuan, atau None bila `num_ctx` = 0
+            (tidak menyetel context window; perilaku server default).
+        """
+        num_ctx = int(getattr(self.config, "num_ctx", 0) or 0)
+        if num_ctx <= 0:
+            return None
+        usable_prompt = num_ctx // _OLLAMA_PROMPT_BUDGET_DIVISOR
+        return max(0, usable_prompt - _OLLAMA_PROMPT_RESERVE_TOKENS)
 
     # ------------------------------------------------------------------ #
     # Helper internal
@@ -89,6 +127,14 @@ class OllamaProvider(BaseProvider):
 
         # Gabungkan opsi generasi umum + extra khusus Ollama.
         gen_options: Dict[str, Any] = {}
+        # Context window server-side. Default Ollama kecil (~4096) dan prompt
+        # yang melebihi kapasitas dipotong DARI DEPAN tanpa error (system prompt
+        # + awal konteks hilang). Mengirim `num_ctx` membuat Ollama benar-benar
+        # menerima konteks yang dikirim AETHER, setara provider lain yang
+        # memakai context window modelnya. 0 = pakai default server.
+        num_ctx = int(getattr(self.config, "num_ctx", 0) or 0)
+        if num_ctx > 0:
+            gen_options["num_ctx"] = num_ctx
         if opts.temperature is not None:
             gen_options["temperature"] = opts.temperature
         if opts.max_tokens is not None:
@@ -216,9 +262,15 @@ class OllamaProvider(BaseProvider):
         )
 
         if response.status_code >= 400:
-            raise ProviderAPIError(
-                f"Provider '{self.name}' mengembalikan HTTP {response.status_code}.",
-                status_code=response.status_code,
+            # Pesan DIAGNOSABLE (additive): status + endpoint + potongan body
+            # respons, sehingga 404 "model not found" (body JSON) dapat
+            # dibedakan dari 404 "page not found" (body non-JSON/HTML).
+            raise build_provider_api_error(
+                self.name,
+                response.status_code,
+                method="POST",
+                url=url,
+                response=response,
             )
 
         try:
@@ -232,6 +284,19 @@ class OllamaProvider(BaseProvider):
         if isinstance(data, dict):
             message = data.get("message") or {}
             text = message.get("content", "") or data.get("response", "")
+            # Model "thinking" (mis. Qwen3) kadang menaruh JAWABAN di kanal
+            # reasoning lalu menutup turn dengan `content` KOSONG dan tanpa tool
+            # call. Provider cloud tidak berperilaku begitu, sehingga di
+            # Consultant hasilnya tampak "tidak menjawab" padahal model sudah
+            # menjawab. Fallback ini HANYA aktif saat content benar-benar kosong
+            # DAN turn tidak memanggil tool (agar reasoning tidak ikut masuk ke
+            # turn assistant(tool_calls) pada percakapan berikutnya).
+            if (
+                not str(text or "").strip()
+                and not message.get("tool_calls")
+                and str(message.get("thinking") or "").strip()
+            ):
+                text = message.get("thinking")
 
         return GenerateResult(
             text=text,

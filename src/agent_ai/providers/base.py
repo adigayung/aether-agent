@@ -53,16 +53,177 @@ class ProviderAPIError(ProviderError):
 
     Attributes:
         status_code: kode HTTP dari response (bila tersedia).
+        endpoint: URL endpoint yang gagal (diagnostik; TANPA credential).
+        response_body: potongan body respons (diagnostik, sudah dipotong +
+            credential bergaya "Bearer <token>" disamarkan). Bila kosong,
+            body tidak tersedia / tidak dapat dibaca.
     """
 
-    def __init__(self, message: str, status_code: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        status_code: Optional[int] = None,
+        endpoint: Optional[str] = None,
+        response_body: Optional[str] = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        #: Endpoint/URL yang gagal (diagnostik). Tidak pernah berisi secret.
+        self.endpoint = endpoint
+        #: Potongan body respons (diagnostik). Tidak pernah berisi secret.
+        self.response_body = response_body
         # Retry HANYA untuk status HTTP infrastruktur (429/500/529). Tanpa status
         # code, error dianggap TIDAK retryable (aman: hindari retry buta).
         self.retryable = (
             status_code is not None and status_code in RETRYABLE_HTTP_STATUSES
         )
+
+
+#: Panjang maksimum potongan body respons provider yang disertakan pada pesan
+#: error (diagnostik). Cukup untuk membedakan 404 "model not found" (body JSON
+#: pendek) dari 404 "page not found" (body non-JSON) tanpa membanjiri log/UI.
+MAX_ERROR_BODY_CHARS: int = 400
+
+
+def _raw_response_text(response: Any) -> str:
+    """Ambil teks body respons mentah (defensif, tidak pernah melempar).
+
+    Toleran terhadap respons None, tanpa atribut `.text`, `.text` bukan string,
+    ataupun atribut yang melempar exception. Hanya membaca BODY respons —
+    tidak pernah menyentuh header/credential.
+    """
+    if response is None:
+        return ""
+    try:
+        text = getattr(response, "text", None)
+        if text is None:
+            content = getattr(response, "content", None)
+            if isinstance(content, (bytes, bytearray)):
+                text = bytes(content).decode("utf-8", errors="replace")
+            elif isinstance(content, str):
+                text = content
+            elif content is not None:
+                text = str(content)
+        if text is None:
+            return ""
+        return str(text).strip()
+    except Exception:  # noqa: BLE001 - diagnostik TIDAK boleh menutupi error asli
+        return ""
+
+
+def _redact_secrets(text: str) -> str:
+    """Samarkan pola credential bergaya Authorization agar tidak bocor.
+
+    Hanya menyasar skema "Bearer <token>" (pola header Authorization standar).
+    Provider AETHER TIDAK pernah menambahkan header/API key ke detail error;
+    lapisan ini sekadar jaring pengaman bila body respons memantulkan token.
+    """
+    import re
+
+    return re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._\-]+", "Bearer <redacted>", text)
+
+
+def _compact(text: str, limit: int = MAX_ERROR_BODY_CHARS) -> str:
+    """Padatkan whitespace lalu potong pada `limit` karakter (+ elipsis)."""
+    compacted = " ".join((text or "").split())
+    if limit > 0 and len(compacted) > limit:
+        compacted = compacted[:limit].rstrip() + "…"
+    return compacted
+
+
+def extract_error_message(text: str) -> str:
+    """Ambil pesan error ringkas dari body JSON provider (bila berbentuk itu).
+
+    Mendukung bentuk umum tanpa mengunci ke satu provider:
+        {"error": "model 'x' not found"}      -> Ollama native
+        {"error": {"message": "..."}}         -> OpenAI-compatible
+        {"message": "..."} / {"detail": "..."}
+    Bila body bukan JSON / tidak dikenali -> "" (pemanggil memakai body apa
+    adanya sebagai fallback).
+    """
+    import json
+
+    stripped = (text or "").strip()
+    if not stripped or stripped[0] not in "{[":
+        return ""
+    try:
+        data = json.loads(stripped)
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    error = data.get("error")
+    if isinstance(error, str) and error.strip():
+        return error.strip()
+    if isinstance(error, dict):
+        message = error.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+    for key in ("message", "detail"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def error_detail(response: Any, limit: int = MAX_ERROR_BODY_CHARS) -> str:
+    """Detail ringkas & diagnosable dari respons error (tanpa secret).
+
+    Prioritas: pesan error JSON provider (mis. "model 'x' not found") bila ada;
+    bila tidak, potongan body apa adanya (mis. "404 page not found" dari HTML/
+    teks biasa). Credential bergaya "Bearer <token>" disamarkan LEBIH DULU,
+    lalu dipotong `limit` karakter.
+    """
+    raw = _raw_response_text(response)
+    if not raw:
+        return ""
+    parsed = extract_error_message(raw)
+    text = parsed if parsed else raw
+    return _compact(_redact_secrets(text), limit)
+
+
+def build_provider_api_error(
+    provider_name: str,
+    status_code: Optional[int],
+    *,
+    method: str = "",
+    url: str = "",
+    response: Any = None,
+    body_limit: int = MAX_ERROR_BODY_CHARS,
+) -> ProviderAPIError:
+    """Bangun `ProviderAPIError` DIAGNOSABLE (ADDITIVE).
+
+    Mempertahankan prefix pesan LAMA "Provider '<name>' mengembalikan HTTP
+    <status>" (kompatibilitas substring verifier), lalu MENAMBAHKAN endpoint
+    (method + URL) dan potongan body respons, contoh:
+
+        Provider 'ollama' mengembalikan HTTP 404 (POST http://localhost:11434/api/chat): model 'x' not found
+
+    Aturan keamanan & ketahanan:
+        - hanya BODY respons + endpoint yang disertakan; header/API key TIDAK
+          pernah disertakan;
+        - body dipotong (`body_limit`) dan pola "Bearer <token>" disamarkan;
+        - body kosong / tidak dapat dibaca -> pesan tetap valid (tanpa detail);
+        - `status_code`/`retryable` dipertahankan persis seperti sebelumnya.
+    """
+    status_text = "" if status_code is None else f" {status_code}"
+    message = f"Provider '{provider_name}' mengembalikan HTTP{status_text}"
+
+    endpoint = " ".join(
+        part for part in (str(method or "").strip(), str(url or "").strip()) if part
+    )
+    if endpoint:
+        message += f" ({endpoint})"
+
+    detail = error_detail(response, body_limit)
+    message += f": {detail}" if detail else "."
+
+    return ProviderAPIError(
+        message,
+        status_code=status_code,
+        endpoint=(url or None),
+        response_body=(detail or None),
+    )
 
 
 class ProviderResponseError(ProviderError):
@@ -214,6 +375,26 @@ class BaseProvider(ABC):
         """
 
         return True
+
+    def knowledge_budget_tokens(self) -> Optional[int]:
+        """Sisa token yang aman untuk KONTEKS PENGETAHUAN (mis. Project Bible).
+
+        Provider yang context window-nya terbatas (mis. server lokal Ollama)
+        dapat melaporkan berapa token yang benar-benar dapat diterima prompt.
+        Pemanggil (AgentOrchestrator) memakai angka ini untuk MEMOTONG konteks
+        pengetahuan secara terkendali pada batas baris — bukan membiarkan
+        server memotongnya sembarangan (Ollama membuang bagian DEPAN prompt,
+        sehingga system prompt + awal Project Bible hilang tanpa error).
+
+        Default None = tidak diketahui: konteks pengetahuan disertakan apa
+        adanya (perilaku lama). Provider cloud (OpenAI-compatible) tidak
+        meng-override, sehingga perilakunya TIDAK berubah.
+
+        Returns:
+            Anggaran token untuk konteks pengetahuan, atau None bila tidak
+            diketahui.
+        """
+        return None
 
     def normalize_response(self, result: "GenerateResult") -> "LLMResponse":
         """Ubah GenerateResult menjadi LLMResponse (provider-agnostic).

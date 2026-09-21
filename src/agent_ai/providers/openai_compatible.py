@@ -24,6 +24,7 @@ from agent_ai.providers.base import (
     ProviderResponseError,
     ToolChoice,
     ToolDefinition,
+    build_provider_api_error,
 )
 from agent_ai.providers.retry import (
     InfrastructureRetryPolicy,
@@ -239,9 +240,15 @@ class OpenAICompatibleProvider(BaseProvider):
         )
 
         if response.status_code >= 400:
-            raise ProviderAPIError(
-                f"Provider '{self.name}' mengembalikan HTTP {response.status_code}.",
-                status_code=response.status_code,
+            # Pesan DIAGNOSABLE (additive): status + endpoint + potongan body
+            # respons. Perilaku (status_code/retryable/tipe exception) TIDAK
+            # berubah; hanya pesan yang lebih informatif.
+            raise build_provider_api_error(
+                self.name,
+                response.status_code,
+                method="POST",
+                url=url,
+                response=response,
             )
 
         try:

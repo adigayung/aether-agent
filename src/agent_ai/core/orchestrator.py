@@ -76,6 +76,11 @@ if TYPE_CHECKING:  # pragma: no cover - hanya untuk type hint, hindari import cy
 # ketika LLM memberi response final TANPA tool call.
 _CONTINUOUS_SAFETY_MAX_STEPS = 1000
 
+#: Estimasi kasar karakter per token, dipakai untuk mengubah anggaran token
+#: provider (mis. context window Ollama) menjadi anggaran karakter konteks
+#: pengetahuan. Heuristik sederhana tanpa tokenizer eksternal.
+_KNOWLEDGE_CHARS_PER_TOKEN = 4
+
 
 @dataclass
 class OrchestratorResult:
@@ -222,6 +227,14 @@ class AgentOrchestrator:
 
         Error dari brain diisolasi: bila gagal, kembalikan None tanpa
         menggagalkan task utama.
+
+        Konteks pengetahuan (Project Bible) dapat SANGAT besar. Bila provider
+        melaporkan anggaran konteks (mis. Ollama lokal yang context window-nya
+        terbatas), konteks dipotong secara terkendali DI SINI agar server tidak
+        memotongnya sendiri — server seperti Ollama membuang bagian DEPAN
+        prompt, sehingga system prompt dan awal Bible hilang tanpa error dan
+        model menjawab generik/halusinasi. Provider yang tidak melaporkan
+        anggaran (cloud) TIDAK berubah: konteks disertakan apa adanya.
         """
         if self.brain is None:
             return None
@@ -230,9 +243,48 @@ class AgentOrchestrator:
         except Exception:  # noqa: BLE001 - context error tidak boleh menggagalkan task
             return None
         text = getattr(ctx, "text", "") or ""
+        text = self._fit_knowledge_context(text)
         if not text.strip():
             return None
         return Message(role="system", content=text)
+
+    def _knowledge_budget_chars(self) -> Optional[int]:
+        """Anggaran karakter untuk konteks pengetahuan (dari provider).
+
+        Returns:
+            Anggaran karakter, atau None bila provider tidak melaporkan
+            anggaran (context window tidak diketahui -> tanpa pemotongan).
+        """
+        getter = getattr(self.provider, "knowledge_budget_tokens", None)
+        if getter is None:
+            return None
+        try:
+            tokens = getter()
+        except Exception:  # noqa: BLE001 - hint provider tidak boleh menggagalkan task
+            return None
+        if not tokens or int(tokens) <= 0:
+            return None
+        return int(tokens) * _KNOWLEDGE_CHARS_PER_TOKEN
+
+    def _fit_knowledge_context(self, text: str) -> str:
+        """Potong konteks pengetahuan agar muat pada context window provider.
+
+        Pemotongan dilakukan pada BATAS BARIS sehingga struktur heading/kategori
+        Bible tetap utuh (bagian awal — architecture, ui, dst. — yang paling
+        penting dipertahankan), lalu diberi penanda singkat. Bila provider tidak
+        melaporkan anggaran, teks dikembalikan APA ADANYA (perilaku lama).
+        """
+        budget = self._knowledge_budget_chars()
+        if budget is None or len(text) <= budget:
+            return text
+        cut = text.rfind("\n", 0, budget)
+        if cut <= 0:
+            cut = budget
+        return (
+            text[:cut].rstrip()
+            + "\n- (konteks pengetahuan dipotong otomatis agar muat pada context "
+            "window provider)"
+        )
 
     def _environment_context_message(self) -> Optional[Message]:
         """Environment Context (project-local) sebagai system message (opsional).
