@@ -45,6 +45,7 @@ import {
   setActiveProject,
 } from "./api.js";
 import { playStatusSound, resetAudioTracker } from "./audioRegistry.js";
+import { createDurationTicker, eventTimeMs, formatDuration } from "./timeUtils.js";
 
 // Navigasi berorientasi user (bukan subsystem internal AETHER).
 // `icon` = path SVG (stroke) inline — tanpa dependency icon baru.
@@ -120,6 +121,22 @@ const reportStatus = ref("");
 const changes = ref([]);
 const validation = reactive({ state: "pending" });
 const runtime = reactive({ phase: "", activity: "", provider: "", model: "", tool: "" });
+
+// --- Task Card: execution timing (Provider/Model/Duration) -----------------
+// Sumber waktu = timestamp event lifecycle AETHER yang SUDAH ADA:
+//   - SSE live (#51): `timestamp` epoch detik
+//   - history log (.aether/log via Activity API): `timestamp` ISO string
+// TIDAK ada polling/timer backend baru. Interval frontend di bawah hanya
+// me-refresh TAMPILAN durasi live (bukan sumber kebenaran durasi).
+const taskStartedAt = ref(null); // ms epoch saat task BENAR-BENAR mulai dieksekusi
+const taskEndedAt = ref(null); // ms epoch saat task mencapai status terminal
+const nowTick = ref(Date.now()); // detak tampilan durasi live
+// Ticker TAMPILAN durasi live: interval hidup HANYA selama task berjalan dan
+// dibersihkan saat terminal/unmount (implementasi di ./timeUtils.js).
+const durationTicker = createDurationTicker(() => {
+  nowTick.value = Date.now();
+});
+
 // Live "Agent reasoning." indicator: true HANYA selama AETHER menunggu respons
 // LLM. Ini SATU elemen UI (bukan log/event baru, bukan subsystem baru) yang
 // dikendalikan event SSE EXISTING: provider_request (mulai) / provider_response
@@ -150,6 +167,100 @@ const activityEvents = computed(() => historyEvents.value || events.value);
 // Reasoning status hanya relevan untuk alur LIVE (bukan saat menampilkan
 // activity task lama dari persistent log). Sumber tetap satu: isReasoning.
 const showReasoning = computed(() => isReasoning.value && !historyEvents.value);
+
+// Durasi hidup (task masih dieksekusi) -> timer tampilan berjalan. Begitu
+// `taskEndedAt` terisi (status terminal diterima UI) timer berhenti dan durasi
+// "terkunci" pada nilai final; reactive update/SSE tidak me-reset-nya karena
+// `taskStartedAt` diset SEKALI per task.
+const taskTimerLive = computed(
+  () => taskStartedAt.value != null && taskEndedAt.value == null
+);
+
+function startDurationTimer() {
+  durationTicker.start();
+}
+
+function stopDurationTimer() {
+  durationTicker.stop();
+}
+
+// Interval hidup hanya selama task berjalan; dibersihkan saat terminal/unmount
+// (tidak ada timer nyangkut / memory leak).
+watch(taskTimerLive, (on) => (on ? startDurationTimer() : stopDurationTimer()));
+
+const taskDurationMs = computed(() => {
+  if (taskStartedAt.value == null) return null;
+  const end = taskEndedAt.value != null ? taskEndedAt.value : nowTick.value;
+  return Math.max(0, end - taskStartedAt.value);
+});
+const taskDurationLabel = computed(() => formatDuration(taskDurationMs.value));
+
+// Provider/Model yang BENAR-BENAR dipakai task. Sumber: event lifecycle
+// provider_request/provider_response (payload provider + model) dari SSE live
+// ATAU persistent log saat task lama dibuka. TIDAK memakai default/global.
+const taskProviderModel = computed(() => {
+  let provider = "";
+  let model = "";
+  const list = activityEvents.value || [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const raw = list[i] || {};
+    const type = raw.event_type || raw.event || "";
+    if (type === "provider_request" || type === "provider_response") {
+      const d = raw.payload || raw.data || {};
+      if (!provider && d.provider) provider = String(d.provider);
+      if (!model && d.model) model = String(d.model);
+      if (provider && model) break;
+    }
+  }
+  // Fallback terakhir: nilai runtime task AKTIF (tetap task-specific, bukan
+  // konfigurasi global). Bila tetap kosong -> bagian ini tidak ditampilkan.
+  if (!provider) provider = runtime.provider || "";
+  if (!model) model = runtime.model || "";
+  return { provider, model };
+});
+const taskProvider = computed(() => taskProviderModel.value.provider);
+const taskModel = computed(() => taskProviderModel.value.model);
+const showTaskMeta = computed(() =>
+  Boolean(taskProvider.value || taskModel.value || taskDurationLabel.value)
+);
+
+// Event hanya boleh mengubah timing task yang SEDANG ditampilkan (stream bisa
+// saja membawa event task lain).
+function isCurrentTaskEvent(evt) {
+  return Boolean(evt && evt.task_id && task.id && evt.task_id === task.id);
+}
+
+// Task lama (persistent log): hitung timing dari event lifecycle yang ada.
+// task_started = mulai eksekusi; task_completed/failed/cancelled = selesai.
+// Fallback AMAN: first/last timestamp log bila event start/terminal tidak ada.
+function applyHistoryTiming(info, evts) {
+  taskStartedAt.value = null;
+  taskEndedAt.value = null;
+  for (const raw of evts || []) {
+    const type = (raw && (raw.event_type || raw.event)) || "";
+    if (type === "task_started" && taskStartedAt.value == null) {
+      taskStartedAt.value = eventTimeMs(raw);
+    } else if (
+      (type === "task_completed" ||
+        type === "task_failed" ||
+        type === "task_cancelled") &&
+      taskEndedAt.value == null
+    ) {
+      taskEndedAt.value = eventTimeMs(raw);
+    }
+  }
+  const status = String((info && info.status) || task.status || "").toLowerCase();
+  const terminal =
+    status === "completed" || status === "failed" || status === "cancelled";
+  if (taskStartedAt.value == null && info && info.first_timestamp) {
+    taskStartedAt.value = eventTimeMs({ timestamp: info.first_timestamp });
+  }
+  if (terminal && taskEndedAt.value == null && info && info.last_timestamp) {
+    taskEndedAt.value = eventTimeMs({ timestamp: info.last_timestamp });
+  }
+  if (!terminal) taskEndedAt.value = null;
+  stopDurationTimer();
+}
 
 let source = null;
 
@@ -485,6 +596,11 @@ function handleEvent(evt) {
       // Task ini BENAR-BENAR mulai running -> jadikan target tombol Stop.
       runningTaskId.value = evt.task_id || runningTaskId.value || "";
       runtime.activity = "Starting task";
+      // Timer Task Card mulai dari timestamp START eksekusi (bukan saat card
+      // dibuat). Diset SEKALI: reactive update/SSE berikutnya tidak me-reset.
+      if (isCurrentTaskEvent(evt) && taskStartedAt.value == null) {
+        taskStartedAt.value = eventTimeMs(evt);
+      }
       // Audio feedback HANYA saat task BENAR-BENAR mulai berjalan (transisi
       // status nyata), bukan saat user klik Run Task/Send. Dedup di
       // audioRegistry mencegah dobel-putar bila event running diterima ulang.
@@ -564,6 +680,10 @@ function handleEvent(evt) {
       // Task selesai -> reasoning status harus benar-benar berhenti.
       isReasoning.value = false;
       runtime.activity = "";
+      // Timer Task Card berhenti pada status final (durasi terkunci).
+      if (isCurrentTaskEvent(evt) && taskEndedAt.value == null) {
+        taskEndedAt.value = eventTimeMs(evt);
+      }
       // Refresh File Explorer setelah agent selesai (file baru terlihat).
       explorerRefresh.value += 1;
       // Task terminal: lepas target tombol Stop SECARA SINKRON (tombol langsung
@@ -578,6 +698,10 @@ function handleEvent(evt) {
       task.status = "failed";
       // Task gagal -> hentikan reasoning status.
       isReasoning.value = false;
+      // Timer Task Card berhenti pada status final (durasi terkunci).
+      if (isCurrentTaskEvent(evt) && taskEndedAt.value == null) {
+        taskEndedAt.value = eventTimeMs(evt);
+      }
       // Task terminal: tombol Stop langsung hilang (sinkron, tanpa race).
       terminalTaskId.value = evt.task_id || task.id || "";
       releaseRunningTask(terminalTaskId.value);
@@ -592,6 +716,10 @@ function handleEvent(evt) {
       // Execution benar-benar berhenti -> indikator Agent kembali idle.
       runtime.activity = "";
       runtime.tool = "";
+      // Timer Task Card berhenti pada status final (durasi terkunci).
+      if (isCurrentTaskEvent(evt) && taskEndedAt.value == null) {
+        taskEndedAt.value = eventTimeMs(evt);
+      }
       // Task terminal: tombol Stop langsung hilang (sinkron, tanpa race).
       terminalTaskId.value = evt.task_id || task.id || "";
       releaseRunningTask(terminalTaskId.value);
@@ -629,6 +757,10 @@ function resetWorkspace() {
   // Workspace direset untuk task baru -> tidak ada reasoning status tersisa.
   isReasoning.value = false;
   liveFsChange.value = null;
+  // Task baru/workspace kosong -> reset timing Task Card + hentikan timer.
+  taskStartedAt.value = null;
+  taskEndedAt.value = null;
+  stopDurationTimer();
 }
 
 // --- Data loading ----------------------------------------------------------
@@ -694,6 +826,12 @@ async function submitTask(text, overrideProviderInstanceId = null, overrideModel
     }
     resetAudioTracker();
     resetWorkspace();
+    // Bila task LANGSUNG mendapat slot eksekusi (queue_state="running"), mulai
+    // timer dari sekarang. Pengaman bila event task_started terlewat sebelum
+    // SSE tersambung; bila event datang, nilai ini TIDAK ditimpa (guard == null).
+    if (queueState === "running" && taskStartedAt.value == null) {
+      taskStartedAt.value = Date.now();
+    }
     await refreshTasks();
     connectStream();
     composerOpen.value = false;
@@ -742,6 +880,9 @@ async function openHistoryTask(taskId) {
     // Activity (chronological) dari persistent log.
     const activity = await getTaskActivity(taskId, projectId);
     historyEvents.value = activity.events || [];
+    // Timing Task Card dari event lifecycle log (start eksekusi -> terminal).
+    // Fallback aman bila task lama tidak punya event start/terminal.
+    applyHistoryTiming(info, historyEvents.value);
     // Report final (bila ada) dari persistent log.
     try {
       const report = await getTaskReport(taskId, projectId);
@@ -1001,6 +1142,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (source) source.close();
+  // Bersihkan interval durasi Task Card agar tidak ada timer nyangkut.
+  stopDurationTimer();
 });
 </script>
 
@@ -1167,6 +1310,34 @@ onBeforeUnmount(() => {
                     <div class="task-name">Process :</div>
                     <span class="prompt-pill" :title="task.text || 'No task yet'">{{ task.text || "No task yet" }}</span>
                     <div class="task-sub">{{ task.id ? task.id : "idle" }} · status: {{ task.status || "idle" }}</div>
+                    <!-- Metadata eksekusi: provider/model yang BENAR-BENAR dipakai
+                         task + durasi (live saat running, final saat selesai).
+                         Sumber = event lifecycle AETHER existing; TIDAK
+                         hardcode, TIDAK memakai default/global. -->
+                    <div v-if="showTaskMeta" class="task-meta">
+                      <span v-if="taskProvider" class="tm-item" :title="`Provider: ${taskProvider}`">
+                        <svg class="tm-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19a4.5 4.5 0 0 0 0-9 6 6 0 0 0-11.6 1.5A3.5 3.5 0 0 0 6.5 19z"/></svg>
+                        <span class="tm-key">Provider</span>
+                        <span class="tm-val">{{ taskProvider }}</span>
+                      </span>
+                      <span v-if="taskProvider && taskModel" class="tm-sep">·</span>
+                      <span v-if="taskModel" class="tm-item" :title="`Model: ${taskModel}`">
+                        <svg class="tm-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>
+                        <span class="tm-key">Model</span>
+                        <span class="tm-val">{{ taskModel }}</span>
+                      </span>
+                      <span v-if="(taskProvider || taskModel) && taskDurationLabel" class="tm-sep">·</span>
+                      <span
+                        v-if="taskDurationLabel"
+                        class="tm-item tm-duration"
+                        :class="{ live: taskTimerLive }"
+                        :title="taskTimerLive ? 'Elapsed (live)' : 'Total duration'"
+                      >
+                        <svg class="tm-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+                        <span class="tm-key">Duration</span>
+                        <span class="tm-val">{{ taskDurationLabel }}</span>
+                      </span>
+                    </div>
                   </div>
                 </div>
 

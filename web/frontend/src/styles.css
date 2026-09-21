@@ -484,6 +484,55 @@ button {
   font-family: var(--mono);
 }
 
+/* ---- Task card: execution metadata (provider/model/duration) ----
+   Baris meta compact di bawah task-sub. Tetap satu bahasa visual AETHER: kecil,
+   dim, nilai teknis memakai mono. Boleh wrap agar tidak pernah overflow;
+   nilai panjang dipangkas dengan ellipsis. */
+.task-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 9px;
+  margin-top: 1px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  min-width: 0;
+}
+.tm-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+}
+.tm-ico {
+  flex: 0 0 auto;
+  opacity: 0.8;
+  color: var(--text-faint);
+}
+.tm-key {
+  color: var(--text-faint);
+  letter-spacing: 0.02em;
+}
+.tm-val {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tm-sep {
+  color: var(--border);
+}
+/* Durasi live (task masih berjalan) memakai aksen soft AETHER; saat selesai
+   kembali ke warna dim agar durasi final terasa "terkunci". */
+.tm-duration.live .tm-val {
+  color: var(--act-agent);
+}
+
 /* ---- Lifecycle ---- */
 /* Stepper harus SELALU PAS di lebar kartu: satu baris (nowrap), kompak,
    dan TANPA scroll horizontal / konten keluar frame.
