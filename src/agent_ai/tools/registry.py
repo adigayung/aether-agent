@@ -12,7 +12,7 @@ melalui interface yang konsisten.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 from agent_ai.tools.base import (
     BaseTool,
@@ -101,7 +101,10 @@ class ToolRegistry:
 registry = ToolRegistry()
 
 
-def build_registry(root: "Path | None" = None) -> ToolRegistry:
+def build_registry(
+    root: "Path | None" = None,
+    change_sink: "Callable[[dict], None] | None" = None,
+) -> ToolRegistry:
     """Bangun ToolRegistry dengan semua tool bawaan.
 
     Args:
@@ -110,6 +113,11 @@ def build_registry(root: "Path | None" = None) -> ToolRegistry:
             diisi (mis. active project root), semua operasi file dibatasi ke
             root tersebut. Ini TIDAK membuat tool/subsystem baru: hanya
             mengarahkan root tool yang sudah ada.
+        change_sink: callback opsional `(payload: dict) -> None` yang dipanggil
+            tool mutasi workspace (write/edit/delete/move) SEGERA setelah
+            operasi file berhasil. Dipakai untuk live filesystem event
+            (Explorer/Changes) tanpa menunggu task selesai. Bila None,
+            tool berperilaku persis seperti sebelumnya (backward compatible).
 
     Returns:
         ToolRegistry baru berisi seluruh tool bawaan.
@@ -142,10 +150,10 @@ def build_registry(root: "Path | None" = None) -> ToolRegistry:
     reg.register(ListFilesTool(root=resolved))
     reg.register(ReadFileTool(root=resolved))
     reg.register(SearchCodeTool(root=resolved))
-    reg.register(WriteFileTool(root=resolved))
-    reg.register(EditFileTool(root=resolved))
-    reg.register(DeleteFileTool(root=resolved))
-    reg.register(MoveFileTool(root=resolved))
+    reg.register(WriteFileTool(root=resolved, change_sink=change_sink))
+    reg.register(EditFileTool(root=resolved, change_sink=change_sink))
+    reg.register(DeleteFileTool(root=resolved, change_sink=change_sink))
+    reg.register(MoveFileTool(root=resolved, change_sink=change_sink))
     reg.register(RunCommandTool(root=resolved))
     # Project Map (Agent): termasuk refresh_project_map (Agent-only).
     for tool in build_project_map_tools(root=resolved, include_refresh=True):

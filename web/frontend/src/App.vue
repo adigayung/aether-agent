@@ -122,6 +122,11 @@ const validation = reactive({ state: "pending" });
 const runtime = reactive({ phase: "", activity: "", provider: "", model: "", tool: "" });
 // Penanda refresh File Explorer (dinaikkan setelah agent selesai membuat file).
 const explorerRefresh = ref(0);
+// Live filesystem change terakhir (dari event change_detected) untuk update
+// INCREMENTAL File Explorer tanpa full reload. `seq` memastikan setiap event
+// tetap memicu walau isinya sama.
+const liveFsChange = ref(null);
+let liveFsChangeSeq = 0;
 
 // Rolling window frontend untuk feed SSE live. Bukan pagination/history tanpa
 // batas: window dibatasi, sedangkan history lengkap dibaca dari .aether/log/
@@ -416,6 +421,27 @@ function isAetherMetadata(path) {
   );
 }
 
+// Upsert perubahan berdasarkan path: satu file = satu baris di Changes panel.
+// File yang sama diedit berkali-kali memperbarui baris yang ada (bukan
+// menumpuk duplikat). Move/rename memindahkan baris lama ke path baru.
+function upsertChange(entry) {
+  const list = changes.value;
+  const idx = list.findIndex((c) => c.path === entry.path);
+  if (idx >= 0) {
+    list[idx] = { ...list[idx], ...entry };
+    return;
+  }
+  const kind = String(entry.kind || "").toLowerCase();
+  if ((kind.includes("move") || kind.includes("renam")) && entry.old_path) {
+    const oi = list.findIndex((c) => c.path === entry.old_path);
+    if (oi >= 0) {
+      list[oi] = { ...list[oi], ...entry };
+      return;
+    }
+  }
+  list.push(entry);
+}
+
 function handleEvent(evt) {
   if (!evt || !evt.event_type) return;
   // Event live untuk task aktif -> tampilkan alur SSE (bukan history lama).
@@ -475,17 +501,26 @@ function handleEvent(evt) {
     case "change_detected":
       // Sembunyikan `.aether/**` di daftar Changes (metadata internal AETHER).
       if (!isAetherMetadata(p.path)) {
-        changes.value.push({
+        // Upsert (bukan push buta): satu file = satu baris, file yang diedit
+        // berkali-kali memperbarui barisnya. Changes panel ikut update live.
+        upsertChange({
           kind: p.kind || "change",
           path: p.path,
+          old_path: p.old_path,
           detail: p.detail,
           additions: p.additions,
           deletions: p.deletions,
           diff: p.diff,
         });
+        // Update File Explorer secara INCREMENTAL (refresh direktori terdampak
+        // saja; expanded/selected dipertahankan), TANPA menunggu task selesai.
+        liveFsChange.value = {
+          seq: ++liveFsChangeSeq,
+          path: p.path,
+          kind: p.kind || "change",
+          old_path: p.old_path || "",
+        };
       }
-      // File baru berubah -> refresh File Explorer agar file muncul.
-      explorerRefresh.value += 1;
       break;
     case "task_completed":
       task.status = "completed";
@@ -541,6 +576,7 @@ function resetWorkspace() {
   runtime.provider = "";
   runtime.model = "";
   runtime.tool = "";
+  liveFsChange.value = null;
 }
 
 // --- Data loading ----------------------------------------------------------
@@ -1168,6 +1204,7 @@ onBeforeUnmount(() => {
           <FileExplorer
             :project="activeProject"
             :refresh-key="explorerRefresh"
+            :live-change="liveFsChange"
             @open-file="openFileInEditor"
             @open-file-editor="openFileInEditor"
           />

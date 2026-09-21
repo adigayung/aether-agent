@@ -33,6 +33,7 @@ function tagClass(c) {
   const k = kindOf(c);
   if (k.includes("creat") || k.includes("add") || k.includes("new")) return "created";
   if (k.includes("delet") || k.includes("remov")) return "failed";
+  if (k.includes("move") || k.includes("renam")) return "modified";
   if (k.includes("modif") || k.includes("edit") || k.includes("updat")) return "modified";
   return "idle";
 }
@@ -40,16 +41,26 @@ function tagLabel(c) {
   const k = kindOf(c);
   if (k.includes("creat") || k.includes("add") || k.includes("new")) return "added";
   if (k.includes("delet") || k.includes("remov")) return "removed";
+  if (k.includes("move")) return "moved";
+  if (k.includes("renam")) return "renamed";
   if (k.includes("modif") || k.includes("edit") || k.includes("updat")) return "modified";
   return k;
 }
 // Kode pendek untuk indikator status pada kartu satu-baris.
 function tagCode(c) {
+  const k = kindOf(c);
+  if (k.includes("move") || k.includes("renam")) return "R";
   const cls = tagClass(c);
   if (cls === "created") return "A";
   if (cls === "failed") return "D";
   if (cls === "modified") return "M";
   return "•";
+}
+
+// Judul baris: path + asal (untuk move/rename).
+function rowTitle(c) {
+  const base = c.path || c.detail || "(unknown)";
+  return c.old_path ? `${base} (dari ${c.old_path})` : base;
 }
 
 const validationLabel = computed(() => {
@@ -90,7 +101,7 @@ const validationClass = computed(() => {
             <div class="file-row" :class="{ open: expandedIndex === i }" @click="toggleRow(i)">
               <span class="file-caret" aria-hidden="true">{{ expandedIndex === i ? "▾" : "▸" }}</span>
               <span class="file-status" :class="tagClass(c)" :title="tagLabel(c)">{{ tagCode(c) }}</span>
-              <span class="file-name" :title="c.path || c.detail">{{ c.path || c.detail || "(unknown)" }}</span>
+              <span class="file-name" :title="rowTitle(c)">{{ c.path || c.detail || "(unknown)" }}</span>
               <span class="file-stat">
                 <span v-if="c.additions != null" class="st-add">+{{ c.additions }}</span>
                 <span v-if="c.deletions != null" class="st-del">-{{ c.deletions }}</span>

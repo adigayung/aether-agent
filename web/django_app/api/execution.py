@@ -45,6 +45,21 @@ from agent_ai.tasks.lifecycle import TaskLifecycle
 from agent_ai.tasks.models import TaskStatus
 
 
+def _normalize_change_path(path: Any) -> str:
+    """Normalisasi path perubahan menjadi relative posix (untuk dedup event).
+
+    Hanya menyamakan bentuk path (backslash -> slash, buang './'); TIDAK
+    mengubah makna path. Dipakai agar event live (dari tool) dan event
+    consistency-check (ChangeTracker) tidak duplikat untuk file yang sama.
+    """
+    if not path:
+        return ""
+    text = str(path).replace("\\", "/")
+    while text.startswith("./"):
+        text = text[2:]
+    return text.strip()
+
+
 class TaskExecutor:
     """Merakit & menjalankan AETHER Runtime untuk sebuah PreparedTask.
 
@@ -151,6 +166,7 @@ class TaskExecutor:
         workspace_root: Optional[str] = None,
         model_name: Optional[str] = None,
         cancel_token: Optional[Any] = None,
+        change_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> AgentRuntime:
         """Rakit AgentRuntime dengan ToolExecutor yang punya PermissionManager.
 
@@ -169,11 +185,17 @@ class TaskExecutor:
         model_name: nama model eksplisit dari pilihan UI. Bila diisi, dipakai
         sebagai GenerateOptions.model sehingga provider memakai model tersebut
         (bukan model default provider). Bila None, provider memakai default.
+
+        change_sink: callback opsional `(payload) -> None` yang diteruskan ke
+        tool mutasi workspace (write/edit/delete/move). Dipakai untuk live
+        filesystem event SEGERA setelah operasi file berhasil (Explorer/
+        Changes), tanpa menunggu task selesai. Bila None, tidak ada event live
+        (backward compatible).
         """
         if workspace_root:
             from agent_ai.tools.registry import build_registry
 
-            registry = build_registry(root=workspace_root)
+            registry = build_registry(root=workspace_root, change_sink=change_sink)
             executor = ToolExecutor(
                 registry=registry, permission_manager=self.permission_manager
             )
@@ -291,6 +313,9 @@ class TaskExecutor:
 
         # Change Tracker AETHER (existing): snapshot SEBELUM eksekusi, lalu
         # deteksi perubahan SETELAH eksekusi. Read-only terhadap project.
+        # Ini menjadi CONSISTENCY CHECK akhir (mis. perubahan lewat
+        # run_command), BUKAN lagi satu-satunya sumber update UI: event live
+        # dipancarkan SEGERA setelah tiap operasi file berhasil (change_sink).
         change_tracker = None
         if workspace_root:
             try:
@@ -303,6 +328,31 @@ class TaskExecutor:
                 change_tracker.snapshot(".", task_id=task_id)
             except Exception:  # noqa: BLE001 - tracking tidak boleh crash task
                 change_tracker = None
+
+        # Path yang sudah diemit LIVE oleh tool (write/edit/delete/move).
+        # Dipakai untuk dedup: consistency-check akhir tidak mengemit ulang
+        # file yang sama (satu operasi sukses = satu logical change event).
+        live_changed: set = set()
+
+        def _change_sink(payload: Dict[str, Any]) -> None:
+            """Emit change_detected SEGERA (sink dari tool filesystem)."""
+            try:
+                rel = _normalize_change_path(payload.get("path"))
+                if rel:
+                    live_changed.add(rel)
+                old = _normalize_change_path(payload.get("old_path"))
+                if old:
+                    # Move: tandai source juga agar tracker akhir tidak
+                    # mengemit 'deleted' untuk file yang hanya dipindah.
+                    live_changed.add(old)
+                self._emit(
+                    session_id,
+                    EventType.CHANGE_DETECTED,
+                    task_id=task_id,
+                    payload=payload,
+                )
+            except Exception:  # noqa: BLE001 - event tidak boleh crash task
+                pass
 
         try:
             # Konfigurasi LLM tersimpan (SQLite) mengalahkan jalur registry
@@ -320,6 +370,7 @@ class TaskExecutor:
                 workspace_root=workspace_root,
                 model_name=effective_model,
                 cancel_token=cancel_token,
+                change_sink=_change_sink,
             )
             result = runtime.run(prepared, lifecycle=lifecycle)
         except Exception as exc:  # noqa: BLE001 - provider/runtime error -> FAILED
@@ -334,20 +385,24 @@ class TaskExecutor:
                 on_status(TaskStatus.FAILED.value, None, error)
             return {"status": TaskStatus.FAILED.value, "result": None, "error": error, "iterations": 0}
 
-        # Deteksi perubahan nyata via Change Tracker AETHER (existing) dan
-        # emit event change_detected (event system existing). Ini membuat
-        # Changes panel menampilkan perubahan filesystem yang sebenarnya.
+        # Consistency check AKHIR via Change Tracker AETHER (existing) dan emit
+        # event change_detected (event system existing) untuk perubahan yang
+        # TIDAK tercakup event live (mis. file dibuat lewat run_command).
+        # File yang sudah diemit live di-skip (hindari duplicate event).
         if change_tracker is not None:
             try:
                 records = change_tracker.detect_changes(task_id, path=".")
                 change_tracker.finish(task_id)
                 for rec in records:
+                    rel = _normalize_change_path(rec.path)
+                    if rel in live_changed:
+                        continue
                     self._emit(
                         session_id,
                         EventType.CHANGE_DETECTED,
                         task_id=task_id,
                         payload={
-                            "path": rec.path,
+                            "path": rel,
                             "kind": rec.change_type.value,
                             "before_size": rec.before_size,
                             "after_size": rec.after_size,

@@ -13,6 +13,10 @@ const props = defineProps({
   project: { type: Object, default: null },
   // Penanda refresh dari parent (mis. setelah agent selesai membuat file).
   refreshKey: { type: Number, default: 0 },
+  // Perubahan filesystem LIVE (event change_detected) selagi Agent berjalan.
+  // Bukan full reload: hanya direktori terdampak yang di-refresh, state
+  // expanded/selected dipertahankan.
+  liveChange: { type: Object, default: null },
 });
 
 const entries = ref([]);
@@ -200,6 +204,88 @@ async function toggleDirByPath(full) {
   }
 }
 
+// --- Live filesystem update (event change_detected) -------------------------
+// Normalisasi path relatif (posix, tanpa "./" & trailing slash).
+function normalizeRel(p) {
+  if (!p) return "";
+  let s = String(p).replace(/\\/g, "/");
+  while (s.startsWith("./")) s = s.slice(2);
+  return s.replace(/\/+$/, "");
+}
+
+// Direktori induk dari path relatif ("." bila di root).
+function parentDirOf(rel) {
+  const s = normalizeRel(rel);
+  const idx = s.lastIndexOf("/");
+  return idx <= 0 ? "." : s.slice(0, idx);
+}
+
+// Refresh SATU direktori tanpa mereset state expand/selected.
+// - "." (root) selalu di-refresh.
+// - folder lain hanya di-refresh bila sedang terbuka (ada di `expanded`).
+async function reloadDir(path) {
+  if (!props.project) return;
+  const key = path || ".";
+  if (key === "." || key === currentPath.value) {
+    try {
+      const data = await listFiles(currentPath.value || ".");
+      entries.value = visibleEntries(data.entries);
+      currentPath.value = data.path || currentPath.value;
+    } catch (e) {
+      // Biarkan listing lama bila gagal.
+    }
+    return;
+  }
+  if (!(key in expanded.value)) return;
+  try {
+    const data = await listFiles(key);
+    expanded.value = { ...expanded.value, [key]: visibleEntries(data.entries) };
+  } catch (e) {
+    // Folder bisa saja sudah tidak ada (delete/move).
+    const next = { ...expanded.value };
+    delete next[key];
+    expanded.value = next;
+  }
+}
+
+// Pindahkan key `expanded` dari prefix lama ke prefix baru (move/rename).
+function remapExpanded(oldPrefix, newPrefix) {
+  if (!oldPrefix) return;
+  const next = {};
+  let changed = false;
+  for (const [k, v] of Object.entries(expanded.value)) {
+    if (k === oldPrefix || k.startsWith(oldPrefix + "/")) {
+      next[newPrefix + k.slice(oldPrefix.length)] = v;
+      changed = true;
+    } else {
+      next[k] = v;
+    }
+  }
+  if (changed) expanded.value = next;
+}
+
+async function applyLiveChange(change) {
+  if (!change || !change.path) return;
+  const kind = String(change.kind || "").toLowerCase();
+  const newPath = normalizeRel(change.path);
+  if (kind.includes("move") || kind.includes("renam")) {
+    const oldPath = normalizeRel(change.old_path || "");
+    if (oldPath) {
+      remapExpanded(oldPath, newPath);
+      if (
+        selected.value &&
+        (selected.value === oldPath || selected.value.startsWith(oldPath + "/"))
+      ) {
+        selected.value = newPath + selected.value.slice(oldPath.length);
+      }
+    }
+    await reloadDir(parentDirOf(oldPath || newPath));
+    await reloadDir(parentDirOf(newPath));
+    return;
+  }
+  await reloadDir(parentDirOf(newPath));
+}
+
 // Handler dari node tree recursive (ExplorerTreeNode).
 function handleToggle(full) {
   toggleDirByPath(full);
@@ -353,6 +439,14 @@ watch(
     load(".");
   },
   { immediate: true }
+);
+
+// Live change dari event SSE (Agent masih berjalan) -> update incremental.
+watch(
+  () => (props.liveChange ? props.liveChange.seq : 0),
+  () => {
+    applyLiveChange(props.liveChange);
+  }
 );
 </script>
 

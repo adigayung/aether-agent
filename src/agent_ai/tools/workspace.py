@@ -22,10 +22,17 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from agent_ai.tools.base import BaseTool, ToolExecutionError, ToolValidationError
 from agent_ai.tools.filesystem import _DEFAULT_ROOT, _resolve_within_root
+
+#: Sink event perubahan filesystem: `callable(payload: dict) -> None`.
+#: Dipanggil HANYA setelah operasi filesystem benar-benar berhasil.
+ChangeSink = Callable[[Dict[str, Any]], None]
+
+#: Batas panjang unified diff yang disertakan ke event (agar SSE tetap ringkas).
+_MAX_DIFF_CHARS = 12000
 
 
 def _resolve_write_path(path: str, root: Path) -> Path:
@@ -92,7 +99,128 @@ def _atomic_write_text(target: Path, content: str) -> None:
         raise
 
 
-class WriteFileTool(BaseTool):
+# --------------------------------------------------------------------------- #
+# Live filesystem change events (reuse diff engine existing)
+# --------------------------------------------------------------------------- #
+def _read_bytes(path: Path) -> Optional[bytes]:
+    """Baca bytes file (None bila bukan file / gagal). Tidak melempar error."""
+    try:
+        if path.is_file():
+            return path.read_bytes()
+    except OSError:
+        return None
+    return None
+
+
+def _count_diff_lines(diff_text: str) -> tuple:
+    """Hitung jumlah baris ditambah/dihapus dari unified diff."""
+    additions = 0
+    deletions = 0
+    for line in diff_text.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            additions += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            deletions += 1
+    return additions, deletions
+
+
+def _diff_summary(before: Optional[bytes], after: Optional[bytes], rel_path: str):
+    """Unified diff memakai diff engine existing (`agent_ai.changes.diff`).
+
+    Reuse, BUKAN diff engine kedua.
+
+    Returns:
+        (diff_text, additions, deletions). Semuanya None bila tidak ada
+        perubahan teks / file biner / gagal (tidak membuat diff palsu).
+    """
+    try:
+        from agent_ai.changes import diff as _change_diff
+
+        diff_text = _change_diff.generate(before, after, rel_path)
+    except Exception:  # noqa: BLE001 - diff tidak boleh menggagalkan operasi
+        return None, None, None
+    if not diff_text:
+        return None, None, None
+    if len(diff_text) > _MAX_DIFF_CHARS:
+        diff_text = diff_text[:_MAX_DIFF_CHARS] + "\n...[diff truncated]\n"
+    additions, deletions = _count_diff_lines(diff_text)
+    return diff_text, additions, deletions
+
+
+class _WorkspaceChangeTool(BaseTool):
+    """Base tool mutasi workspace + sink event perubahan (live filesystem).
+
+    Sink `change_sink` dipanggil HANYA setelah operasi filesystem berhasil,
+    dengan payload:
+        {"path": <relative workspace path>, "kind": "created|modified|
+         "deleted|moved", "tool": <name>, "old_path"?: <relative path>,
+         "before_size"?, "after_size"?, "additions"?, "deletions"?, "diff"?}
+
+    Path SELALU dinormalisasi menjadi relative terhadap workspace/project root
+    (posix separator). Sink tidak boleh menggagalkan operasi (exception ditelan).
+    """
+
+    def __init__(
+        self,
+        root: Optional[Path] = None,
+        change_sink: Optional[ChangeSink] = None,
+    ) -> None:
+        self.root = Path(root) if root else _DEFAULT_ROOT
+        self._change_sink = change_sink
+
+    def _to_rel(self, path: Any) -> str:
+        """Normalisasi path menjadi relative terhadap workspace root (posix)."""
+        text = str(path or "")
+        try:
+            candidate = Path(text)
+            root_resolved = self.root.resolve()
+            if candidate.is_absolute():
+                resolved = candidate.resolve()
+                if resolved == root_resolved or root_resolved in resolved.parents:
+                    text = str(resolved.relative_to(root_resolved))
+            else:
+                # Buang prefix "./" tanpa menyentuh isi path.
+                while text.startswith("./") or text.startswith(".\\"):
+                    text = text[2:]
+        except Exception:  # noqa: BLE001 - normalisasi best-effort
+            pass
+        return text.replace("\\", "/").strip()
+
+    def _emit_change(
+        self,
+        *,
+        path: Any,
+        kind: str,
+        old_path: Any = None,
+        before: Optional[bytes] = None,
+        after: Optional[bytes] = None,
+    ) -> None:
+        """Emit satu logical perubahan filesystem (setelah operasi sukses)."""
+        sink = self._change_sink
+        if sink is None:
+            return
+        rel_path = self._to_rel(path)
+        payload: Dict[str, Any] = {
+            "path": rel_path,
+            "kind": kind,
+            "tool": self.name,
+            "before_size": len(before) if before is not None else None,
+            "after_size": len(after) if after is not None else None,
+        }
+        if old_path is not None:
+            payload["old_path"] = self._to_rel(old_path)
+        diff_text, additions, deletions = _diff_summary(before, after, rel_path)
+        if diff_text is not None:
+            payload["diff"] = diff_text
+            payload["additions"] = additions
+            payload["deletions"] = deletions
+        try:
+            sink(payload)
+        except Exception:  # noqa: BLE001 - observability tidak boleh crash
+            return
+
+
+class WriteFileTool(_WorkspaceChangeTool):
     """Tulis/buat file di dalam workspace (buat parent directory bila perlu)."""
 
     name = "write_file"
@@ -106,8 +234,12 @@ class WriteFileTool(BaseTool):
         "required": ["path", "content"],
     }
 
-    def __init__(self, root: Optional[Path] = None) -> None:
-        self.root = Path(root) if root else _DEFAULT_ROOT
+    def __init__(
+        self,
+        root: Optional[Path] = None,
+        change_sink: Optional[ChangeSink] = None,
+    ) -> None:
+        super().__init__(root=root, change_sink=change_sink)
 
     def execute(self, **arguments: Any) -> Dict[str, Any]:
         rel_path = arguments.get("path")
@@ -122,6 +254,8 @@ class WriteFileTool(BaseTool):
         if target.exists() and target.is_dir():
             raise ToolValidationError(f"'{rel_path}' adalah sebuah directory.")
 
+        existed = target.is_file()
+        before = _read_bytes(target) if existed else None
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             # Atomic: hindari file setengah isi bila penulisan terputus.
@@ -129,10 +263,21 @@ class WriteFileTool(BaseTool):
         except OSError as exc:
             raise ToolExecutionError(f"Gagal menulis file '{rel_path}': {exc}") from exc
 
+        after = _read_bytes(target)
+        if after is None:
+            after = str(arguments["content"]).encode("utf-8")
+        # Live event HANYA setelah write benar-benar berhasil.
+        self._emit_change(
+            path=rel_path,
+            kind="modified" if existed else "created",
+            before=before,
+            after=after,
+        )
+
         return {"path": rel_path, "bytes": target.stat().st_size, "written": True}
 
 
-class EditFileTool(BaseTool):
+class EditFileTool(_WorkspaceChangeTool):
     """Ganti `old_text` -> `new_text` pada file (harus unik, tidak blind)."""
 
     name = "edit_file"
@@ -147,8 +292,12 @@ class EditFileTool(BaseTool):
         "required": ["path", "old_text", "new_text"],
     }
 
-    def __init__(self, root: Optional[Path] = None) -> None:
-        self.root = Path(root) if root else _DEFAULT_ROOT
+    def __init__(
+        self,
+        root: Optional[Path] = None,
+        change_sink: Optional[ChangeSink] = None,
+    ) -> None:
+        super().__init__(root=root, change_sink=change_sink)
 
     def execute(self, **arguments: Any) -> Dict[str, Any]:
         rel_path = arguments.get("path")
@@ -166,6 +315,7 @@ class EditFileTool(BaseTool):
         if not target.is_file():
             raise ToolValidationError(f"'{rel_path}' bukan sebuah file.")
 
+        before = _read_bytes(target)
         try:
             text = target.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
@@ -187,10 +337,16 @@ class EditFileTool(BaseTool):
         except OSError as exc:
             raise ToolExecutionError(f"Gagal menulis file '{rel_path}': {exc}") from exc
 
+        after = _read_bytes(target)
+        if after is None:
+            after = new_content.encode("utf-8")
+        # Live event HANYA setelah edit benar-benar berhasil.
+        self._emit_change(path=rel_path, kind="modified", before=before, after=after)
+
         return {"path": rel_path, "replaced": 1, "edited": True}
 
 
-class DeleteFileTool(BaseTool):
+class DeleteFileTool(_WorkspaceChangeTool):
     """Hapus file atau directory (recursive) di dalam workspace."""
 
     name = "delete_file"
@@ -203,8 +359,12 @@ class DeleteFileTool(BaseTool):
         "required": ["path"],
     }
 
-    def __init__(self, root: Optional[Path] = None) -> None:
-        self.root = Path(root) if root else _DEFAULT_ROOT
+    def __init__(
+        self,
+        root: Optional[Path] = None,
+        change_sink: Optional[ChangeSink] = None,
+    ) -> None:
+        super().__init__(root=root, change_sink=change_sink)
 
     def execute(self, **arguments: Any) -> Dict[str, Any]:
         rel_path = arguments.get("path")
@@ -217,8 +377,11 @@ class DeleteFileTool(BaseTool):
         if not target.exists() and not target.is_symlink():
             raise ToolExecutionError(f"Path tidak ditemukan: {rel_path}")
 
+        is_dir = target.is_dir() and not target.is_symlink()
+        # Baca konten SEBELUM dihapus (untuk diff deleted), hanya untuk file.
+        before = None if is_dir else _read_bytes(target)
         try:
-            if target.is_dir() and not target.is_symlink():
+            if is_dir:
                 shutil.rmtree(target)
                 kind = "dir"
             else:
@@ -227,10 +390,18 @@ class DeleteFileTool(BaseTool):
         except OSError as exc:
             raise ToolExecutionError(f"Gagal menghapus '{rel_path}': {exc}") from exc
 
+        # Live event HANYA setelah delete benar-benar berhasil.
+        self._emit_change(
+            path=rel_path,
+            kind="deleted",
+            before=before,
+            after=None,
+        )
+
         return {"path": rel_path, "type": kind, "deleted": True}
 
 
-class MoveFileTool(BaseTool):
+class MoveFileTool(_WorkspaceChangeTool):
     """Pindah/rename file atau directory di dalam workspace."""
 
     name = "move_file"
@@ -244,8 +415,12 @@ class MoveFileTool(BaseTool):
         "required": ["source", "destination"],
     }
 
-    def __init__(self, root: Optional[Path] = None) -> None:
-        self.root = Path(root) if root else _DEFAULT_ROOT
+    def __init__(
+        self,
+        root: Optional[Path] = None,
+        change_sink: Optional[ChangeSink] = None,
+    ) -> None:
+        super().__init__(root=root, change_sink=change_sink)
 
     def execute(self, **arguments: Any) -> Dict[str, Any]:
         source = arguments.get("source")
@@ -275,5 +450,12 @@ class MoveFileTool(BaseTool):
             raise ToolExecutionError(
                 f"Gagal memindahkan '{source}' -> '{destination}': {exc}"
             ) from exc
+
+        # Live event HANYA setelah move benar-benar berhasil.
+        self._emit_change(
+            path=destination,
+            kind="moved",
+            old_path=source,
+        )
 
         return {"source": source, "destination": destination, "moved": True}
