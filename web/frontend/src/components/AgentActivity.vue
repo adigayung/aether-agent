@@ -20,7 +20,9 @@
 // Agent Report final (task_completed.data.result) ditampilkan UTUH di alur ini
 // tanpa truncate/ellipsis, memakai Markdown renderer yang sama dengan
 // ReportViewer (web/frontend/src/markdown.js). Report panjang mengikuti tinggi
-// container activity yang memang scrollable.
+// container activity yang memang scrollable. Teks report asli juga dipakai
+// tombol Copy kecil (pojok kiri bawah area report) yang memakai pola
+// .cmsg-actions/.copy-btn yang sama dengan Consultant Chat.
 import { computed, nextTick, ref, watch } from "vue";
 import { renderMarkdown } from "../markdown.js";
 
@@ -130,6 +132,11 @@ const timeline = computed(() => {
           label: "AGENT",
           text: "Task completed",
           ts: e.ts,
+          // Teks asli report (Markdown sumber dari LLM) disimpan terpisah dari
+          // HTML: dipakai tombol Copy agar yang tersalin = SELURUH isi report
+          // sebagai teks bermakna (bukan markup HTML dan bukan hanya yang
+          // terlihat di viewport).
+          reportText: report,
           reportHtml: report ? renderMarkdown(report) : "",
         });
         break;
@@ -148,6 +155,30 @@ const timeline = computed(() => {
 });
 
 const empty = computed(() => !timeline.value.length);
+
+// --- Copy final report ------------------------------------------------------
+// Salin SELURUH isi final report (teks Markdown sumber dari LLM), bukan hanya
+// teks yang terlihat di viewport dan bukan markup HTML hasil render. Memakai
+// pola .cmsg-actions/.copy-btn yang sama dengan tombol Copy di Consultant Chat
+// (termasuk feedback label "Copied" sementara).
+const copiedReportKey = ref(null);
+let copiedTimer = null;
+
+async function copyReport(item) {
+  const text = item && typeof item.reportText === "string" ? item.reportText : "";
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (e) {
+    return;
+  }
+  copiedReportKey.value = item.key;
+  if (copiedTimer) clearTimeout(copiedTimer);
+  copiedTimer = setTimeout(() => {
+    copiedReportKey.value = null;
+    copiedTimer = null;
+  }, 1400);
+}
 
 watch(timeline, scrollToLatest, { flush: "post" });
 </script>
@@ -180,9 +211,26 @@ watch(timeline, scrollToLatest, { flush: "post" });
           {{ item.tool }} → {{ item.summary }}
         </span>
         <!-- Agent Report final: ditampilkan UTUH (tanpa truncate/ellipsis).
-             Markdown mengikuti renderer yang sama dengan ReportViewer. -->
-        <!-- eslint-disable-next-line vue/no-v-html -->
-        <div v-if="item.reportHtml" class="md act-report" v-html="item.reportHtml"></div>
+             Markdown mengikuti renderer yang sama dengan ReportViewer.
+             Tombol Copy kecil di pojok kiri bawah area report. -->
+        <div v-if="item.reportHtml" class="act-report-block">
+          <!-- eslint-disable-next-line vue/no-v-html -->
+          <div class="md act-report" v-html="item.reportHtml"></div>
+          <div class="cmsg-actions">
+            <button
+              type="button"
+              class="copy-btn"
+              :class="{ copied: copiedReportKey === item.key }"
+              :title="copiedReportKey === item.key ? 'Copied' : 'Copy final report'"
+              :aria-label="copiedReportKey === item.key ? 'Copied' : 'Copy final report'"
+              @click="copyReport(item)"
+            >
+              <svg v-if="copiedReportKey === item.key" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+              <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <span class="copy-label">{{ copiedReportKey === item.key ? "Copied" : "Copy" }}</span>
+            </button>
+          </div>
+        </div>
       </span>
     </div>
 

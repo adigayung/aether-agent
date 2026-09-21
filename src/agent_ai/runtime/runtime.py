@@ -798,6 +798,14 @@ class AgentRuntime:
         """
         cancelled = result.status == RuntimeStatus.CANCELLED
 
+        # Final Agent Report = output final LLM. Ini SATU-SATUNYA field yang
+        # dikirim verbatim (tanpa pemotongan sanitasi): report yang ditampilkan
+        # ke user harus utuh dari LLM -> log/SSE -> frontend. Batas payload
+        # activity log / tool output internal TIDAK diubah.
+        from agent_ai.core.observability import verbatim
+
+        report_text = verbatim(result.result) if result.result is not None else None
+
         # Update AI Project Bible (sekali per task) lalu catat status akhir.
         # Task yang di-CANCEL TIDAK meng-update Bible: hasilnya parsial dan
         # tidak boleh menjadi knowledge project (hindari retry/learning).
@@ -807,13 +815,13 @@ class AgentRuntime:
             "task_finished",
             {
                 "status": result.status.value,
-                "result": result.result,
+                "result": report_text,
                 "error": result.error,
             },
         )
 
         if result.status == RuntimeStatus.COMPLETED:
-            self._emit_event("task_completed", {"result": result.result})
+            self._emit_event("task_completed", {"result": report_text})
         elif cancelled:
             # Event terminal AETHER existing (task_cancelled) supaya Task
             # History/Agent Activity mengetahui task dihentikan, bukan selesai.

@@ -2618,7 +2618,12 @@ select.input-a {
 
 /* Agent Report final di dalam timeline activity: ditampilkan UTUH (tanpa
    truncate/ellipsis). Report panjang mengikuti tinggi panel `.act-body` yang
-   sudah scrollable — tidak ada clipper/line-clamp di sini. */
+   sudah scrollable — tidak ada clipper/line-clamp di sini.
+   Tombol Copy kecil berada DI BAWAH report (pojok kiri bawah area report),
+   tidak menutupi isi report. */
+.act-report-block {
+  min-width: 0;
+}
 .act-report {
   margin-top: 6px;
   padding: 10px 12px;
