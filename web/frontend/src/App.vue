@@ -120,6 +120,12 @@ const reportStatus = ref("");
 const changes = ref([]);
 const validation = reactive({ state: "pending" });
 const runtime = reactive({ phase: "", activity: "", provider: "", model: "", tool: "" });
+// Live "Agent reasoning." indicator: true HANYA selama AETHER menunggu respons
+// LLM. Ini SATU elemen UI (bukan log/event baru, bukan subsystem baru) yang
+// dikendalikan event SSE EXISTING: provider_request (mulai) / provider_response
+// (selesai/error), dengan terminal event sebagai pengaman. Tidak ada timer JS
+// maupun polling — animasi titik sepenuhnya CSS.
+const isReasoning = ref(false);
 // Penanda refresh File Explorer (dinaikkan setelah agent selesai membuat file).
 const explorerRefresh = ref(0);
 // Live filesystem change terakhir (dari event change_detected) untuk update
@@ -140,6 +146,10 @@ function pushRolling(list, item, max) {
 
 // Event yang ditampilkan Agent Activity: live SSE atau history dari API.
 const activityEvents = computed(() => historyEvents.value || events.value);
+
+// Reasoning status hanya relevan untuk alur LIVE (bukan saat menampilkan
+// activity task lama dari persistent log). Sumber tetap satu: isReasoning.
+const showReasoning = computed(() => isReasoning.value && !historyEvents.value);
 
 let source = null;
 
@@ -454,6 +464,8 @@ function handleEvent(evt) {
   switch (evt.event_type) {
     case "task_started":
       task.status = "running";
+      // Task baru mulai: pastikan reasoning status task sebelumnya sudah bersih.
+      isReasoning.value = false;
       // Task ini BENAR-BENAR mulai running -> jadikan target tombol Stop.
       runningTaskId.value = evt.task_id || runningTaskId.value || "";
       runtime.activity = "Starting task";
@@ -469,9 +481,18 @@ function handleEvent(evt) {
       }
       break;
     case "provider_request":
+      if (p.provider) runtime.provider = p.provider;
+      if (p.model) runtime.model = p.model;
+      // AETHER mulai menunggu respons LLM -> tampilkan SATU reasoning status.
+      // Dipanggil berulang kali pun tetap satu elemen (state boolean), bukan
+      // entri activity/log baru.
+      isReasoning.value = true;
+      break;
     case "provider_response":
       if (p.provider) runtime.provider = p.provider;
       if (p.model) runtime.model = p.model;
+      // Respons LLM diterima (atau error provider) -> hentikan reasoning status.
+      isReasoning.value = false;
       break;
     case "tool_called":
       if (p.tool) {
@@ -524,6 +545,8 @@ function handleEvent(evt) {
       break;
     case "task_completed":
       task.status = "completed";
+      // Task selesai -> reasoning status harus benar-benar berhenti.
+      isReasoning.value = false;
       runtime.activity = "";
       // Refresh File Explorer setelah agent selesai (file baru terlihat).
       explorerRefresh.value += 1;
@@ -534,6 +557,8 @@ function handleEvent(evt) {
       break;
     case "task_failed":
       task.status = "failed";
+      // Task gagal -> hentikan reasoning status.
+      isReasoning.value = false;
       queueRefresh.value += 1;
       terminalTaskId.value = evt.task_id || task.id || "";
       playStatusSound("failed");
@@ -541,6 +566,8 @@ function handleEvent(evt) {
       break;
     case "task_cancelled":
       task.status = "cancelled";
+      // Task dibatalkan -> hentikan reasoning status (tidak ada animasi nyangkut).
+      isReasoning.value = false;
       // Execution benar-benar berhenti -> indikator Agent kembali idle.
       runtime.activity = "";
       runtime.tool = "";
@@ -576,6 +603,8 @@ function resetWorkspace() {
   runtime.provider = "";
   runtime.model = "";
   runtime.tool = "";
+  // Workspace direset untuk task baru -> tidak ada reasoning status tersisa.
+  isReasoning.value = false;
   liveFsChange.value = null;
 }
 
@@ -1149,7 +1178,7 @@ onBeforeUnmount(() => {
                   <span class="tl r"></span><span class="tl y"></span><span class="tl g"></span>
                   <span class="tt">aether — agent activity</span>
                 </div>
-                <AgentActivity :events="activityEvents" :status="task.status" />
+                <AgentActivity :events="activityEvents" :status="task.status" :is-reasoning="showReasoning" />
               </div>
             </section>
           </div>

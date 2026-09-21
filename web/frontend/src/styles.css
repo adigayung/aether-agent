@@ -2616,6 +2616,79 @@ select.input-a {
   color: var(--text-faint);
 }
 
+/* ---- Live "Agent reasoning." indicator ---- */
+/* Satu elemen yang sama selama AETHER menunggu respons LLM. Titik dianimasikan
+   CSS (@keyframes), BUKAN timer JS, sehingga tidak ada interval yang tertinggal
+   saat respons diterima / task selesai / gagal / cancelled (elemen di-remove
+   lewat v-if). Lebar tiap titik tetap walau opacity 0 agar teks tidak bergeser. */
+.reasoning-indicator {
+  padding-top: 4px;
+}
+.act-label.reasoning {
+  color: #a5e8ff;
+  border-color: rgba(34, 211, 238, 0.32);
+  background: rgba(34, 211, 238, 0.12);
+}
+.act-row.reasoning .act-text {
+  color: var(--act-agent);
+}
+.reasoning-dots {
+  display: inline-block;
+  white-space: nowrap;
+}
+.reasoning-dots i {
+  display: inline-block;
+  width: 0.34em;
+  font-style: normal;
+  text-align: left;
+  opacity: 0;
+  animation-duration: 1.2s;
+  animation-iteration-count: infinite;
+  animation-timing-function: linear;
+}
+.reasoning-dots i:nth-child(1) {
+  /* Titik pertama selalu terlihat -> selalu terbaca "Agent reasoning." */
+  opacity: 1;
+}
+.reasoning-dots i:nth-child(2) {
+  animation-name: reasoning-dot-2;
+}
+.reasoning-dots i:nth-child(3) {
+  animation-name: reasoning-dot-3;
+}
+/* Pola titik: . -> .. -> ... -> . 
+   Dot ke-2 menyala pada fase ke-2, dot ke-3 pada fase ke-3. Batas keyframe
+   dibuat berdampingan (selisih 0.01%) supaya pergantian titik praktis diskret
+   tanpa bergantung pada semantik steps(). */
+@keyframes reasoning-dot-2 {
+  0% {
+    opacity: 0;
+  }
+  33.32% {
+    opacity: 0;
+  }
+  33.33% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+@keyframes reasoning-dot-3 {
+  0% {
+    opacity: 0;
+  }
+  66.65% {
+    opacity: 0;
+  }
+  66.66% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
 /* Agent Report final di dalam timeline activity: ditampilkan UTUH (tanpa
    truncate/ellipsis). Report panjang mengikuti tinggi panel `.act-body` yang
    sudah scrollable — tidak ada clipper/line-clamp di sini.

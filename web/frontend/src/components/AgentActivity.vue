@@ -29,6 +29,10 @@ import { renderMarkdown } from "../markdown.js";
 const props = defineProps({
   events: { type: Array, default: () => [] },
   status: { type: String, default: "idle" },
+  // Live "Agent reasoning." indicator. Dikendalikan oleh App.vue dari event SSE
+  // existing (provider_request -> true, provider_response/terminal -> false).
+  // Ini SATU elemen yang sama (bukan entri timeline/log baru).
+  isReasoning: { type: Boolean, default: false },
 });
 
 const scroller = ref(null);
@@ -181,6 +185,16 @@ async function copyReport(item) {
 }
 
 watch(timeline, scrollToLatest, { flush: "post" });
+
+// Saat reasoning status MUNCUL, pastikan barisnya terlihat (scroll ke bawah)
+// tanpa mengubah mekanisme scroll yang sudah ada.
+watch(
+  () => props.isReasoning,
+  (on) => {
+    if (on) scrollToLatest();
+  },
+  { flush: "post" }
+);
 </script>
 
 <template>
@@ -231,6 +245,22 @@ watch(timeline, scrollToLatest, { flush: "post" });
             </button>
           </div>
         </div>
+      </span>
+    </div>
+
+    <!-- Live "Agent reasoning." — SATU elemen yang sama selama AETHER menunggu
+         respons LLM. Titik dianimasikan oleh CSS (@keyframes), BUKAN timer JS,
+         sehingga tidak ada interval yang tertinggal; elemen hanya ada saat
+         isReasoning true. TIDAK menambah entri activity/log apa pun. -->
+    <div
+      v-if="isReasoning"
+      class="act-row reasoning reasoning-indicator"
+      role="status"
+      aria-live="polite"
+    >
+      <span class="act-label reasoning">AGENT</span>
+      <span class="act-body-col">
+        <span class="act-text reasoning-text">Agent reasoning<span class="reasoning-dots" aria-hidden="true"><i>.</i><i>.</i><i>.</i></span></span>
       </span>
     </div>
 
