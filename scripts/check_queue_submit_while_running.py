@@ -286,12 +286,56 @@ def scenario_frontend_gating() -> None:
     print("[7,8] Frontend: gating per-proposal (Consultant) + Agent Input bebas running OK")
 
 
+def scenario_can_enqueue_vs_can_execute() -> None:
+    """Invariant: RUNNING global HANYA berarti executor sibuk (can_execute=False),
+    BUKAN berarti submission harus diblokir (can_enqueue tetap True).
+
+    Yang boleh men-gate SUBMISSION hanya:
+      - composer: in-flight request (anti double-submit), dan
+      - Consultant per-proposal: task MILIK proposal itu sendiri yang menempati
+        slot (runningTaskId, task SPESIFIK) atau sedang submit.
+    Boolean `running` global (status executor) TIDAK boleh men-disable submission.
+    """
+    app = (FRONTEND_SRC / "App.vue").read_text(encoding="utf-8")
+    chat = (FRONTEND_SRC / "components" / "ConsultantChat.vue").read_text(encoding="utf-8")
+    composer = (FRONTEND_SRC / "components" / "TaskComposer.vue").read_text(encoding="utf-8")
+
+    # Consultant: gating PER-PROPOSAL diikat ke task RUNNING spesifik, bukan
+    # ke status executor global (`running`).
+    assert "Boolean(props.runningTaskId) && id === props.runningTaskId" in chat, (
+        "gating proposal harus dibandingkan dengan task RUNNING spesifik (runningTaskId), "
+        "bukan status executor global"
+    )
+
+    # Composer: tombol Run Task hanya anti double-submit; Stop-lah yang bergantung
+    # pada `running` (informasional, bukan blocker submission).
+    assert ':disabled="disabled || !text.trim()"' in composer, (
+        "Run Task composer hanya boleh di-gate oleh in-flight submit"
+    )
+    assert ':disabled="running' not in composer, (
+        "Run Task composer TIDAK boleh di-disable oleh status running global"
+    )
+    assert 'v-if="running"' in composer, (
+        "`running` hanya dipakai untuk menampilkan tombol Stop (bukan memblokir submit)"
+    )
+
+    # App.vue: input submission TIDAK diikat ke isRunning (status executor global).
+    assert ':disabled="isRunning"' not in app, (
+        "App TIDAK boleh men-disable input/submission via isRunning"
+    )
+    assert ':disabled="submitting"' in app, (
+        "App mengikat disabled composer ke in-flight submit (anti double-submit)"
+    )
+    print("[9] Frontend: RUNNING global != submission disabled (can_enqueue != can_execute) OK")
+
+
 def main() -> int:
     print("=== Verifikasi: enqueue tetap boleh saat Agent RUNNING ===")
     scenario_frontend_gating()
     scenario_enqueue_while_running_service()
     scenario_dependency_still_enforced()
     scenario_enqueue_while_running_http()
+    scenario_can_enqueue_vs_can_execute()
     print(
         "\n[OK] Architect tetap dapat membuat task baru saat Agent RUNNING; "
         "task baru masuk Queue dan dieksekusi serial oleh Scheduler."
