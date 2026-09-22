@@ -21,11 +21,14 @@ const props = defineProps({
   // antrian global (concurrency=1) memang menerima task baru saat slot terisi.
   running: { type: Boolean, default: false },
   // task_id task yang BARU SAJA dibuat App.vue dari aksi Run Task (di-bump
-  // App.vue setiap submitTask). Dipakai child untuk mengetahui task miliknya.
+  // App.vue setiap submitTask). Dipakai child untuk memasangkan task ke
+  // proposal yang memicunya (per-proposal, bukan global).
   submittedTaskId: { type: String, default: "" },
-  // task_id task yang mencapai status terminal (completed/failed/cancelled).
-  // Di-bump App.vue dari event SSE terminal. Bila cocok dengan task yang
-  // di-submit dari tombol ini -> tombol kembali enabled.
+  // task_id yang SEDANG RUNNING di Global Task Queue (sumber tunggal: queue API
+  // via App.vue). Dipakai HANYA untuk indikator per-proposal "Running…" — BUKAN
+  // untuk memblokir submission proposal lain.
+  runningTaskId: { type: String, default: "" },
+  // task_id task terminal terakhir (kompatibilitas; tidak dipakai untuk gating).
   terminalTaskId: { type: String, default: "" },
   // Penanda refresh panel TASKS (dinaikkan App.vue setelah Run Task / event
   // terminal task). Panel TASKS membaca SATU queue global yang sama.
@@ -374,40 +377,76 @@ const lastProposal = computed(() => {
   return null;
 });
 
-// --- Status Run Task (anti double-submit, TIDAK diblokir oleh agent busy) ----
-// State terpisah dari props.running (global agent busy). Kita hanya men-disable
-// tombol untuk task yang BENAR-BENAR di-submit dari tombol ini, sampai task
-// tersebut mencapai status terminal.
-const submittedTaskId = ref("");
-const terminalTaskId = ref("");
-const runDisabled = computed(
-  () => Boolean(submittedTaskId.value) && submittedTaskId.value !== terminalTaskId.value
-);
+// --- Status Run Task (PER Task Proposal) ------------------------------------
+// Bug yang diperbaiki: tombol Run Task SEBELUMNYA di-disable GLOBAL dari satu
+// task_id (submittedTaskId) sampai task itu terminal -> selama Agent RUNNING,
+// SELURUH tombol Run Task (termasuk Task Proposal BARU) ikut mati, sehingga
+// task baru tidak bisa di-enqueue. Itu mencampur can_execute (slot eksekusi)
+// dengan can_enqueue (submission).
+//
+// Sekarang anti-double-submit disimpan PER PROPOSAL (di objek message
+// `runTaskId`) dan HANYA proposal yang task-nya sedang menempati slot eksekusi
+// (`props.runningTaskId`, sumber tunggal = Global Task Queue via App.vue) yang
+// "busy". Task yang RUNNING tidak memblokir submission proposal LAIN: enqueue
+// selalu boleh, scheduler serial backend yang menentukan kapan dieksekusi.
+const pendingRunIndex = ref(-1);
 
-// App.vue membuat task dari aksi Run Task -> catat task milik kita.
+function proposalRunId(i) {
+  const m = messages.value[i];
+  return (m && m.runTaskId) || "";
+}
+
+// True HANYA untuk proposal yang task-nya sendiri sedang RUNNING (slot
+// eksekusi) atau sedang dalam proses submit.
+function isProposalBusy(i) {
+  const id = proposalRunId(i);
+  if (!id) return false;
+  if (id === "__pending__") return true; // createTask sedang berjalan
+  return Boolean(props.runningTaskId) && id === props.runningTaskId;
+}
+
+// Safety: bila createTask gagal, jangan biarkan penanda "__pending__" nyangkut
+// (tombol tetap terkunci). Timer dibatalkan begitu App.vue membalas task_id.
+const PENDING_RUN_TIMEOUT_MS = 15000;
+let pendingRunTimer = null;
+function clearPendingRunTimer() {
+  if (pendingRunTimer) {
+    clearTimeout(pendingRunTimer);
+    pendingRunTimer = null;
+  }
+}
+
+// App.vue membuat task dari aksi Run Task -> pasangkan task_id ke proposal yang
+// MEMICU-nya (bukan global), sehingga proposal lain tetap dapat di-enqueue.
 watch(
   () => props.submittedTaskId,
   (id) => {
-    if (id && id !== submittedTaskId.value) submittedTaskId.value = id;
+    if (!id || pendingRunIndex.value < 0) return;
+    clearPendingRunTimer();
+    const m = messages.value[pendingRunIndex.value];
+    if (m) m.runTaskId = id;
+    pendingRunIndex.value = -1;
   }
 );
 
-// Task kita mencapai status terminal -> tombol kembali enabled.
-watch(
-  () => props.terminalTaskId,
-  (id) => {
-    if (id) terminalTaskId.value = id;
-  }
-);
-
-function runTask(proposal) {
+function runTask(proposal, index = -1) {
   const target = proposal || lastProposal.value;
-  if (!target || runDisabled.value) return;
-  // Disable langsung (anti double-submit) sampai task ini terminal. submitted
-  // id akan menyusul dari App.vue; untuk selang singkat itu kita pakai penanda
-  // "pending" agar tombol tidak bisa diklik dua kali.
-  submittedTaskId.value = "__pending__";
-  terminalTaskId.value = "";
+  if (!target) return;
+  if (index >= 0 && isProposalBusy(index)) return;
+  // Tandai proposal INI "sedang submit" sampai App.vue mengembalikan task_id.
+  if (index >= 0) {
+    pendingRunIndex.value = index;
+    const m = messages.value[index];
+    if (m) m.runTaskId = "__pending__";
+    clearPendingRunTimer();
+    pendingRunTimer = setTimeout(() => {
+      pendingRunTimer = null;
+      if (pendingRunIndex.value !== index) return;
+      const pending = messages.value[index];
+      if (pending && pending.runTaskId === "__pending__") pending.runTaskId = "";
+      pendingRunIndex.value = -1;
+    }, PENDING_RUN_TIMEOUT_MS);
+  }
   // Bawa pilihan runner (provider/model DARI CARD PROPOSAL, bukan header) ke
   // alur task existing. App.vue meneruskannya sebagai metadata task sehingga
   // task benar-benar memakai provider/model ini.
@@ -423,6 +462,8 @@ function startNewSession() {
   messages.value = [];
   attachments.value = [];
   error.value = "";
+  pendingRunIndex.value = -1;
+  clearPendingRunTimer();
 }
 
 onMounted(() => {
@@ -584,8 +625,9 @@ onMounted(() => {
             <pre class="cp-body">{{ msg.taskProposal }}</pre>
             <!-- Footer card: pilihan runner (Provider + Model) di kiri, tombol
                  Run Task di kanan. Dipakai untuk MENJALANKAN task ini; pilihan
-                 header (chat) TIDAK berubah. Di-disable saat task milik card
-                 ini sedang berjalan (anti double-submit). -->
+                 header (chat) TIDAK berubah. Hanya card MILIK task yang masih
+                 aktif yang di-disable (anti double-submit PER PROPOSAL);
+                 proposal LAIN tetap bisa di-enqueue meski Agent sedang RUNNING. -->
             <div class="cp-foot">
               <div class="cp-runner">
                 <label class="cp-select">
@@ -593,7 +635,7 @@ onMounted(() => {
                   <select
                     class="input-a"
                     :value="proposalProviderInstanceId"
-                    :disabled="runDisabled"
+                    :disabled="isProposalBusy(i)"
                     @change="onProposalProviderChange"
                   >
                     <option v-if="!providerOptions.length" value="">No provider instance</option>
@@ -607,7 +649,7 @@ onMounted(() => {
                   <select
                     class="input-a"
                     :value="proposalModelId"
-                    :disabled="runDisabled || !proposalProviderInstanceId"
+                    :disabled="isProposalBusy(i) || !proposalProviderInstanceId"
                     @change="onProposalModelChange"
                   >
                     <option v-if="!proposalModelOptions.length" value="">No model</option>
@@ -617,9 +659,9 @@ onMounted(() => {
                   </select>
                 </label>
               </div>
-              <button class="run-task-btn" type="button" :disabled="runDisabled" @click="runTask(msg.taskProposal)">
-                <svg v-if="!runDisabled" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
-                {{ runDisabled ? "Running…" : "Run Task" }}
+              <button class="run-task-btn" type="button" :disabled="isProposalBusy(i)" @click="runTask(msg.taskProposal, i)">
+                <svg v-if="!isProposalBusy(i)" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+                {{ isProposalBusy(i) ? "Running…" : "Run Task" }}
               </button>
             </div>
             <!-- Tombol Copy di kiri-bawah card (pola .cmsg-actions/.copy-btn

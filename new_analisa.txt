@@ -1,0 +1,55 @@
+# Analisa: Hapus elemen GitHub Backup/Checkpoint dari halaman Projects
+
+## Perubahan yang dilakukan
+
+### 1. App.vue — Template (halaman Projects)
+
+1. **Header tabel**: Kolom "GitHub Backup" dihapus dari `<thead>`. Lebar kolom disesuaikan:
+   - Project: 32% → 34%
+   - Path: 42% → 48%
+   - Kolom aksi (delete button): tetap ada
+
+2. **Per-row**: Elemen `<td>` yang menampilkan `githubStatusClass(p)` / `githubStatusLabel(p)` (span `.status-tag` dengan teks "Configured"/"Not configured") dihapus.
+
+3. **Detail project (`proj-detail`)**: Seluruh blok `<div v-if="selectedProject" class="proj-detail">...</div>` yang berisi `GithubBackupPanel` dihapus. Diganti komentar bahwa fungsi backup ada di panel Backup (activeNav === 'backup').
+
+4. **Click handler**: `@click="selectedProjectId = p.id"` pada `<tr>` dihapus karena tidak ada detail panel yang terbuka lagi (selectedProject already removed).
+
+### 2. App.vue — Script
+
+1. **Import**: `getGithubConfig` dihapus dari import (sudah tidak dipakai di App.vue — hanya dipakai di GithubBackupPanel.vue via import langsung).
+
+2. **Script functions dihapus**:
+   - `const projectGithub = ref({})` — state indikator GitHub per project
+   - `async function refreshProjectGithubStatuses()` — fetch config GitHub per project
+   - `watch(activeNav, ...)` yang memanggil refreshProjectGithubStatuses saat activeNav === 'projects'
+   - `function githubStatusLabel(p)` — return "Configured"/"Not configured"
+   - `function githubStatusClass(p)` — return "status-on"/"status-off"
+
+3. **`selectedProject` computed** dihapus (hanya dipakai di proj-detail yang sudah dihapus).
+
+### 3. styles.css
+
+1. `proj-detail` CSS rules dihapus (3 block: `.proj-detail`, `.proj-detail .panel-head`, `.proj-detail .desc.mono`).
+
+## Yang TIDAK diubah
+
+- **Panel Backup kanan** (GithubBackupPanel.vue) — tetap utuh untuk halaman Backup (activeNav === 'backup')
+- **Struktur navigasi/sidebar** — tidak tersentuh
+- **Python/backend** — tidak tersentuh
+- **Fungsi hapus project** (registry-only) — tidak tersentuh
+- **selectedProjectId ref** — masih dipakai untuk filtering task history/report, tidak dihapus
+
+## Bentuk elemen yang dihapus
+
+- **Header**: Teks "GitHub Backup" pada tabel Projects
+- **Per baris**: Span `.status-tag` dengan kelas `status-on`/`status-off` dan teks "Configured"/"Not configured"
+- **Detail**: Panel `proj-detail` berisi `GithubBackupPanel` (header + tombol Close + panel body dengan form konfigurasi checkpoint/backup)
+
+## Risiko terkait event handler orphan
+
+Tidak ada. Semua fungsi yang dihapus (`githubStatusLabel`, `githubStatusClass`, `refreshProjectGithubStatuses`, `projectGithub`) hanya dipanggil di template bagian projects yang juga dihapus. Tidak ada event listener eksternal atau Python code yang bergantung padanya.
+
+## Build Vite
+
+✅ 0 error, built in 18.29s.

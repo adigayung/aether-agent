@@ -30,7 +30,7 @@ import {
   deleteProject,
   getActiveProject,
   getConfig,
-  getGithubConfig,
+  
   getHealth,
   getLLMProviders,
   getProjects,
@@ -570,42 +570,6 @@ const pageDesc = computed(() => {
   return "";
 });
 
-// Project yang sedang dipilih di halaman Projects (detail + GitHub Backup).
-// Sumber data = daftar project launcher yang sama (bukan registry kedua).
-const selectedProject = computed(() =>
-  (projects.value || []).find((p) => p.id === selectedProjectId.value) || null
-);
-
-// Status GitHub Backup per project (di halaman Projects) — memakai SUMBER DATA
-// YANG SAMA dengan halaman Backup (`GET /projects/<id>/github`), bukan store
-// kedua. Best-effort: project tanpa konfigurasi berstatus "Not configured".
-const projectGithub = ref({});
-async function refreshProjectGithubStatuses() {
-  const list = projects.value || [];
-  const result = {};
-  await Promise.all(
-    list.map(async (p) => {
-      try {
-        result[p.id] = await getGithubConfig(p.id);
-      } catch {
-        result[p.id] = null;
-      }
-    })
-  );
-  projectGithub.value = result;
-}
-watch(activeNav, (nav) => {
-  if (nav === "projects") refreshProjectGithubStatuses();
-});
-function githubStatusLabel(p) {
-  const st = projectGithub.value[p.id];
-  if (!st) return "—";
-  return st.configured ? "Configured" : "Not configured";
-}
-function githubStatusClass(p) {
-  const st = projectGithub.value[p.id];
-  return st && st.configured ? "status-on" : "status-off";
-}
 function statusTagClass(s) {
   const v = (s || "").toLowerCase();
   if (v === "completed") return "status-on";
@@ -1641,14 +1605,13 @@ onBeforeUnmount(() => {
             <table v-else class="aether-table">
               <thead>
                 <tr>
-                  <th style="width: 32%">Project</th>
-                  <th style="width: 42%">Path</th>
-                  <th style="width: 18%">GitHub Backup</th>
+                  <th style="width: 34%">Project</th>
+                  <th style="width: 48%">Path</th>
                   <th class="th-actions"></th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="p in projects" :key="p.id" class="clickable" @click="selectedProjectId = p.id">
+                <tr v-for="p in projects" :key="p.id" class="clickable">
                   <td>
                     <div class="cell-name">
                       <span class="avatar">P</span>
@@ -1659,11 +1622,6 @@ onBeforeUnmount(() => {
                     </div>
                   </td>
                   <td><span class="mono">{{ p.root || p.path }}</span></td>
-                  <td>
-                    <span class="status-tag" :class="githubStatusClass(p)">
-                      {{ githubStatusLabel(p) }}
-                    </span>
-                  </td>
                   <td class="td-actions">
                     <!-- Hapus = hapus RECORD dari daftar AETHER saja.
                          File/folder project di disk TIDAK dihapus. -->
@@ -1681,22 +1639,8 @@ onBeforeUnmount(() => {
               </tbody>
             </table>
 
-            <!-- Detail project + konfigurasi GitHub Backup (SUMBER DATA SAMA
-                 dengan halaman Backup: endpoint /projects/<id>/github). -->
-            <div v-if="selectedProject" class="proj-detail">
-              <div class="panel-head">
-                <div>
-                  <div class="title">{{ selectedProject.name }}</div>
-                  <div class="desc mono">{{ selectedProject.root || selectedProject.path }}</div>
-                </div>
-                <button class="btn-aether btn-ghost-a" type="button" @click="selectedProjectId = ''">
-                  Close
-                </button>
-              </div>
-              <div class="panel-body">
-                <GithubBackupPanel :project="selectedProject" />
-              </div>
-            </div>
+            <!-- Detail project & konfigurasi GitHub Backup telah dipindah
+                 ke panel Backup (activeNav === 'backup'). -->
           </section>
 
           <!-- Backup (project AKTIF): konfigurasi/checkpoint/recovery GitHub.
@@ -1767,6 +1711,7 @@ onBeforeUnmount(() => {
       :provider-instance-id="selectedProviderInstanceId"
       :model-id="selectedModelId"
       :running="isRunning"
+      :running-task-id="runningTaskId"
       :submitted-task-id="submittedTaskId"
       :terminal-task-id="terminalTaskId"
       :queue-refresh-key="queueRefresh"
