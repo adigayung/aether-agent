@@ -348,23 +348,17 @@ button {
   min-height: 0;
 }
 .ws-col.right > .block:not(.explorer-block) {
-  /* CHANGES: boleh menyusut (flex-shrink) dan dibatasi tinggi agar selalu
-     ringkas, sehingga tidak mendorong EXPLORER keluar dari kolom. Scroll
-     internal ada di .changes-body (bukan di blok ini). */
-  flex: 0 1 auto;
+  /* CHANGES & TASKS: tidak punya flex bawaan — diatur oleh .collapsed /
+     :not(.collapsed) di bawah agar ketiga panel terbagi rata vertikal. */
   min-height: 0;
   overflow: hidden;
 }
-/* Blok CHANGES (tanpa .explorer-block / .wb-queue): batasi tinggi maksimum
-   agar EXPLORER selalu menerima sisa tinggi kolom. Daftar perubahan menjadi
-   scroll owner internal (.changes-body) mengikuti pola .ex-head/.explorer.
-   Alokasi ~40% memberi ruang lebih untuk daftar perubahan (kartu kini kompak
-   satu baris) sementara Explorer menyusut sedikit namun tetap bisa scroll. */
+/* Blok CHANGES (tanpa .explorer-block / .wb-queue): KETIKA EXPANDED, bagi rata
+   dengan panel lain (flex:1 1 0). Daftar perubahan menjadi scroll owner internal
+   (.changes-body) mengikuti pola .ex-head/.explorer. */
 .ws-col.right > .block:not(.explorer-block):not(.wb-queue) {
   display: flex;
   flex-direction: column;
-  max-height: 40%;
-  min-height: 96px;
 }
 .ws-col.right > .block:not(.explorer-block):not(.wb-queue) > .block-head {
   flex: 0 0 auto;
@@ -936,11 +930,7 @@ button {
 .explorer-block {
   display: flex;
   flex-direction: column;
-  /* Isi sisi kanan: ambil sisa tinggi kolom, jangan ikut meluber keluar
-     panel. min-height:0 wajib agar overflow-y anak (daftar) bekerja. */
-  flex: 1 1 auto;
   min-height: 0;
-  /* CHANGES tetap di atas; hanya daftar explorer yang scroll. */
   overflow: hidden;
 }
 .ex-head {
@@ -2548,10 +2538,14 @@ select.input-a {
   /* Mode stacked: baris grid mengikuti konten (auto), sehingga kolom kanan
      tidak punya tinggi terbatas. Tanpa batas ini, daftar Explorer tumbuh
      mengikuti isi dan overflow-y-nya (.explorer) tidak pernah aktif — item
-     terbawah terpotong. Beri tinggi eksplisit pada blok Explorer agar area
+     terbawah terpotong. Beri tinggi eksplisit pada setiap panel agar area
      daftar kembali menjadi scroll owner (header tetap terlihat di atas). */
-  .explorer-block {
+  .ws-col.right > .block:not(.collapsed),
+  .ws-col.right > .wb-queue:not(.collapsed) {
     flex: 0 1 auto;
+    min-height: 0;
+  }
+  .explorer-block {
     max-height: 52vh;
   }
   /* Mode stacked: kolom kanan tidak dibatasi grid track, jadi % untuk CHANGES
@@ -2559,6 +2553,9 @@ select.input-a {
      ringkas namun tetap dapat menampung beberapa kartu perubahan. */
   .ws-col.right > .block:not(.explorer-block):not(.wb-queue) {
     max-height: 260px;
+  }
+  .wb-queue {
+    max-height: 210px;
   }
 }
 
@@ -3327,10 +3324,6 @@ select.input-a {
   overflow: hidden;
   padding: 0;
   border-bottom: 1px solid var(--border-soft);
-  max-height: 210px;
-}
-.wb-queue.collapsed {
-  max-height: none;
 }
 
 /* ---- Halaman Tasks: SATU nav, DUA mode (QUEUE | HISTORY) ----
@@ -3582,6 +3575,15 @@ select.input-a {
 /* collapsed. Tidak ada perubahan pada scroll contract Explorer maupun   */
 /* logika Task Queue / Changes.                                          */
 
+/* Semua panel di .ws-col.right: KETIKA EXPANDED, bagi rata ~1/3 tinggi
+   container (.ws-col.right). flex:1 1 0 + min-height:0 memastikan setiap
+   panel mendapat proporsi sama dan scroll owners internal bekerja. */
+.ws-col.right > .block:not(.collapsed),
+.ws-col.right > .wb-queue:not(.collapsed) {
+  flex: 1 1 0;
+  min-height: 0;
+}
+
 /* Chevron bersama untuk header section (TASK sudah punya .q-caret sendiri). */
 .sec-caret {
   flex: 0 0 auto;
@@ -3623,10 +3625,15 @@ select.input-a {
   flex: 0 0 auto;
   max-height: none;
 }
+.ws-col.right > .wb-queue.collapsed {
+  flex: 0 0 auto;
+  max-height: none;
+}
 
 /* Padding header saat collapsed dipadatkan agar tampil seperti baris header. */
 .ws-col.right > .block.collapsed > .block-head,
-.ws-col.right > .block.collapsed > .ex-head {
+.ws-col.right > .block.collapsed > .ex-head,
+.ws-col.right > .wb-queue.collapsed > .q-head {
   margin-bottom: 0;
 }
 .ws-col.right > .block.collapsed:not(.explorer-block):not(.wb-queue) {
@@ -3636,6 +3643,10 @@ select.input-a {
 .ws-col.right > .block.explorer-block.collapsed {
   padding-top: 9px;
   padding-bottom: 9px;
+}
+.ws-col.right > .wb-queue.collapsed {
+  padding-top: 6px;
+  padding-bottom: 6px;
 }
 
 
