@@ -1,0 +1,260 @@
+================================================================================
+LAPORAN VERIFIKASI — PROJECT BIBLE AETHER (keberadaan, lokasi, format aktual)
+Mode   : READ-ONLY (tidak ada file dibuat/diubah/dihapus selain new_analisa.txt)
+Output : new_analisa.txt
+Scope  : .aether/bible/, src/agent_ai/projects/*, konsumen runtime/consultant
+================================================================================
+
+RINGKASAN
+- Project Bible AETHER BENAR-BENAR ADA di disk sebagai file Markdown PER-KATEGORI
+  di `J:\AETHER_DI_EDIT\aether-agent\.aether\bible\`.
+- Daftar file di disk = 10 file, PERSIS sama dengan yang dideteksi Project Map
+  (tidak ada selisih).
+- Mode AKTIF = Markdown project-local via `BibleStore` (bukan fallback JSON).
+  Fallback JSON legacy TIDAK ada di disk (tidak ditemukan folder `intelligence/`).
+- Format = `entry-v1`: header per-kategori + blok entri dipisah marker `## entry`,
+  field key-value `id, source, confidence, created_at, updated_at, content`
+  (content di-encode JSON).
+
+================================================================================
+R1. LOKASI ROOT PROJECT BIBLE + BUKTI
+================================================================================
+Root Bible (absolut) :
+    J:\AETHER_DI_EDIT\aether-agent\.aether\bible\
+Pola relatif :
+    <root project target>/.aether/bible/<kategori>.md
+
+Bukti (file + baris):
+- src/agent_ai/projects/aether_store.py:52
+      AETHER_DIR_NAME = ".aether"
+- src/agent_ai/projects/aether_store.py:54  BIBLE_DIR_NAME = "bible"
+      (konstanta "log"=53, "bible"=54)
+- src/agent_ai/projects/aether_store.py:139-143  AetherProjectStore.__init__:
+      self.root        = Path(root).resolve()
+      self.aether_dir  = self.root / AETHER_DIR_NAME
+      self.log_dir     = self.aether_dir / LOG_DIR_NAME
+      self.bible_dir   = self.aether_dir / BIBLE_DIR_NAME
+- src/agent_ai/projects/aether_store.py:163-165  AetherProjectStore.bible_path():
+      return self.bible_dir / f"{canonical_bible_category(category)}.md"
+- src/agent_ai/projects/aether_store.py:275-277  BibleStore.root -> self.store.root
+- Disk: folder `.aether/bible/` terkonfirmasi ada (list directory berhasil, 10 file).
+
+Catatan: root Bible = root PROJECT TARGET (project yang dikerjakan), bukan root
+workspace AETHER. Untuk task ini keduanya kebetulan sama (root project target =
+J:\AETHER_DI_EDIT\aether-agent).
+
+================================================================================
+R2. DAFTAR FILE BIBLE AKTUAL DI DISK (+ ukuran + jumlah entri)
+================================================================================
+Diukur langsung dari disk (read-only). "Entri" = jumlah kemunculan marker `## entry`.
+
+FILE                       UKURAN (byte)   JUMLAH ENTRI
+architecture.md                 159.089          419
+conventions.md                  212.512          671
+decisions.md                    190.838          514
+facts.md                        311.792          806
+index.md                          1.396           (lihat catatan)
+known_bugs.md                    30.222           80
+known_gaps.md                   115.781          214
+learnings.md                    140.267          399
+problems.md                     109.280          274
+ui.md                           129.587          366
+-------------------------------------------------------------
+TOTAL                           10 file        ~3.743 entri kategori
+                              (~1.410.764 byte ~1,35 MB)
+
+BANDINGKAN dengan Project Map (yang mendeteksi 10 file):
+  architecture, ui, conventions, decisions, facts, learnings,
+  problems, known_bugs, known_gaps, index  -> COCOK 10/10.
+  SELISIH: TIDAK ADA.
+
+Catatan `index.md`:
+- Bukan file kategori entri; ia MANIFEST/navigasi (20 baris).
+- Jumlah `## entry` = 1 hanya karena teks penjelasan format memuat frasa
+  "satu entri dipisah marker '## entry'" (bukan data entri).
+- index.md adalah satu-satunya file tambahan di luar 9 kategori; 9 kategori
+  inilah isi BIBLE_CATEGORIES.
+
+Perbandingan dengan BIBLE_CATEGORIES (9 kategori kanonik, models.py:45-55):
+  architecture, ui, conventions, decisions, facts, learnings, problems,
+  known_bugs, known_gaps  -> 9 file kategori + 1 index.md = 10 file. COCOK.
+
+================================================================================
+R3. FORMAT ISI ENTRI + CONTOH KUTIPAN
+================================================================================
+Format = `entry-v1` (konstanta BIBLE_FORMAT di aether_store.py:62).
+
+Pola header tiap file kategori (dibuat BibleStore._header, aether_store.py:333-340):
+      # bible:<kategori>
+      <!-- AETHER BIBLE (machine-readable). format=entry-v1. -->
+      <!-- Setiap entri dimulai dengan marker '## entry'. -->
+      <!-- Tambahkan knowledge lewat ProjectBrain/AETHER; jangan edit manual. -->
+
+Pola 1 entri (dibuat BibleStore._serialize_entry, aether_store.py:349-362),
+dipisah oleh marker `## entry`; antar entri dipisah baris kosong:
+
+      ## entry
+      - id: <uuid-atau-id-semantik>
+      - source: <ai|system|consultant|...>
+      - confidence: <float 0..1>
+      - created_at: <ISO-8601 UTC>
+      - updated_at: <ISO-8601 UTC>
+      - content: <JSON-encoded (string/objek)>
+
+Field (6): id, source, confidence, created_at, updated_at, content.
+ - `content` diserialisasi via json.dumps (aether_store.py:350) dan saat dibaca
+   di-parse balik via json.loads dengan fallback teks mentah
+   (BibleStore._parse_content, aether_store.py:408-414).
+ - `id`, `source`, `confidence`, `created_at`, `updated_at` = skalar; `content`
+   boleh string biasa ATAU objek JSON (mis. {"title","status","area",...}).
+
+CONTOH KUTIPAN 1 ENTRI (dari .aether/bible/decisions.md, baris 6-12):
+      ## entry
+      - id: 32efa400de0649a1be4a7f4542ff790e
+      - source: ai
+      - confidence: 0.95
+      - created_at: 2026-09-19T03:53:13.500384+00:00
+      - updated_at: 2026-09-19T03:53:13.500384+00:00
+      - content: "Reused existing `agentStatus.cls` computed property instead of creating a new status system"
+
+CONTOH ENTRI dengan content OBJEK JSON (dari .aether/bible/known_gaps.md, baris 7-14):
+      ## entry
+      - id: GAP-001
+      - source: system
+      - confidence: 0.95
+      - created_at: 2026-05-14T12:00:00+00:00
+      - updated_at: 2026-05-14T12:00:00+00:00
+      - content: {"title": "npm command tidak ditemukan pada Windows subprocess AETHER", "status": "Open", "area": "Environment / Command Execution", ...}
+
+Manifest index.md (.aether/bible/index.md:10,17-20):
+      ## categories
+      - architecture (file: architecture.md) — ...
+      ...
+      ## format
+      - entry-v1; satu entri dipisah marker '## entry'
+      - field: id, source, confidence, created_at, updated_at, content
+
+================================================================================
+R4. MODE YANG BENAR-BENAR AKTIF: MARKDOWN (BibleStore) vs JSON FALLBACK
+================================================================================
+KESIMPULAN: Mode AKTIF = Markdown project-local `.aether/bible/*.md`
+            (backend = BibleStore).
+            Fallback JSON legacy = TIDAK AKTIF dan TIDAK ADA di disk.
+
+Bukti kode:
+- src/agent_ai/projects/intelligence.py:75-77  uses_bible:
+      return self._bible is not None
+- src/agent_ai/projects/intelligence.py:62
+      self._bible = BibleStore(self.root) if self.root is not None else None
+      -> Bible HANYA aktif bila `root` diberikan.
+- src/agent_ai/projects/intelligence.py:65-68  for_project(...):
+      return cls(Path(project_dir) if project_dir is not None else Path(root), root=root)
+      -> `for_project` SELALU meneruskan root => selalu mode Bible.
+- src/agent_ai/projects/intelligence.py:144-153  read_category:
+      if self._bible is not None:  return self._bible.read_category(resolved)
+      # (baris di bawah ini hanya dieksekusi bila _bible None -> mode JSON)
+- Docstring intelligence.py:7-14 menyatakan mode Bible = "mode utama, dipakai
+  produksi"; JSON legacy dipakai HANYA bila root tidak diketahui.
+
+Bukti PEMAKAI PRODUKSI memakai root (mode Bible):
+- src/agent_ai/runtime/runtime.py:663-665  ProjectBrain.for_project(self.project_root, ...)
+- src/agent_ai/consultant/service.py:239   ProjectBrain.for_project(root, ...)
+- src/agent_ai/consultant/tools.py:276     ProjectIntelligence.for_project(self.root)
+
+Bukti DISK (tidak ada fallback JSON):
+- Pemindaian seluruh repo (read-only) TIDAK menemukan folder bernama `intelligence`.
+- Path legacy yang dimaksud = `<project_dir>/intelligence/<kategori>.json`
+  (intelligence.py:11,59-60). Isi `projects/<id>/` hanya `project.json`
+  (8 file, ~300-311 byte) = metadata registry ProjectConfig, BUKAN Bible.
+- `.aether/` hanya berisi: bible/, github/, log/, map/, ENVIRONMENT.md
+  (tidak ada `intelligence/` maupun file *.json fallback).
+
+================================================================================
+R5. PENGELOLA BACA & TULIS BIBLE (class, file, rentang baris)
+================================================================================
+READ/WRITE UTAMA (satu-satunya tempat tulis `<root>/.aether/`):
+- class BibleStore — src/agent_ai/projects/aether_store.py:242-433
+    .ensure()            :258   (buat folder + file kategori + index; idempotent)
+    .root                :275   (properti; = self.store.root)
+    .read_category()     :281   (BACA satu kategori -> List[IntelligenceEntry])
+    .add_entry()         :295   (TULIS/append entri)
+    .update_entry()      :303   (TULIS: ubah entri berdasar id)
+    .get_entry()         :323   (BACA satu entri berdasar id)
+    ._header()           :333   (header file kategori)
+    ._write_category()   :342   (TULIS file kategori; join blok + atomic write)
+    ._serialize_entry()  :349   (serialisasi 1 entri -> markdown key-value)
+    ._parse()            :364   (PARSE file -> entri; toleran)
+    ._parse_content()    :408   (decode JSON content, fallback teks)
+    ._index_text()       :416   (buat isi index.md)
+
+RESOLVER PATH (struktur `.aether/`):
+- class AetherProjectStore — src/agent_ai/projects/aether_store.py:134-193
+    .ensure()            :145   (mkdir .aether/, .aether/log/, .aether/bible/)
+    .bible_path()        :163   (bible_dir / "<kategori>.md")
+    .index_path()        :167   (bible_dir / "index.md")
+- Helper tulis atomik: _atomic_write() — aether_store.py:114 (+ os.replace)
+- Normalisasi kategori: canonical_bible_category() — aether_store.py:107
+
+FACADE / PEMILIH BACKEND:
+- class ProjectIntelligence — src/agent_ai/projects/intelligence.py:47-201
+    .__init__()          :58    (pilih BibleStore bila root di-set)
+    .for_project()       :65    (factory -> selalu mode Bible)
+    .categories          :70    (BIBLE_CATEGORIES vs INTELLIGENCE_CATEGORIES)
+    .uses_bible          :75    (penanda mode)
+    .create()            :82    (delegasi ke BibleStore.ensure bila mode Bible)
+    .read_category()     :144   (BACA; delegasi ke BibleStore)
+    .add_entry()         :154   (TULIS; delegasi ke BibleStore)
+    .update_entry()      :164   (TULIS; delegasi ke BibleStore)
+    .get_entry()         :196   (BACA)
+    (JSON legacy read/write: _read_json :128, _write_json :137, _category_path :119)
+
+GENERATOR (pembuat entri dari task):
+- class ProjectBibleGenerator — src/agent_ai/projects/bible.py:96-260
+    generate() :~228-251  (intelligence.create() + intelligence.add_entry())
+
+MODEL DATA:
+- class IntelligenceEntry — src/agent_ai/projects/models.py:106-144
+    to_dict() :133 / from_dict() :139
+- BIBLE_CATEGORIES         — src/agent_ai/projects/models.py:45-55 (9 kategori)
+- INTELLIGENCE_CATEGORIES  — src/agent_ai/projects/models.py:31-38 (JSON legacy)
+- CATEGORY_ALIASES         — src/agent_ai/projects/models.py:60-62 (rules->conventions)
+
+PENULIS DI RUNTIME (produksi):
+- AgentRuntime._record_project_learning() — src/agent_ai/runtime/runtime.py:726
+    (dipanggil dari _lifecycle_finalize di runtime.py:813)
+- AgentRuntime membangun brain: ProjectBrain.for_project(...) — runtime.py:663
+- ConsultantBibleTool (tool `update_project_bible`) — src/agent_ai/consultant/tools.py:276
+    ProjectIntelligence.for_project(self.root) + IntelligenceLearner.add_verified(...)
+
+================================================================================
+R6. KEPATUHAN READ-ONLY
+================================================================================
+- Tidak ada file dibuat/diubah/dihapus selain new_analisa.txt.
+- `git status --short` -> hanya:  ?? new_analisa.txt
+- Tidak menjalankan generator Bible / update_project_bible / build; hanya operasi
+  baca (read_file/list_files/search_code) + 1 perintah Python read-only (hitung
+  entri & pindai folder) yang tidak menulis apa pun.
+
+================================================================================
+KRITERIA PENERIMAAN — PEMENUHAN
+================================================================================
+(a) Path root Bible ............................... R1 (.aether/bible/, dgn baris kode)
+(b) Daftar file + ukuran ........................... R2 (10 file, ukuran + jumlah entri)
+(c) Format entri ................................... R3 (entry-v1, 6 field, contoh kutipan)
+(d) Mode aktif (Markdown/JSON) + bukti ............. R4 (Markdown/BibleStore; JSON tidak ada)
+(e) Pengelola (file + baris) ....................... R5 (BibleStore/ProjectIntelligence/dll)
+- Klaim dapat dilacak ke >= 3 file berbeda: aether_store.py, intelligence.py,
+  models.py, bible.py, runtime.py, consultant/tools.py + file .md Bible di disk. OK.
+- Penyimpangan: TIDAK ADA. Map mendeteksi 10 file = disk 10 file.
+
+File sumber bukti utama:
+  1. .aether/bible/index.md (manifest, 20 baris)
+  2. .aether/bible/decisions.md (4108 baris, 514 entri)
+  3. .aether/bible/known_gaps.md (1708 baris, 214 entri)
+  4. src/agent_ai/projects/aether_store.py (584 baris)
+  5. src/agent_ai/projects/intelligence.py (201 baris)
+  6. src/agent_ai/projects/models.py (144 baris)
+  7. src/agent_ai/projects/bible.py
+  8. src/agent_ai/runtime/runtime.py
+  9. src/agent_ai/consultant/tools.py
+================================================================================
