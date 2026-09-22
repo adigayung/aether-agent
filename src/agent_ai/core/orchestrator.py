@@ -222,39 +222,33 @@ class AgentOrchestrator:
         messages.extend(history)
         return messages
 
-    def _brain_context_message(self) -> Optional[Message]:
+    def _brain_context_message(self, query: str = "") -> Optional[Message]:
         """Ambil context Project Intelligence sebagai system message (opsional).
 
         Error dari brain diisolasi: bila gagal, kembalikan None tanpa
         menggagalkan task utama.
 
-        Konteks pengetahuan (Project Bible) dapat SANGAT besar. Bila provider
-        melaporkan anggaran konteks (mis. Ollama lokal yang context window-nya
-        terbatas), konteks dipotong secara terkendali DI SINI agar server tidak
-        memotongnya sendiri — server seperti Ollama membuang bagian DEPAN
-        prompt, sehingga system prompt dan awal Bible hilang tanpa error dan
-        model menjawab generik/halusinasi. Provider yang tidak melaporkan
-        anggaran (cloud) TIDAK berubah: konteks disertakan apa adanya.
+        Project Bible TIDAK dikirim UTUH secara default: knowledge dipilih
+        berdasarkan relevance terhadap `query` (task/pertanyaan) oleh
+        `BibleRetriever`, lalu dibatasi token budget provider sebagai batas
+        AKHIR. Bible tetap sumber kebenaran knowledge yang lengkap — retrieval
+        hanya memilih subset untuk satu request (read-only).
+
+        Bila retrieval tidak tersedia (mis. brain duck-typed tanpa akses
+        terstruktur), jalur lama dipakai: `brain.get_context()` + pemotongan
+        pada batas baris sesuai anggaran provider (perilaku backward
+        compatible).
         """
         if self.brain is None:
             return None
-        try:
-            ctx = self.brain.get_context()
-        except Exception:  # noqa: BLE001 - context error tidak boleh menggagalkan task
-            return None
-        text = getattr(ctx, "text", "") or ""
+        text = self._retrieve_knowledge_context(query)
         text = self._fit_knowledge_context(text)
         if not text.strip():
             return None
         return Message(role="system", content=text)
 
-    def _knowledge_budget_chars(self) -> Optional[int]:
-        """Anggaran karakter untuk konteks pengetahuan (dari provider).
-
-        Returns:
-            Anggaran karakter, atau None bila provider tidak melaporkan
-            anggaran (context window tidak diketahui -> tanpa pemotongan).
-        """
+    def _knowledge_budget_tokens(self) -> Optional[int]:
+        """Anggaran token konteks pengetahuan dari provider (bila dilaporkan)."""
         getter = getattr(self.provider, "knowledge_budget_tokens", None)
         if getter is None:
             return None
@@ -264,7 +258,48 @@ class AgentOrchestrator:
             return None
         if not tokens or int(tokens) <= 0:
             return None
-        return int(tokens) * _KNOWLEDGE_CHARS_PER_TOKEN
+        return int(tokens)
+
+    def _knowledge_budget_chars(self) -> Optional[int]:
+        """Anggaran karakter untuk konteks pengetahuan (dari provider).
+
+        Returns:
+            Anggaran karakter, atau None bila provider tidak melaporkan
+            anggaran (context window tidak diketahui -> tanpa pemotongan).
+        """
+        tokens = self._knowledge_budget_tokens()
+        if tokens is None:
+            return None
+        return tokens * _KNOWLEDGE_CHARS_PER_TOKEN
+
+    def _retrieve_knowledge_context(self, query: str = "") -> str:
+        """Context pengetahuan berbasis RELEVANCE (Bible retrieval).
+
+        Alur: query -> BibleRetriever (relevance + ranking + fallback) ->
+        token budget. Fallback ke jalur lama (`brain.get_context()`) bila
+        retrieval tidak tersedia, supaya brain tanpa akses terstruktur tetap
+        bekerja seperti sebelumnya.
+
+        Observability: metadatanya diemit lewat event sink yang sudah ada
+        (`bible_retrieval`) TANPA isi Bible dan tanpa secret.
+        """
+        try:
+            from agent_ai.projects.retrieval import BibleRetriever
+
+            retriever = BibleRetriever(self.brain)
+            result = retriever.retrieve(query, budget_tokens=self._knowledge_budget_tokens())
+            if result is not None:
+                emit_event(self.event_sink, "bible_retrieval", result.to_metadata())
+                return result.text
+        except Exception:  # noqa: BLE001 - retrieval error -> fallback jalur lama
+            pass
+        # Fallback (perilaku lama): seluruh context dari facade, lalu dipotong
+        # oleh `_fit_knowledge_context` bila provider melaporkan anggaran.
+        try:
+            ctx = self.brain.get_context()
+        except Exception:  # noqa: BLE001 - context error tidak boleh menggagalkan task
+            return ""
+        return getattr(ctx, "text", "") or ""
 
     def _fit_knowledge_context(self, text: str) -> str:
         """Potong konteks pengetahuan agar muat pada context window provider.
@@ -856,7 +891,8 @@ class AgentOrchestrator:
         truncation_recoveries = 0
 
         # Context Project Intelligence (opsional) disisipkan sebelum task.
-        brain_context = self._brain_context_message()
+        # Knowledge dipilih berdasarkan relevance terhadap task (bukan seluruh Bible).
+        brain_context = self._brain_context_message(task)
         if brain_context is not None:
             history.append(brain_context)
 
@@ -1136,7 +1172,7 @@ class AgentOrchestrator:
         environment_context = self._environment_context_message()
         if environment_context is not None:
             history.append_system_message(environment_context.content)
-        brain_context = self._brain_context_message()
+        brain_context = self._brain_context_message(task)
         if brain_context is not None:
             history.append_system_message(brain_context.content)
         history.append_user_message(task, parts=user_parts)

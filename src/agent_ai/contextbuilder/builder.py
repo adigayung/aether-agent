@@ -96,12 +96,14 @@ class ContextBuilder:
         # 4) Project Intelligence / Bible.
         intelligence = ""
         if request.include_intelligence and self.brain is not None:
-            intelligence = self._read_intelligence(request.intelligence_categories)
+            intelligence = self._read_intelligence(
+                request.intelligence_categories, request.task
+            )
 
         # 5) Brain context.
         brain_text = ""
         if request.include_brain and self.brain is not None:
-            brain_text = self._read_brain()
+            brain_text = self._read_brain(request.task)
 
         symbols_out = [
             {
@@ -182,10 +184,12 @@ class ContextBuilder:
         # 3) Knowledge sources.
         intelligence = ""
         if request.include_intelligence and self.brain is not None:
-            intelligence = self._read_intelligence(request.intelligence_categories)
+            intelligence = self._read_intelligence(
+                request.intelligence_categories, request.task
+            )
         brain_text = ""
         if request.include_brain and self.brain is not None:
-            brain_text = self._read_brain()
+            brain_text = self._read_brain(request.task)
 
         symbols_out = [
             {"name": s.name, "kind": s.kind.value, "file": s.file, "line": s.line, "parent": s.parent}
@@ -443,18 +447,43 @@ class ContextBuilder:
     # ------------------------------------------------------------------ #
     # Knowledge sources
     # ------------------------------------------------------------------ #
-    def _read_intelligence(self, categories: Optional[List[str]]) -> str:
-        """Baca Project Intelligence/Bible via brain (read-only)."""
-        try:
-            ctx = self.brain.get_context(categories=categories)
-        except Exception:  # noqa: BLE001 - knowledge error tidak boleh crash
-            return ""
-        return getattr(ctx, "text", "") or ""
+    def _read_intelligence(self, categories: Optional[List[str]], query: str = "") -> str:
+        """Baca Project Intelligence/Bible via brain (read-only).
 
-    def _read_brain(self) -> str:
-        """Baca Brain context (read-only)."""
+        Bila pemanggil TIDAK membatasi kategori, knowledge dipilih dengan
+        retrieval berbasis relevance (komponen yang sama dipakai Agent &
+        Consultant) supaya Bible tidak dikirim utuh. Kategori eksplisit dari
+        pemanggil tetap dihormati apa adanya (filter category-filtered lama).
+        """
+        if categories:
+            try:
+                ctx = self.brain.get_context(categories=categories)
+            except Exception:  # noqa: BLE001 - knowledge error tidak boleh crash
+                return ""
+            return getattr(ctx, "text", "") or ""
+        return self._retrieve_knowledge(query)
+
+    def _read_brain(self, query: str = "") -> str:
+        """Baca Brain context (read-only) dengan retrieval relevance-based."""
+        return self._retrieve_knowledge(query)
+
+    def _retrieve_knowledge(self, query: str) -> str:
+        """Knowledge Bible untuk context: retrieval dulu, fallback jalur lama.
+
+        Retrieval memakai `BibleRetriever` (relevance + token budget). Bila
+        sumber tidak menyediakan akses terstruktur (brain duck-typed), jalur
+        lama `brain.get_context()` dipakai supaya tetap backward compatible.
+        """
+        try:
+            from agent_ai.projects.retrieval import BibleRetriever
+
+            result = BibleRetriever(self.brain).retrieve(query)
+            if result is not None:
+                return result.text
+        except Exception:  # noqa: BLE001 - retrieval error -> fallback jalur lama
+            pass
         try:
             ctx = self.brain.get_context()
-        except Exception:  # noqa: BLE001 - brain error tidak boleh crash
+        except Exception:  # noqa: BLE001 - knowledge error tidak boleh crash
             return ""
         return getattr(ctx, "text", "") or ""

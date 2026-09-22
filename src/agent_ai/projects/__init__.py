@@ -87,8 +87,28 @@ from agent_ai.projects.registry import (
     ProjectRegistry,
     ProjectRootNotFoundError,
 )
+from agent_ai.projects.retrieval import (
+    CATEGORY_IMPORTANCE,
+    CORE_CATEGORIES,
+    DEFAULT_BUDGET_TOKENS,
+    BibleRetriever,
+    RetrievalResult,
+    RetrievedEntry,
+    estimate_tokens,
+    query_keywords,
+    retrieve_bible_context,
+)
 
 __all__ = [
+    "BibleRetriever",
+    "RetrievalResult",
+    "RetrievedEntry",
+    "retrieve_bible_context",
+    "query_keywords",
+    "estimate_tokens",
+    "DEFAULT_BUDGET_TOKENS",
+    "CORE_CATEGORIES",
+    "CATEGORY_IMPORTANCE",
     "ProjectMapService",
     "ProjectMapError",
     "InvalidMapTypeError",
