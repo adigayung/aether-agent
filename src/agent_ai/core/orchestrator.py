@@ -1302,7 +1302,9 @@ class AgentOrchestrator:
                 break
 
             # LLM memanggil tool: simpan assistant(tool_calls) penuh lebih dulu,
-            # baru eksekusi SETIAP tool dan kirim hasilnya (role="tool").
+            # baru eksekusi tool call sebagai SATU BATCH melalui Tool Execution
+            # Coordinator (paralel untuk call independen, sequential untuk yang
+            # berkonflik), lalu kirim hasilnya (role="tool") pada urutan input.
             model_tool_calls = response.tool_calls()
             tool_calls = [
                 ToolCall.create(action.name, action.arguments, id=action.id)
@@ -1312,37 +1314,56 @@ class AgentOrchestrator:
                 content=response.text or None, tool_calls=tool_calls
             )
 
-            stop = False
-            for tool_call, action in zip(tool_calls, model_tool_calls):
-                # Cooperative cancellation (safe boundary): jangan eksekusi
-                # tool call baru setelah pembatalan terdeteksi.
-                if self._cancel_requested():
-                    loop.cancel(self._cancel_reason())
-                    stop = True
-                    break
+            # Cooperative cancellation (safe boundary): jangan mulai batch baru
+            # bila pembatalan sudah diminta.
+            if self._cancel_requested():
+                loop.cancel(self._cancel_reason())
+                break
+
+            # Argumen per tool call (untuk target event) dipetakan lewat id agar
+            # callback event tetap memakai bentuk yang sama seperti sebelumnya.
+            actions_by_id = {
+                tool_call.id: action
+                for tool_call, action in zip(tool_calls, model_tool_calls)
+            }
+
+            def _emit_tool_called(tool_call: ToolCall) -> None:
+                action = actions_by_id.get(tool_call.id)
+                arguments = (
+                    dict(getattr(action, "arguments", {}) or {})
+                    if action is not None
+                    else {}
+                )
                 emit_event(
                     self.event_sink,
                     "tool_called",
                     {
                         "tool": tool_call.name,
-                        "arguments": dict(action.arguments or {}),
-                        "target": self._tool_target(action.arguments or {}),
+                        "tool_call_id": tool_call.id,
+                        "arguments": arguments,
+                        "target": self._tool_target(arguments),
                         "iteration": loop.iteration,
                     },
                 )
-                payload = self.executor.execute_tool_call(tool_call)
-                # Hasil tool SELALU dikirim sebagai pesan role "tool".
-                history.append_tool_result(
-                    payload.tool_call_id, payload.tool_name, payload.to_content()
+
+            def _emit_tool_finished(
+                tool_call: ToolCall, payload: ToolResultPayload
+            ) -> None:
+                action = actions_by_id.get(tool_call.id)
+                arguments = (
+                    dict(getattr(action, "arguments", {}) or {})
+                    if action is not None
+                    else {}
                 )
                 emit_event(
                     self.event_sink,
                     "tool_completed",
                     {
                         "tool": payload.tool_name,
+                        "tool_call_id": tool_call.id,
                         "success": payload.is_success,
                         "error": None if payload.is_success else payload.to_content(),
-                        "target": self._tool_target(action.arguments or {}),
+                        "target": self._tool_target(arguments),
                         "metadata": {},
                     },
                 )
@@ -1351,9 +1372,28 @@ class AgentOrchestrator:
                     "observation_received",
                     {
                         "tool": payload.tool_name,
+                        "tool_call_id": tool_call.id,
                         "success": payload.is_success,
                         "content": payload.output,
                     },
+                )
+
+            batch = self.executor.execute_tool_calls(
+                tool_calls,
+                on_start=_emit_tool_called,
+                on_complete=_emit_tool_finished,
+                cancel_check=self._cancel_requested,
+            )
+
+            stop = False
+            # Hasil dipetakan kembali sesuai urutan input (tool_call id),
+            # bukan urutan selesai. Payload None = tidak dieksekusi (cancel).
+            for action, payload in zip(model_tool_calls, batch.payloads):
+                if payload is None:
+                    continue
+                # Hasil tool SELALU dikirim sebagai pesan role "tool".
+                history.append_tool_result(
+                    payload.tool_call_id, payload.tool_name, payload.to_content()
                 )
                 # Catat step untuk observability (bukan keputusan completion).
                 # Guard runaway tetap berlaku.
@@ -1369,6 +1409,9 @@ class AgentOrchestrator:
                     )
                     stop = True
                     break
+            if batch.cancelled:
+                loop.cancel(self._cancel_reason())
+                stop = True
             if stop:
                 break
 

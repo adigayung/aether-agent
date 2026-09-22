@@ -17,6 +17,14 @@ from agent_ai.core.response import (
     LLMAction,
     LLMResponse,
 )
+from agent_ai.core.tool_coordinator import (
+    MAX_PARALLEL_TOOLS,
+    PlannedCall,
+    ToolBatchResult,
+    ToolCategory,
+    ToolExecutionCoordinator,
+    plan_groups,
+)
 from agent_ai.core.types import (
     ChatMessage,
     ChatRole,
@@ -49,5 +57,11 @@ __all__ = [
     "ToolResultPayload",
     "ToolResultStatus",
     "ConversationHistory",
+    "ToolExecutionCoordinator",
+    "ToolBatchResult",
+    "ToolCategory",
+    "PlannedCall",
+    "plan_groups",
+    "MAX_PARALLEL_TOOLS",
 ]
 

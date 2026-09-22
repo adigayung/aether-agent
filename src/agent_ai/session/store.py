@@ -8,6 +8,7 @@ Implementasi saat ini: InMemorySessionStore (tanpa database/persistence).
 
 from __future__ import annotations
 
+import threading
 import time
 from abc import ABC, abstractmethod
 from typing import Callable, Dict, List, Optional
@@ -118,6 +119,9 @@ class InMemorySessionStore(SessionStore):
         self._sequence: int = 0
         # Subscriber live (minimal): callback dipanggil saat event di-append.
         self._subscribers: List[EventSubscriber] = []
+        # Parallel tool execution dapat meng-append event dari beberapa worker
+        # thread sekaligus; lock menjaga sequence tetap monotonic & unik.
+        self._event_lock = threading.Lock()
 
     # ------------------------------------------------------------------ #
     # Session
@@ -186,19 +190,27 @@ class InMemorySessionStore(SessionStore):
     # Events
     # ------------------------------------------------------------------ #
     def append_event(self, event: ExecutionEvent) -> ExecutionEvent:
-        """Append event dengan sequence monotonik (append-only)."""
-        self._sequence += 1
-        # ExecutionEvent frozen -> buat salinan dengan sequence.
-        stored = ExecutionEvent(
-            event_id=event.event_id,
-            session_id=event.session_id,
-            task_id=event.task_id,
-            event_type=event.event_type,
-            timestamp=event.timestamp,
-            payload=dict(event.payload),
-            sequence=self._sequence,
-        )
-        self._events.append(stored)
+        """Append event dengan sequence monotonik (append-only).
+
+        Thread-safe: parallel tool execution dapat meng-append event dari
+        beberapa worker thread sekaligus. Lock HANYA membungkus penomoran
+        sequence + append list (bukan subscriber), sehingga tidak ada
+        sequence duplikat tanpa menyerialkan seluruh eksekusi tool.
+        """
+        with self._event_lock:
+            self._sequence += 1
+            sequence = self._sequence
+            # ExecutionEvent frozen -> buat salinan dengan sequence.
+            stored = ExecutionEvent(
+                event_id=event.event_id,
+                session_id=event.session_id,
+                task_id=event.task_id,
+                event_type=event.event_type,
+                timestamp=event.timestamp,
+                payload=dict(event.payload),
+                sequence=sequence,
+            )
+            self._events.append(stored)
         # Notifikasi subscriber (live streaming). Kegagalan satu subscriber
         # tidak boleh mengganggu append event atau subscriber lain.
         for callback in list(self._subscribers):

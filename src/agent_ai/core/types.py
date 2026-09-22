@@ -52,6 +52,31 @@ class ToolResultStatus(str, Enum):
 _VALID_ROLES = {role.value for role in ChatRole}
 
 
+def parse_tool_arguments(raw: Any) -> tuple[Dict[str, Any], Optional[str]]:
+    """Parse argumen ToolCall dengan aman -> (dict, error_message|None).
+
+    Menerima dict (sudah terstruktur) atau JSON string (format provider).
+    TIDAK melempar exception: JSON tidak valid dikembalikan sebagai pesan error
+    agar pemanggil bisa mengubahnya menjadi hasil gagal / klasifikasi aman.
+
+    Helper ini dipakai bersama oleh ToolExecutor dan Tool Execution Coordinator
+    sehingga tidak ada parser argumen kedua di codebase.
+    """
+    if raw is None or raw == "":
+        return {}, None
+    if isinstance(raw, dict):
+        return dict(raw), None
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError) as exc:
+            return {}, f"{type(exc).__name__}: {exc}"
+        if isinstance(parsed, dict):
+            return parsed, None
+        return {}, f"arguments harus JSON object, bukan {type(parsed).__name__}"
+    return {}, f"tipe arguments tidak didukung: {type(raw).__name__}"
+
+
 def _serialize_arguments(arguments: Any) -> str:
     """Serialisasi argumen tool menjadi string JSON (format API).
 

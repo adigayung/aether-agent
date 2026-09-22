@@ -27,12 +27,15 @@ Prinsip:
 
 from __future__ import annotations
 
-import json
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from agent_ai.core.models import AgentAction, AgentObservation
 from agent_ai.core.response import ActionType, LLMAction, LLMResponse
-from agent_ai.core.types import ToolCall, ToolResultPayload
+from agent_ai.core.tool_coordinator import (
+    ToolBatchResult,
+    ToolExecutionCoordinator,
+)
+from agent_ai.core.types import ToolCall, ToolResultPayload, parse_tool_arguments
 from agent_ai.tools.base import ToolError
 from agent_ai.tools.registry import ToolRegistry, registry as default_registry
 
@@ -55,9 +58,14 @@ class ToolExecutor:
         self,
         registry: Optional[ToolRegistry] = None,
         permission_manager: Optional["PermissionManager"] = None,
+        *,
+        max_parallel_tools: Optional[int] = None,
     ) -> None:
         self.registry = registry or default_registry
         self.permission_manager = permission_manager
+        # Tool Execution Coordinator: satu-satunya pengatur batch (sequential/
+        # parallel) di atas execute_tool_call(). Bukan executor kedua.
+        self.coordinator = ToolExecutionCoordinator(max_parallel=max_parallel_tools)
 
     # ------------------------------------------------------------------ #
     # Konversi action
@@ -166,20 +174,11 @@ class ToolExecutor:
         Menerima dict (sudah terstruktur) atau JSON string (format provider).
         Tidak melempar exception: JSON tidak valid dikembalikan sebagai pesan
         error agar pemanggil bisa mengubahnya menjadi ToolResultPayload gagal.
+
+        Delegasi ke `agent_ai.core.types.parse_tool_arguments` (satu parser
+        argumen untuk executor + coordinator).
         """
-        if raw is None or raw == "":
-            return {}, None
-        if isinstance(raw, dict):
-            return dict(raw), None
-        if isinstance(raw, str):
-            try:
-                parsed = json.loads(raw)
-            except (ValueError, TypeError) as exc:
-                return {}, f"{type(exc).__name__}: {exc}"
-            if isinstance(parsed, dict):
-                return parsed, None
-            return {}, f"arguments harus JSON object, bukan {type(parsed).__name__}"
-        return {}, f"tipe arguments tidak didukung: {type(raw).__name__}"
+        return parse_tool_arguments(raw)
 
     @staticmethod
     def _failure_content(result: Any) -> Optional[str]:
@@ -267,3 +266,46 @@ class ToolExecutor:
         if failure is not None:
             return ToolResultPayload.error(tool_call_id, tool_name, failure)
         return ToolResultPayload.success(tool_call_id, tool_name, result)
+
+    def execute_tool_calls(
+        self,
+        tool_calls: Sequence[ToolCall],
+        *,
+        on_start: Optional[Callable[[ToolCall], None]] = None,
+        on_complete: Optional[Callable[[ToolCall, ToolResultPayload], None]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        max_parallel: Optional[int] = None,
+    ) -> ToolBatchResult:
+        """Jalankan SEMUA ToolCall dari satu response LLM sebagai satu batch.
+
+        Coordinator di atas `execute_tool_call()` (bukan executor kedua):
+        mengklasifikasi, mendeteksi konflik/dependency, lalu menjalankan
+        group demi group (paralel di dalam group, sequential antar group).
+        Hasil dikembalikan TERURUT sesuai urutan input (bukan completion
+        order), sehingga mapping `tool_call_id` -> hasil tetap deterministik.
+
+        Semantics setiap tool TIDAK berubah: eksekusi individual tetap lewat
+        `execute_tool_call()` (registry, permission, workspace boundary).
+
+        Args:
+            tool_calls: daftar ToolCall dari response LLM (urutan dipertahankan).
+            on_start: callback sebelum satu tool call dimulai.
+            on_complete: callback setelah satu tool call selesai/di-block.
+            cancel_check: callable -> bool; bila True, tool berikutnya tidak
+                dimulai (safe boundary).
+            max_parallel: override batas paralel untuk batch ini (opsional).
+
+        Returns:
+            ToolBatchResult (payload terurut; cancelled bila dihentikan).
+        """
+        calls = list(tool_calls)
+        coordinator = self.coordinator
+        if max_parallel is not None:
+            coordinator = ToolExecutionCoordinator(max_parallel=max_parallel)
+        return coordinator.execute(
+            calls,
+            self.execute_tool_call,
+            on_start=on_start,
+            on_complete=on_complete,
+            cancel_check=cancel_check,
+        )
