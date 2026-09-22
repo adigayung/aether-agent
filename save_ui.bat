@@ -13,4 +13,3 @@ if errorlevel 1 (
 
 echo.
 echo [OK] UI berhasil di-build.
-pause
