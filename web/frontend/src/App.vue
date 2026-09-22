@@ -220,8 +220,85 @@ const taskProviderModel = computed(() => {
 });
 const taskProvider = computed(() => taskProviderModel.value.provider);
 const taskModel = computed(() => taskProviderModel.value.model);
+
+// --- Task Card: telemetry (LLM Rounds / Tool Calls / Tokens) ---------------
+// Ditambahkan sebagai BAGIAN DARI metadata Agent Card yang sama (`.task-meta`),
+// BUKAN sistem telemetry kedua. Semua angka dihitung dari event lifecycle
+// AETHER yang SUDAH ADA (SSE live #51 atau persistent log via Activity API):
+//   - LLM Rounds : jumlah event `provider_request` = jumlah pemanggilan
+//                  LLM/provider AKTUAL pada loop task (1 event = 1 invocation).
+//   - Tool Calls : jumlah event `tool_called` = jumlah eksekusi tool AKTUAL.
+//   - Tokens     : token usage AKTUAL dari provider (payload `usage`) bila
+//                  dilaporkan; TIDAK memakai estimasi tokenizer/string lokal.
+//                  Bila provider belum melaporkan usage -> tampil "—"
+//                  (bukan nilai dummy/hardcoded).
+function usageTokens(payload) {
+  const d = payload || {};
+  const u = d.usage && typeof d.usage === "object" ? d.usage : {};
+  const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const total = num(u.total);
+  if (total != null) return total;
+  // Ollama native: prompt_eval_count + eval_count.
+  const pe = num(u.prompt_eval_count);
+  const ec = num(u.eval_count);
+  if (pe != null || ec != null) return (pe || 0) + (ec || 0);
+  // OpenAI-compatible (dinormalisasi): prompt + completion.
+  const p = num(u.prompt);
+  const c = num(u.completion);
+  if (p != null || c != null) return (p || 0) + (c || 0);
+  return null;
+}
+
+// Format ringkas token usage (angka bisa besar) agar baris meta tetap compact.
+function formatTokens(n) {
+  if (n == null || !Number.isFinite(n)) return "—";
+  if (n < 1000) return String(n);
+  if (n < 1000000) return `${(n / 1000).toFixed(n < 10000 ? 1 : 0)}k`;
+  return `${(n / 1000000).toFixed(1)}M`;
+}
+
+// REDUCE sederhana atas event yang ditampilkan: nilai ikut lifecycle task
+// (naik saat event baru tiba, diam saat task mencapai status final).
+const taskTelemetry = computed(() => {
+  let rounds = 0;
+  let toolCalls = 0;
+  let tokens = 0;
+  let hasTokens = false;
+  const list = activityEvents.value || [];
+  for (const raw of list) {
+    const type = (raw && (raw.event_type || raw.event)) || "";
+    if (type === "provider_request") {
+      rounds += 1;
+    } else if (type === "tool_called") {
+      toolCalls += 1;
+    } else if (type === "provider_response") {
+      const total = usageTokens(raw.payload || raw.data || {});
+      if (total != null) {
+        tokens += total;
+        hasTokens = true;
+      }
+    }
+  }
+  return { rounds, toolCalls, tokens: hasTokens ? tokens : null };
+});
+const taskLlmRounds = computed(() => taskTelemetry.value.rounds);
+const taskToolCalls = computed(() => taskTelemetry.value.toolCalls);
+const taskTokensLabel = computed(() => formatTokens(taskTelemetry.value.tokens));
+const showTaskTelemetry = computed(
+  () =>
+    Boolean(task.id) &&
+    (taskLlmRounds.value > 0 ||
+      taskToolCalls.value > 0 ||
+      taskTelemetry.value.tokens != null)
+);
+
 const showTaskMeta = computed(() =>
-  Boolean(taskProvider.value || taskModel.value || taskDurationLabel.value)
+  Boolean(
+    taskProvider.value ||
+      taskModel.value ||
+      taskDurationLabel.value ||
+      showTaskTelemetry.value
+  )
 );
 
 // Event hanya boleh mengubah timing task yang SEDANG ditampilkan (stream bisa
@@ -1337,6 +1414,36 @@ onBeforeUnmount(() => {
                         <span class="tm-key">Duration</span>
                         <span class="tm-val">{{ taskDurationLabel }}</span>
                       </span>
+                      <!-- Telemetry: LLM Rounds / Tool Calls / Tokens. Nilai
+                           AKTUAL dari event lifecycle AETHER existing (bukan
+                           dummy/hardcoded). Menyatu dengan item meta lain
+                           (kelas .tm-item/.tm-key/.tm-val yang sama). -->
+                      <template v-if="showTaskTelemetry">
+                        <span
+                          v-if="taskProvider || taskModel || taskDurationLabel"
+                          class="tm-sep"
+                        >·</span>
+                        <span class="tm-item" title="Actual LLM/provider invocations">
+                          <svg class="tm-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15.5-6.3L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.3L3 16"/><path d="M3 21v-5h5"/></svg>
+                          <span class="tm-key">LLM Rounds</span>
+                          <span class="tm-val">{{ taskLlmRounds }}</span>
+                        </span>
+                        <span class="tm-sep">·</span>
+                        <span class="tm-item" title="Tool executions">
+                          <svg class="tm-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L4 17l3 3 5.3-5.3a4 4 0 0 0 5.4-5.4l-2.3 2.3-2-2z"/></svg>
+                          <span class="tm-key">Tool Calls</span>
+                          <span class="tm-val">{{ taskToolCalls }}</span>
+                        </span>
+                        <span class="tm-sep">·</span>
+                        <span
+                          class="tm-item"
+                          :title="taskTelemetry.tokens == null ? 'Provider token usage not reported' : 'Actual provider token usage'"
+                        >
+                          <svg class="tm-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/></svg>
+                          <span class="tm-key">Tokens</span>
+                          <span class="tm-val">{{ taskTokensLabel }}</span>
+                        </span>
+                      </template>
                     </div>
                   </div>
                 </div>
