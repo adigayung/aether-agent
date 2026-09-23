@@ -43,7 +43,9 @@ Cara AETHER mengakses Atlas/RIG:
     Lokasi engine dapat di-override (urutan prioritas):
         1. argumen konstruktor `atlas_dir` / `rig_dir`
         2. environment variable `AETHER_CODE_ATLAS_DIR` / `AETHER_MAP_CODE_RIG_DIR`
-        3. default repo path (lihat DEFAULT_ENGINE_DIRS)
+        3. default repo path (relatif root AETHER:
+           `<AETHER_ROOT>/vendor/CODE_ATLAS` + `<AETHER_ROOT>/vendor/MAP_CODE_RIG`;
+           lihat DEFAULT_ENGINE_DIRS)
 
     Modul ini TIDAK meng-import engine ke proses AETHER (tidak memodifikasi
     `sys.path`), sehingga engine tetap terisolasi dan tidak bisa membuat
@@ -101,10 +103,19 @@ ENV_ENGINE_DIRS: Dict[str, str] = {
     MAP_TYPE_RIG: "AETHER_MAP_CODE_RIG_DIR",
 }
 
+#: Root repository AETHER. File ini berada di
+#: `src/agent_ai/projects/project_map.py`, sehingga `parents[3]` = root repo.
+#: Dipakai agar engine default dihitung RELATIF terhadap repository
+#: (tidak ada drive/path machine-specific yang di-hardcode).
+_AETHER_ROOT: Path = Path(__file__).resolve().parents[3]
+
 #: Default lokasi repo engine (bila tidak di-override via env/konstruktor).
+#: Engine Atlas/RIG dibundel DI DALAM repository AETHER (vendored):
+#:     <AETHER_ROOT>/vendor/CODE_ATLAS
+#:     <AETHER_ROOT>/vendor/MAP_CODE_RIG
 DEFAULT_ENGINE_DIRS: Dict[str, str] = {
-    MAP_TYPE_ATLAS: r"J:\CODE_ATLAS",
-    MAP_TYPE_RIG: r"J:\MAP_CODE_RIG",
+    MAP_TYPE_ATLAS: str(_AETHER_ROOT / "vendor" / "CODE_ATLAS"),
+    MAP_TYPE_RIG: str(_AETHER_ROOT / "vendor" / "MAP_CODE_RIG"),
 }
 
 #: Status keberadaan/validitas map (berbasis file lokal).

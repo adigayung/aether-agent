@@ -227,8 +227,8 @@ Additional environment variables for Project Map engine paths:
 
 | Variable                      | Description                                      |
 |-------------------------------|--------------------------------------------------|
-| `AETHER_CODE_ATLAS_DIR`       | Path to Atlas engine (default: `J:\CODE_ATLAS`)  |
-| `AETHER_MAP_CODE_RIG_DIR`     | Path to RIG engine (default: `J:\MAP_CODE_RIG`)  |
+| `AETHER_CODE_ATLAS_DIR`       | Path to Atlas engine (default: `<AETHER_ROOT>\vendor\CODE_ATLAS`) |
+| `AETHER_MAP_CODE_RIG_DIR`     | Path to RIG engine (default: `<AETHER_ROOT>\vendor\MAP_CODE_RIG`) |
 | `AETHER_DIR`                  | AETHER root directory (used by gateway at runtime) |
 | `OLLAMA_NUM_CTX`              | Ollama context window size (default: 32768)       |
 
