@@ -42,6 +42,12 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+from agent_ai.core.bible_lifecycle import (
+    BibleContextState,
+    bible_source_revision,
+    fingerprint_text,
+    resolve_bible_root,
+)
 from agent_ai.core.cancel import CancellationToken
 from agent_ai.core.coding import CodingTask
 from agent_ai.core.executor import ToolExecutor
@@ -259,6 +265,98 @@ class AgentOrchestrator:
         if not text.strip():
             return None
         return Message(role="system", content=text)
+
+    # ------------------------------------------------------------------
+    # Bible Context Lifecycle (Task 4)
+    # ------------------------------------------------------------------
+    # Tujuan: context Project Bible (hasil retrieval existing) tidak dikirim
+    # ULANG ke provider pada round-round berikutnya selama task yang sama dan
+    # selama isi Bible belum berubah. State bersifat TASK-SCOPED (instance
+    # runtime), bukan cache global lintas task.
+    def bible_context_state(self) -> BibleContextState:
+        """State Bible context untuk scope task yang sedang berjalan."""
+        state = getattr(self, "_bible_context_state", None)
+        if state is None:
+            state = BibleContextState()
+            self._bible_context_state = state
+        return state
+
+    def begin_bible_context_scope(self, scope: str = "") -> BibleContextState:
+        """Mulai scope task baru: Bible dianggap BELUM pernah dikirim.
+
+        Dipanggil sekali di awal task (Agent continuous loop maupun legacy
+        run) sehingga task lain tidak mewarisi state task sebelumnya.
+        """
+        state = BibleContextState(scope=scope or "")
+        self._bible_context_state = state
+        return state
+
+    def invalidate_bible_context(self, reason: str = "") -> BibleContextState:
+        """Tandai context Bible pada scope ini TIDAK valid lagi.
+
+        Setelahnya retrieval existing boleh mengirim context Bible kembali
+        (dipakai bila Bible berubah di tengah task / invalidation eksplisit).
+        """
+        return self.bible_context_state().invalidate(reason)
+
+    def bible_context_state_dict(self) -> Dict[str, Any]:
+        """Ringkasan state (observability/verifikasi), tanpa isi konteks."""
+        return self.bible_context_state().to_dict()
+
+    def _bible_sources_revision(self) -> Optional[str]:
+        """Revision murah sumber Bible (nama+size+mtime tiap kategori)."""
+        try:
+            return bible_source_revision(resolve_bible_root(getattr(self, "brain", None)))
+        except Exception:
+            return None
+
+    def _mark_bible_context_sent(
+        self,
+        state: BibleContextState,
+        text: str,
+        revision: Optional[str],
+        query: str,
+    ) -> bool:
+        """Catat context Bible yang dikirim. False = isi identik (jangan kirim)."""
+        fingerprint = fingerprint_text(text or "")
+        return state.mark_injected(fingerprint, revision, query=query)
+
+    def _bible_context_message_for_task(self, task: str = "") -> Optional[Message]:
+        """Retrieval existing + lifecycle gate untuk satu task.
+
+        Return None bila context Bible untuk task ini SUDAH dikirim dan isi
+        Bible belum berubah (duplicate prevention). Retrieval tetap memakai
+        mekanisme existing (_brain_context_message -> _retrieve_knowledge_context).
+        """
+        state = self.bible_context_state()
+        revision = self._bible_sources_revision()
+        if not state.needs_retrieval(revision):
+            state.record_skip()
+            return None
+        message = self._brain_context_message(task)
+        if message is None:
+            return None
+        if not self._mark_bible_context_sent(state, message.content, revision, task):
+            # Isi identik dengan yang sudah pernah dikirim pada task ini.
+            state.record_skip()
+            return None
+        return message
+
+    def _refresh_bible_context(self, history: ConversationHistory, task: str = "") -> bool:
+        """Cek per round (murah): sisipkan context Bible HANYA bila berubah.
+
+        Return True bila context baru benar-benar disisipkan ke riwayat.
+        """
+        if history is None:
+            return False
+        message = self._bible_context_message_for_task(task)
+        if message is None:
+            return False
+        try:
+            history.append_system_message(message.content)
+        except Exception:
+            return False
+        return True
 
     def _knowledge_budget_tokens(self) -> Optional[int]:
         """Anggaran token konteks pengetahuan dari provider (bila dilaporkan)."""
@@ -995,9 +1093,12 @@ class AgentOrchestrator:
         provider_error = False
         truncation_recoveries = 0
 
+        # Task isolation: state lifecycle Bible di-reset untuk task ini.
+        self.begin_bible_context_scope()
+
         # Context Project Intelligence (opsional) disisipkan sebelum task.
         # Knowledge dipilih berdasarkan relevance terhadap task (bukan seluruh Bible).
-        brain_context = self._brain_context_message(task)
+        brain_context = self._bible_context_message_for_task(task)
         if brain_context is not None:
             history.append(brain_context)
 
@@ -1277,7 +1378,9 @@ class AgentOrchestrator:
         environment_context = self._environment_context_message()
         if environment_context is not None:
             history.append_system_message(environment_context.content)
-        brain_context = self._brain_context_message(task)
+        # Task isolation: state lifecycle Bible di-reset untuk task ini.
+        self.begin_bible_context_scope()
+        brain_context = self._bible_context_message_for_task(task)
         if brain_context is not None:
             history.append_system_message(brain_context.content)
         history.append_user_message(task, parts=user_parts)
@@ -1290,6 +1393,10 @@ class AgentOrchestrator:
         truncation_recoveries = 0
 
         while not loop.is_finished:
+            # Bible context lifecycle (murah & deterministik): sisipkan context
+            # Bible HANYA bila isi Bible berubah sejak sisipan terakhir pada
+            # task ini. Duplicate context yang tidak berubah tidak dikirim ulang.
+            self._refresh_bible_context(history, task)
             # Cooperative cancellation (safe boundary): jangan memulai
             # iteration/LLM call baru bila task sudah dibatalkan.
             if self._cancel_requested():
