@@ -104,6 +104,7 @@ registry = ToolRegistry()
 def build_registry(
     root: "Path | None" = None,
     change_sink: "Callable[[dict], None] | None" = None,
+    cancel_token: "Any | None" = None,
 ) -> ToolRegistry:
     """Bangun ToolRegistry dengan semua tool bawaan.
 
@@ -118,6 +119,10 @@ def build_registry(
             operasi file berhasil. Dipakai untuk live filesystem event
             (Explorer/Changes) tanpa menunggu task selesai. Bila None,
             tool berperilaku persis seperti sebelumnya (backward compatible).
+        cancel_token: token pembatalan kooperatif opsional (CancellationToken).
+            Diteruskan ke `run_command` agar proses yang sedang berjalan dapat
+            dihentikan saat user Stop (bukan hanya menunggu timeout). Bila None,
+            perilaku run_command persis seperti sebelumnya.
 
     Returns:
         ToolRegistry baru berisi seluruh tool bawaan.
@@ -154,7 +159,7 @@ def build_registry(
     reg.register(EditFileTool(root=resolved, change_sink=change_sink))
     reg.register(DeleteFileTool(root=resolved, change_sink=change_sink))
     reg.register(MoveFileTool(root=resolved, change_sink=change_sink))
-    reg.register(RunCommandTool(root=resolved))
+    reg.register(RunCommandTool(root=resolved, cancel_token=cancel_token))
     # Project Map (Agent): termasuk refresh_project_map (Agent-only).
     for tool in build_project_map_tools(root=resolved, include_refresh=True):
         reg.register(tool)

@@ -13,11 +13,20 @@ Keamanan & desain:
       PATHEXT sehingga shim batch gagal di-resolve saat shell=False.
     - Shell syntax (&&, ||, |, >, >>) dideteksi dan dijalankan via shell.
     - Timeout wajib (default) agar agent tidak menggantung.
+    - Timeout BENAR-BENAR menghentikan proses: saat habis waktu (atau saat
+      cancel diminta) SELURUH process tree dibunuh (Windows: `taskkill /T /F`;
+      POSIX: process-group kill). Ini mencegah hang permanen karena grandchild
+      yang mewarisi pipe stdout/stderr (kasus `communicate()` yang menunggu EOF
+      selamanya pada `subprocess.run(capture_output=True)`).
+    - Output dibaca lewat thread reader daemon + bounded join, sehingga proses
+      yang selesai tetapi pipe masih dipegang grandchild TIDAK membuat tool
+      menggantung.
     - stdout/stderr/exit_code/duration ditangkap dan dikembalikan terstruktur.
     - Field `outcome` membedakan secara eksplisit:
         "success"         : command dieksekusi & exit_code == 0.
         "command_failure" : command dieksekusi tetapi exit_code != 0.
-        "timeout"         : command melewati batas waktu.
+        "timeout"         : command melewati batas waktu (process tree dibunuh).
+        "cancelled"       : task diminta Stop; process tree dihentikan.
         "spawn_error"     : command gagal dijalankan (mis. executable tidak ada).
     - Command gagal / timeout TIDAK melempar exception ke agent; dikembalikan
       sebagai hasil terstruktur (success=False) agar bisa diproses LLM.
@@ -34,8 +43,10 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -46,6 +57,16 @@ from agent_ai.tools.filesystem import _DEFAULT_ROOT
 _DEFAULT_TIMEOUT = 60.0
 _MAX_TIMEOUT = 600.0
 _MAX_OUTPUT_CHARS = 100_000  # batasi output agar tidak membanjiri context
+
+# ---------------------------------------------------------------------------
+# Batas waktu cleanup (di LUAR timeout command).
+# ---------------------------------------------------------------------------
+# Nilai-nilai ini menjamin `run_command` SELALU kembali dalam waktu terbatas,
+# bahkan bila ada grandchild yang tetap memegang pipe stdout/stderr setelah
+# proses induk selesai/dibunuh.
+_KILL_GRACE_SECONDS = 5.0     # menunggu process tree benar-benar mati setelah kill
+_DRAIN_GRACE_SECONDS = 3.0    # menunggu reader thread selesai drain output
+_CANCEL_POLL_SECONDS = 0.2    # interval polling token cancel saat menunggu proses
 
 
 def _split_command(command: str) -> List[str]:
@@ -258,6 +279,204 @@ def _resolve_windows_shim(program: str, cwd: Path) -> Optional[str]:
     return None
 
 
+def _drain_stream(stream: Any, sink: List[str]) -> None:
+    """Baca stream sampai EOF ke dalam `sink` (dijalankan di thread daemon).
+
+    Dibaca di thread terpisah agar proses yang menghasilkan output besar tidak
+    memblokir sementara kita menunggu proses selesai/timeout.
+    """
+    try:
+        if stream is None:
+            return
+        data = stream.read()
+        if data:
+            sink.append(data)
+    except Exception:  # noqa: BLE001 - pembacaan output best-effort
+        pass
+    finally:
+        try:
+            if stream is not None:
+                stream.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _wait_bounded(process: "subprocess.Popen[Any]", seconds: float) -> None:
+    """Tunggu proses selesai maksimal `seconds` (best-effort, tanpa raise)."""
+    try:
+        process.wait(timeout=max(0.0, float(seconds)))
+    except Exception:  # noqa: BLE001 - grace wait best-effort
+        pass
+
+
+def _kill_process_tree(process: "subprocess.Popen[Any]") -> None:
+    """Hentikan proses beserta SELURUH descendant-nya (best-effort, bounded).
+
+    Windows: `taskkill /F /T /PID` membunuh process tree (relasi parent-child),
+    sehingga grandchild yang mewarisi pipe stdout/stderr ikut mati dan pipe
+    segera tertutup. Ini menghilangkan penyebab hang permanen saat menunggu EOF.
+
+    POSIX: proses dijalankan pada session/process-group sendiri
+    (`start_new_session=True`) sehingga `os.killpg` membunuh seluruh grup.
+
+    Selalu aman dipanggil: kegagalan terminasi tidak pernah melempar exception
+    (fallback membunuh proses langsung).
+    """
+    if process.poll() is not None:
+        # Proses langsung sudah selesai. Bila masih ada grandchild yang
+        # memegang pipe, itu ditangani oleh bounded join reader thread.
+        return
+
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                capture_output=True,
+                timeout=_KILL_GRACE_SECONDS,
+                shell=False,
+            )
+            return
+        except Exception:  # noqa: BLE001 - taskkill tidak tersedia/gagal
+            pass
+    else:
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            return
+        except Exception:  # noqa: BLE001 - fallback ke kill proses langsung
+            pass
+
+    # Fallback: bunuh proses langsung (Windows tanpa taskkill / POSIX gagal).
+    try:
+        process.kill()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _run_process(
+    target: Any,
+    *,
+    cwd: Path,
+    timeout: float,
+    shell: bool,
+    cancel_token: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Jalankan proses dengan timeout yang BENAR-BENAR menghentikan process tree.
+
+    Berbeda dari `subprocess.run(capture_output=True, timeout=...)` — yang pada
+    Windows hanya membunuh child langsung lalu memanggil `communicate()` tanpa
+    batas (hang permanen bila grandchild memegang pipe) — helper ini:
+
+      - membaca stdout/stderr di thread daemon (proses tidak memblokir),
+      - TIDAK pernah memanggil `communicate()` tanpa batas,
+      - membunuh SELURUH process tree saat timeout/cancel,
+      - memakai bounded join untuk drain sehingga SELALU kembali.
+
+    `cancel_token` (opsional): bila diberikan dan `is_cancelled()` menjadi True
+    saat menunggu, proses dihentikan dan hasil ditandai `outcome="cancelled"`.
+
+    Returns:
+        dict dengan key: stdout, stderr, exit_code, success, timed_out,
+        outcome, error.
+    """
+    popen_kwargs: Dict[str, Any] = {
+        "cwd": str(cwd),
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "shell": bool(shell),
+    }
+    if os.name == "nt":
+        # Proses pada grup baru: memisahkan sinyal Ctrl+C dan memudahkan
+        # terminasi tree (taskkill /T).
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        # Session/process-group baru -> os.killpg membunuh seluruh descendant.
+        popen_kwargs["start_new_session"] = True
+
+    process = subprocess.Popen(target, **popen_kwargs)
+
+    out_chunks: List[str] = []
+    err_chunks: List[str] = []
+    readers = [
+        threading.Thread(
+            target=_drain_stream, args=(process.stdout, out_chunks), daemon=True
+        ),
+        threading.Thread(
+            target=_drain_stream, args=(process.stderr, err_chunks), daemon=True
+        ),
+    ]
+    for reader in readers:
+        reader.start()
+
+    start = time.perf_counter()
+    timed_out = False
+    cancelled = False
+    try:
+        deadline = start + timeout
+        while True:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                # Poll pendek agar cancel (Stop) terdeteksi cepat, bukan hanya
+                # menunggu timeout penuh.
+                process.wait(timeout=min(_CANCEL_POLL_SECONDS, remaining))
+                break  # proses selesai sendiri.
+            except subprocess.TimeoutExpired:
+                if cancel_token is not None and cancel_token.is_cancelled():
+                    cancelled = True
+                    break
+        if timed_out or cancelled:
+            _kill_process_tree(process)
+            _wait_bounded(process, _KILL_GRACE_SECONDS)
+    finally:
+        # Bounded join (deadline bersama): reader daemon tidak boleh membuat
+        # kita menggantung bila grandchild masih memegang pipe (proses induk
+        # sudah selesai). Total drain dibatasi _DRAIN_GRACE_SECONDS.
+        drain_deadline = time.perf_counter() + _DRAIN_GRACE_SECONDS
+        for reader in readers:
+            remaining = drain_deadline - time.perf_counter()
+            if remaining <= 0:
+                break
+            reader.join(timeout=remaining)
+
+    stdout = "".join(out_chunks)
+    stderr = "".join(err_chunks)
+
+    if cancelled:
+        return {
+            "stdout": stdout,
+            "stderr": stderr,
+            "exit_code": None,
+            "success": False,
+            "timed_out": False,
+            "outcome": "cancelled",
+            "error": "Command dihentikan karena task dibatalkan (user stop).",
+        }
+    if timed_out:
+        return {
+            "stdout": stdout,
+            "stderr": stderr,
+            "exit_code": None,
+            "success": False,
+            "timed_out": True,
+            "outcome": "timeout",
+            "error": f"Command timeout setelah {timeout} detik.",
+        }
+
+    exit_code = process.returncode
+    return {
+        "stdout": stdout,
+        "stderr": stderr,
+        "exit_code": exit_code,
+        "success": exit_code == 0,
+        "timed_out": False,
+        "outcome": "success" if exit_code == 0 else "command_failure",
+        "error": None,
+    }
+
+
 def _resolve_cwd(cwd: Optional[str], root: Path) -> Path:
     """Validasi dan kembalikan working directory yang aman.
 
@@ -328,8 +547,18 @@ class RunCommandTool(BaseTool):
         "required": ["command"],
     }
 
-    def __init__(self, root: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        root: Optional[Path] = None,
+        *,
+        cancel_token: Optional[Any] = None,
+    ) -> None:
         self.root = Path(root) if root else _DEFAULT_ROOT
+        # Token cancel kooperatif (opsional). Bila diisi, run_command
+        # MENGHENTIKAN process tree saat Stop diminta (bukan hanya menunggu
+        # timeout) sehingga Stop benar-benar membebaskan slot queue. Bila None,
+        # perilaku persis seperti sebelumnya (backward compatible).
+        self._cancel_token = cancel_token
 
     def execute(self, **arguments: Any) -> Dict[str, Any]:
         command = arguments.get("command")
@@ -376,47 +605,32 @@ class RunCommandTool(BaseTool):
         # Tentukan apakah command membutuhkan shell execution
         use_shell = _command_needs_shell(str(command))
 
+        # Bangun target proses: string (shell=True) atau argv (shell=False).
+        # Routing ini TIDAK berubah dari perilaku lama; yang berubah hanya cara
+        # eksekusinya (tidak lagi memakai subprocess.run(capture_output=...) yang
+        # bisa menggantung permanen bila ada grandchild pemegang pipe).
+        argv: Optional[List[str]] = None
+        target: Any = str(command)
+        if not use_shell:
+            argv = _split_command(str(command))
+            # Windows: resolusi shim .cmd/.bat yang tidak ditangani
+            # CreateProcess (mis. npm -> npm.CMD). Tanpa ini, command
+            # yang hanya ada sebagai shim batch gagal dijalankan.
+            if os.name == "nt":
+                shim = _resolve_windows_shim(argv[0], cwd)
+                if shim:
+                    argv[0] = shim
+            target = argv
+
         start = time.perf_counter()
         try:
-            if use_shell:
-                completed = subprocess.run(
-                    str(command),
-                    cwd=str(cwd),
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    shell=True,
-                )
-            else:
-                argv = _split_command(str(command))
-                # Windows: resolusi shim .cmd/.bat yang tidak ditangani
-                # CreateProcess (mis. npm -> npm.CMD). Tanpa ini, command
-                # yang hanya ada sebagai shim batch gagal dijalankan.
-                if os.name == "nt":
-                    shim = _resolve_windows_shim(argv[0], cwd)
-                    if shim:
-                        argv[0] = shim
-                completed = subprocess.run(
-                    argv,
-                    cwd=str(cwd),
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    shell=False,
-                )
-        except subprocess.TimeoutExpired as exc:
-            duration = time.perf_counter() - start
-            return {
-                "command": command,
-                "stdout": _truncate(exc.stdout or ""),
-                "stderr": _truncate(exc.stderr or ""),
-                "exit_code": None,
-                "success": False,
-                "timed_out": True,
-                "outcome": "timeout",
-                "duration": round(duration, 4),
-                "error": f"Command timeout setelah {timeout} detik.",
-            }
+            outcome = _run_process(
+                target,
+                cwd=cwd,
+                timeout=timeout,
+                shell=use_shell,
+                cancel_token=self._cancel_token,
+            )
         except FileNotFoundError as exc:
             duration = time.perf_counter() - start
             failed_cmd = str(command).split()[0] if use_shell else argv[0]
@@ -435,13 +649,16 @@ class RunCommandTool(BaseTool):
             raise ToolExecutionError(f"Gagal menjalankan command: {exc}") from exc
 
         duration = time.perf_counter() - start
-        return {
+        result = {
             "command": command,
-            "stdout": _truncate(completed.stdout or ""),
-            "stderr": _truncate(completed.stderr or ""),
-            "exit_code": completed.returncode,
-            "success": completed.returncode == 0,
-            "timed_out": False,
-            "outcome": "success" if completed.returncode == 0 else "command_failure",
+            "stdout": _truncate(outcome["stdout"]),
+            "stderr": _truncate(outcome["stderr"]),
+            "exit_code": outcome["exit_code"],
+            "success": outcome["success"],
+            "timed_out": outcome["timed_out"],
+            "outcome": outcome["outcome"],
             "duration": round(duration, 4),
         }
+        if outcome.get("error"):
+            result["error"] = outcome["error"]
+        return result

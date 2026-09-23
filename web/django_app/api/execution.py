@@ -195,7 +195,15 @@ class TaskExecutor:
         if workspace_root:
             from agent_ai.tools.registry import build_registry
 
-            registry = build_registry(root=workspace_root, change_sink=change_sink)
+            # cancel_token diteruskan ke run_command agar proses command yang
+            # sedang berjalan benar-benar dihentikan saat user menekan Stop
+            # (bukan hanya menunggu timeout). Ini membuat slot queue cepat
+            # bebas dan mencegah queue "tersangkut" pada command panjang.
+            registry = build_registry(
+                root=workspace_root,
+                change_sink=change_sink,
+                cancel_token=cancel_token,
+            )
             executor = ToolExecutor(
                 registry=registry, permission_manager=self.permission_manager
             )
