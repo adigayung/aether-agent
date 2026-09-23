@@ -74,6 +74,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
+from agent_ai.projects import scan_policy
+
 #: Nama folder root metadata project (sama dengan aether_store.AETHER_DIR_NAME).
 AETHER_DIR_NAME = ".aether"
 #: Subfolder hasil Project Map.
@@ -132,31 +134,12 @@ STATUS_STALE = "stale"
 SOURCE_EXTENSIONS: Tuple[str, ...] = (".py",)
 
 #: Folder yang TIDAK dihitung sebagai source (regenerable / non-code / metadata).
-_IGNORED_DIR_NAMES = frozenset(
-    {
-        ".git",
-        ".hg",
-        ".svn",
-        ".aether",
-        "__pycache__",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".tox",
-        ".venv",
-        "venv",
-        "env",
-        "site-packages",
-        "node_modules",
-        "dist",
-        "build",
-        ".idea",
-        ".vscode",
-        # Workspace testing AETHER yang terisolasi (gitignored, bukan source):
-        # churn fixture di sini TIDAK boleh membuat map project stale.
-        "dummy_test",
-    }
-)
+#:
+#: Satu sumber policy untuk AETHER + engine vendored (Atlas/RIG):
+#: `agent_ai.projects.scan_policy`. Daftar ini dipakai untuk menghitung
+#: fingerprint freshness dan juga dikirim ke engine lewat environment variable
+#: supaya boundary scan Atlas/RIG identik dengan AETHER.
+_IGNORED_DIR_NAMES = scan_policy.EXCLUDED_DIR_NAMES
 
 #: Penanda algoritma fingerprint (naikkan bila cara hitung freshness berubah).
 FINGERPRINT_ALGORITHM = "sha256-code-v1"
@@ -294,18 +277,14 @@ class ProjectMapService:
     # Freshness (deterministik, tanpa database/index baru)
     # ------------------------------------------------------------------ #
     def _iter_source_files(self, project: Path) -> List[Path]:
-        """Daftar file source relevan (deterministik, urut menurut path)."""
-        files: List[Path] = []
-        try:
-            for root, dirs, names in os.walk(project):
-                dirs[:] = sorted(d for d in dirs if d not in _IGNORED_DIR_NAMES)
-                for name in names:
-                    if name.endswith(SOURCE_EXTENSIONS):
-                        files.append(Path(root) / name)
-        except OSError:
-            return []
-        files.sort(key=lambda p: p.as_posix().lower())
-        return files
+        """Daftar file source relevan (deterministik, urut menurut path).
+
+        Memakai policy scan bersama (`agent_ai.projects.scan_policy`):
+        directory environment/dependency/cache/build/metadata dipangkas
+        sebelum rekursi, symlink/junction tidak ditelusuri, dan traversal
+        tidak keluar dari `project`.
+        """
+        return scan_policy.iter_source_files(project, SOURCE_EXTENSIONS)
 
     def compute_source_fingerprint(self, project_path: ProjectPath) -> Tuple[str, int]:
         """Fingerprint deterministik dari source code project.
@@ -667,9 +646,22 @@ class ProjectMapService:
         # Fingerprint source dihitung SEBELUM engine dijalankan.
         fingerprint, file_count = self.compute_source_fingerprint(project)
 
+        # Boundary scan yang sama diteruskan ke engine vendored (Atlas/RIG).
+        # Satu sumber policy: `agent_ai.projects.scan_policy`.
+        engine_env = os.environ.copy()
+        try:
+            engine_env[scan_policy.AETHER_SCAN_POLICY_ENV] = json.dumps(
+                scan_policy.to_payload(), ensure_ascii=True
+            )
+            engine_env[scan_policy.AETHER_SCAN_POLICY_PATH_ENV] = str(
+                scan_policy.module_path()
+            )
+        except (TypeError, ValueError, OSError):
+            pass
+
         try:
             completed = subprocess.run(
-                cmd, capture_output=True, text=True
+                cmd, capture_output=True, text=True, env=engine_env
             )
         except OSError as exc:
             tmp_path.unlink(missing_ok=True)

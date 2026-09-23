@@ -14,7 +14,12 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
 
-from rig.config import BUILD_SYSTEM_MARKERS, DEFAULT_IGNORE_DIRS
+from rig.config import (
+    BUILD_SYSTEM_MARKERS,
+    DEFAULT_IGNORE_DIRS,
+    is_ignored_dir,
+    is_reparse_point,
+)
 from rig.identity import normalize_path
 
 
@@ -118,7 +123,9 @@ class RepositoryDiscovery:
                     results.append(full_path)
             elif os.path.isdir(full_path):
                 dirname = os.path.basename(full_path)
-                if dirname in self.ignore_dirs:
+                if dirname in self.ignore_dirs or is_ignored_dir(dirname):
+                    continue
+                if is_reparse_point(full_path):
                     continue
                 results.extend(
                     self._find_marker(full_path, marker, current_depth + 1)
@@ -252,7 +259,9 @@ class RepositoryDiscovery:
 
         for entry in entries:
             full_entry = os.path.join(base_dir, entry)
-            if os.path.isdir(full_entry) and entry not in self.ignore_dirs:
+            if os.path.isdir(full_entry) and entry not in self.ignore_dirs \
+                    and not is_ignored_dir(entry) \
+                    and not is_reparse_point(full_entry):
                 for filename, role in patterns:
                     nested = os.path.join(full_entry, filename)
                     if os.path.isfile(nested):
@@ -288,9 +297,14 @@ class RepositoryDiscovery:
             full_src = os.path.join(result.repo_root, src_dir)
             if os.path.isdir(full_src):
                 for root, dirs, files in os.walk(full_src):
-                    # Filter ignored dirs
-                    dirs[:] = [d for d in dirs if d not in self.ignore_dirs
-                               and not d.startswith(".")]
+                    # Prune ignored dirs + symlink/junction before descending.
+                    dirs[:] = [
+                        d for d in dirs
+                        if d not in self.ignore_dirs
+                        and not d.startswith(".")
+                        and not is_ignored_dir(d)
+                        and not is_reparse_point(os.path.join(root, d))
+                    ]
                     for f in sorted(files):
                         rel = normalize_path(os.path.relpath(
                             os.path.join(root, f), result.repo_root

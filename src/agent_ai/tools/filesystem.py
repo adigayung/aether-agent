@@ -83,6 +83,112 @@ def _iter_files(base: Path):
             yield Path(dirpath) / filename
 
 
+# --------------------------------------------------------------------------- #
+# Line range helper (1-based, inklusif) — dipakai bersama oleh read_file dan
+# edit_file. Satu implementasi, satu konvensi penomoran baris.
+# --------------------------------------------------------------------------- #
+def _coerce_line_number(value: Any, name: str) -> Optional[int]:
+    """Konversi argumen line number menjadi int (atau None bila tidak diberikan).
+
+    Raises:
+        ToolValidationError: bila nilai bukan integer 1-based yang valid.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):  # bool adalah subclass int; tolak eksplisit.
+        raise ToolValidationError(
+            f"Argumen '{name}' harus berupa integer (1-based), bukan boolean."
+        )
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not value.is_integer():
+            raise ToolValidationError(
+                f"Argumen '{name}' harus berupa integer (1-based), bukan {value!r}."
+            )
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            return int(text)
+        except ValueError:
+            raise ToolValidationError(
+                f"Argumen '{name}' harus berupa integer (1-based), bukan {value!r}."
+            ) from None
+    raise ToolValidationError(
+        f"Argumen '{name}' harus berupa integer (1-based), bukan tipe "
+        f"{type(value).__name__}."
+    )
+
+
+def normalize_line_range(
+    start_line: Any,
+    end_line: Any,
+    total_lines: int,
+) -> tuple[Optional[int], Optional[int]]:
+    """Validasi & normalisasi line range 1-based (inklusif).
+
+    Aturan:
+        - Keduanya tidak diberikan -> (None, None): pemanggil memakai seluruh file.
+        - start_line < 1 atau end_line < 1 -> error.
+        - start_line > end_line -> error.
+        - start_line melebihi jumlah baris file -> error (jangan diam-diam
+          mengembalikan hasil kosong yang menyesatkan).
+        - end_line melebihi jumlah baris file -> di-clamp ke jumlah baris nyata
+          (tetap mengembalikan baris yang benar-benar ada).
+
+    Args:
+        start_line: nilai mentah argumen 'start_line' (atau None).
+        end_line: nilai mentah argumen 'end_line' (atau None).
+        total_lines: jumlah baris file target (hasil `str.splitlines()`).
+
+    Returns:
+        Tuple (start, end) 1-based inklusif, atau (None, None) bila range tidak
+        diminta.
+
+    Raises:
+        ToolValidationError: bila range tidak valid.
+    """
+    start = _coerce_line_number(start_line, "start_line")
+    end = _coerce_line_number(end_line, "end_line")
+
+    if start is None and end is None:
+        return None, None
+
+    if total_lines <= 0:
+        raise ToolValidationError(
+            "File tidak memiliki baris; line range tidak dapat diterapkan."
+        )
+    if start is not None and start < 1:
+        raise ToolValidationError("Argumen 'start_line' harus >= 1 (1-based).")
+    if end is not None and end < 1:
+        raise ToolValidationError("Argumen 'end_line' harus >= 1 (1-based).")
+
+    resolved_start = start if start is not None else 1
+    resolved_end = end if end is not None else total_lines
+
+    if resolved_start > total_lines:
+        raise ToolValidationError(
+            f"Argumen 'start_line'={resolved_start} melebihi jumlah baris file "
+            f"({total_lines})."
+        )
+    if resolved_start > resolved_end:
+        raise ToolValidationError(
+            f"Argumen 'start_line'={resolved_start} lebih besar dari "
+            f"'end_line'={resolved_end}."
+        )
+    if resolved_end > total_lines:
+        resolved_end = total_lines
+    return resolved_start, resolved_end
+
+
+def format_numbered_lines(lines: List[str], start_line: int) -> str:
+    """Render baris dengan prefix nomor baris 1-based (mis. ``"42: teks"``)."""
+    return "\n".join(
+        f"{start_line + offset}: {text}" for offset, text in enumerate(lines)
+    )
+
+
 class ListFilesTool(BaseTool):
     """Daftar file/directory dalam sebuah directory (read-only).
 
@@ -153,18 +259,34 @@ class ReadFileTool(BaseTool):
 
     name = "read_file"
     description = (
-        "Membaca isi sebuah file, opsional dengan rentang baris. "
+        "Membaca isi sebuah file, opsional dengan rentang baris (1-based, inklusif). "
         "Ini adalah cara utama untuk membaca isi file. "
-        "Gunakan tool ini untuk membaca file, bukan run_command dengan cat/type. "
-        "Untuk melihat isi directory, gunakan list_files. "
+        "Tanpa start_line/end_line: membaca SELURUH file. "
+        "Hanya start_line: dari baris itu sampai akhir file. "
+        "Hanya end_line: dari awal file sampai baris itu. "
+        "Keduanya: hanya baris start_line..end_line. "
+        "Pada mode rentang, hasil juga memuat 'content_numbered' (setiap baris "
+        "diberi prefix nomor baris) sehingga lokasi baris dapat dipakai untuk "
+        "edit_file. Gunakan tool ini untuk membaca file, bukan run_command "
+        "dengan cat/type. Untuk melihat isi directory, gunakan list_files. "
         "Untuk mencari teks dalam file, gunakan search_code."
     )
     input_schema = {
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "Path file relatif terhadap project root."},
-            "start_line": {"type": "integer", "description": "Baris awal (1-based, inklusif)."},
-            "end_line": {"type": "integer", "description": "Baris akhir (1-based, inklusif)."},
+            "start_line": {
+                "type": "integer",
+                "description": (
+                    "Baris awal (1-based, inklusif). Kosong = dari awal file."
+                ),
+            },
+            "end_line": {
+                "type": "integer",
+                "description": (
+                    "Baris akhir (1-based, inklusif). Kosong = sampai akhir file."
+                ),
+            },
         },
         "required": ["path"],
     }
@@ -197,26 +319,28 @@ class ReadFileTool(BaseTool):
         lines = text.splitlines()
         total_lines = len(lines)
 
-        start_line = arguments.get("start_line")
-        end_line = arguments.get("end_line")
-        if start_line is not None or end_line is not None:
-            start = max(int(start_line or 1), 1)
-            end = int(end_line) if end_line is not None else total_lines
-            end = min(end, total_lines)
-            selected = lines[start - 1 : end]
-            content = "\n".join(selected)
+        start_line, end_line = normalize_line_range(
+            arguments.get("start_line"),
+            arguments.get("end_line"),
+            total_lines,
+        )
+
+        if start_line is None:
+            # Tanpa range: perilaku lama (seluruh file) tidak berubah.
             return {
                 "path": rel_path,
-                "start_line": start,
-                "end_line": end,
                 "total_lines": total_lines,
-                "content": content,
+                "content": text,
             }
 
+        selected = lines[start_line - 1 : end_line]
         return {
             "path": rel_path,
+            "start_line": start_line,
+            "end_line": end_line,
             "total_lines": total_lines,
-            "content": text,
+            "content": "\n".join(selected),
+            "content_numbered": format_numbered_lines(selected, start_line),
         }
 
 

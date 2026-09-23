@@ -27,6 +27,7 @@ import ast
 import os
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from rig.config import is_ignored_dir, is_reparse_point
 from rig.evidence import EvidenceCollector
 from rig.extractor import ExtractorPlugin, ExtractorResult
 from rig.identity import (
@@ -646,23 +647,18 @@ class PythonCodeExtractor(ExtractorPlugin):
     def _find_python_files(self, repo_root: str) -> List[str]:
         """Find all Python (.py) files in the repository.
 
-        Excludes: .git, __pycache__, venv, node_modules, etc.
-        Uses os.walk with ignore dirs filtering.
+        Excludes environment/dependency/cache/build directories (satu sumber
+        policy bersama: ``scan_policy``) and never follows symlink/junction.
+        Uses os.walk with prune-before-descend filtering.
         """
-        from rig.config import DEFAULT_IGNORE_DIRS
-
         py_files = []
-        ignore_dirs = DEFAULT_IGNORE_DIRS | {"__pycache__", ".mypy_cache",
-                                               ".pytest_cache", ".ruff_cache",
-                                               ".eggs", "*.egg-info"}
-        ignore_dirs_lower = {d.lower() for d in ignore_dirs}
 
         for root, dirs, files in os.walk(repo_root):
-            # Filter ignored directories
+            # Prune excluded dirs + symlink/junction BEFORE descending.
             dirs[:] = [
                 d for d in dirs
-                if d.lower() not in ignore_dirs_lower
-                and not d.startswith(".")
+                if not is_ignored_dir(d)
+                and not is_reparse_point(os.path.join(root, d))
             ]
             # Sort for determinism
             dirs.sort()

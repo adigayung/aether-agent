@@ -3,6 +3,7 @@
 Menyediakan empat tool operasi filesystem di dalam workspace:
     - write_file  : tulis/buat file (buat parent directory bila perlu).
     - edit_file   : ganti `old_text` -> `new_text` (harus unik, tidak blind).
+                    Opsional `start_line`/`end_line` sebagai batas aman pencarian.
     - delete_file : hapus file atau directory (recursive).
     - move_file   : pindah/rename file atau directory.
 
@@ -25,7 +26,11 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from agent_ai.tools.base import BaseTool, ToolExecutionError, ToolValidationError
-from agent_ai.tools.filesystem import _DEFAULT_ROOT, _resolve_within_root
+from agent_ai.tools.filesystem import (
+    _DEFAULT_ROOT,
+    _resolve_within_root,
+    normalize_line_range,
+)
 
 #: Sink event perubahan filesystem: `callable(payload: dict) -> None`.
 #: Dipanggil HANYA setelah operasi filesystem benar-benar berhasil.
@@ -278,16 +283,50 @@ class WriteFileTool(_WorkspaceChangeTool):
 
 
 class EditFileTool(_WorkspaceChangeTool):
-    """Ganti `old_text` -> `new_text` pada file (harus unik, tidak blind)."""
+    """Ganti `old_text` -> `new_text` pada file (harus unik, tidak blind).
+
+    `start_line`/`end_line` (opsional, 1-based inklusif) berfungsi sebagai
+    SAFETY FENCE: bila diberikan, `old_text` hanya dicari di dalam range itu.
+    Bila `old_text` tidak ditemukan (atau masih ambigu) di dalam range, tool
+    GAGAL dan TIDAK mencari ke seluruh file. `old_text` tetap menjadi identitas
+    target; range hanya mempersempit/menjaga area validasi.
+    """
 
     name = "edit_file"
-    description = "Mengganti teks pada file; gagal bila target tidak ada atau ambigu."
+    description = (
+        "Mengganti teks pada file; gagal bila target tidak ada atau ambigu. "
+        "`old_text` harus unik dan `new_text` adalah penggantinya. "
+        "Opsional `start_line`/`end_line` (1-based, inklusif) membatasi PENCARIAN "
+        "`old_text` pada range itu sebagai batas keamanan: bila diberikan dan "
+        "`old_text` tidak ditemukan atau masih ambigu DI DALAM range, tool GAGAL "
+        "dan TIDAK mencari ke seluruh file. Range bukan pengganti `old_text`."
+    )
     input_schema = {
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "Path file relatif terhadap project root."},
-            "old_text": {"type": "string", "description": "Teks yang dicari (harus unik)."},
+            "old_text": {
+                "type": "string",
+                "description": (
+                    "Teks yang dicari (harus unik; bila range diberikan, harus "
+                    "unik di dalam range)."
+                ),
+            },
             "new_text": {"type": "string", "description": "Teks pengganti."},
+            "start_line": {
+                "type": "integer",
+                "description": (
+                    "Batas bawah pencarian old_text (1-based, inklusif). "
+                    "Kosong = dari awal file."
+                ),
+            },
+            "end_line": {
+                "type": "integer",
+                "description": (
+                    "Batas atas pencarian old_text (1-based, inklusif). "
+                    "Kosong = sampai akhir file."
+                ),
+            },
         },
         "required": ["path", "old_text", "new_text"],
     }
@@ -321,17 +360,43 @@ class EditFileTool(_WorkspaceChangeTool):
         except OSError as exc:
             raise ToolExecutionError(f"Gagal membaca file '{rel_path}': {exc}") from exc
 
-        count = text.count(old_text)
+        # Safety fence: seluruh file (default) atau range baris (1-based).
+        # `splitlines(keepends=True)` memakai pemisah baris yang SAMA dengan
+        # `read_file` (yang memakai `splitlines()`), sehingga nomor baris
+        # konsisten, dan offset karakter tetap mempertahankan line ending asli.
+        lines = text.splitlines(keepends=True)
+        total_lines = len(lines)
+        start_line, end_line = normalize_line_range(
+            arguments.get("start_line"),
+            arguments.get("end_line"),
+            total_lines,
+        )
+
+        if start_line is None:
+            search_text = text
+            region_offset = 0
+            range_note = ""
+        else:
+            region_offset = sum(len(line) for line in lines[: start_line - 1])
+            region_length = sum(len(line) for line in lines[start_line - 1 : end_line])
+            search_text = text[region_offset : region_offset + region_length]
+            range_note = f" dalam range line {start_line}-{end_line}"
+
+        count = search_text.count(old_text)
         if count == 0:
             raise ToolExecutionError(
-                f"Teks target tidak ditemukan pada '{rel_path}'."
+                f"Teks target tidak ditemukan{range_note} pada '{rel_path}'."
             )
         if count > 1:
             raise ToolExecutionError(
-                f"Teks target ambigu pada '{rel_path}' (ditemukan {count} kali)."
+                f"Teks target ambigu{range_note} pada '{rel_path}' "
+                f"(ditemukan {count} kali)."
             )
 
-        new_content = text.replace(old_text, str(arguments["new_text"]), 1)
+        index = region_offset + search_text.index(old_text)
+        new_content = (
+            text[:index] + str(arguments["new_text"]) + text[index + len(old_text) :]
+        )
         try:
             target.write_text(new_content, encoding="utf-8")
         except OSError as exc:
@@ -343,7 +408,11 @@ class EditFileTool(_WorkspaceChangeTool):
         # Live event HANYA setelah edit benar-benar berhasil.
         self._emit_change(path=rel_path, kind="modified", before=before, after=after)
 
-        return {"path": rel_path, "replaced": 1, "edited": True}
+        result: Dict[str, Any] = {"path": rel_path, "replaced": 1, "edited": True}
+        if start_line is not None:
+            result["start_line"] = start_line
+            result["end_line"] = end_line
+        return result
 
 
 class DeleteFileTool(_WorkspaceChangeTool):

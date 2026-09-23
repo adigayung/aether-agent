@@ -13,8 +13,9 @@ from typing import Iterable
 
 from atlas.config import (
     BINARY_EXTENSIONS,
-    IGNORED_DIRS,
     INTERESTING_EXTENSIONS,
+    is_ignored_dir,
+    is_reparse_point,
 )
 
 
@@ -57,7 +58,25 @@ def _norm_rel(path: str) -> str:
 
 
 def _is_skippable_dir(entry_name: str) -> bool:
-    return entry_name in IGNORED_DIRS
+    return is_ignored_dir(entry_name)
+
+
+def _prune_dirnames(dirpath: str, dirnames: list[str]) -> list[str]:
+    """Pangkas ``dirnames`` IN-PLACE sebelum rekursi (case-insensitive + link-safe).
+
+    Directory yang di-exclude (environment/dependency/cache/build/metadata)
+    atau berupa symlink/junction dipangkas SEBELUM direkursi, sehingga isinya
+    tidak pernah dipindai.
+    """
+    kept = []
+    for name in dirnames:
+        if _is_skippable_dir(name):
+            continue
+        if is_reparse_point(os.path.join(dirpath, name)):
+            continue
+        kept.append(name)
+    dirnames[:] = kept
+    return dirnames
 
 
 def _is_relevant_file(entry_name: str) -> bool:
@@ -108,10 +127,9 @@ def discover_project(project_root: str) -> DiscoveryResult:
     files: list[str] = []
 
     for dirpath, dirnames, filenames in os.walk(root):
-        # Prune ignored directories in-place so os.walk does not descend.
-        dirnames[:] = [
-            d for d in dirnames if not _is_skippable_dir(d)
-        ]
+        # Prune ignored directories (and symlink/junction) in-place so os.walk
+        # never descends into them.
+        _prune_dirnames(dirpath, dirnames)
         dirnames.sort()
 
         for filename in sorted(filenames):
