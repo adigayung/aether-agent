@@ -394,19 +394,24 @@ def build_consultant_registry(
         else:
             registry.register(tool)
 
+
     if normalized == MODE_INVESTIGATE:
         from agent_ai.tools.filesystem import (
             ListFilesTool,
             ReadFileTool,
             SearchCodeTool,
         )
+        from agent_ai.tools.read_cache import ToolReadCache
 
-        # Catatan: read_file/search_code Consultant memakai default tool (tanpa
-        # read_cache) agar behavior Consultant TIDAK berubah. Optimasi
-        # duplicate-read di-scope ke registry Agent (per task).
+        # Cache retrieval per giliran konsultasi (build_consultant_registry
+        # dipanggil per consult() oleh ConsultantService): dedup read_file/
+        # search_code TER-scope satu turn, BUKAN lintas task/sesi. Ini mencegah
+        # Consultant membaca sumber yang sama berulang kali dalam satu giliran.
+        # Arsitektur/boundary Consultant (loop/policy/guard) TIDAK berubah.
+        read_cache = ToolReadCache()
         registry.register(ListFilesTool(root=resolved))
-        registry.register(ReadFileTool(root=resolved))
-        registry.register(SearchCodeTool(root=resolved))
+        registry.register(ReadFileTool(root=resolved, read_cache=read_cache))
+        registry.register(SearchCodeTool(root=resolved, read_cache=read_cache))
         registry.register(ConsultantRunCommandTool(root=resolved))
 
     # Project Bible update tersedia di SEMUA mode (satu-satunya jalur tulis

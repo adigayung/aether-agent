@@ -161,6 +161,7 @@ def build_registry(
         WriteFileTool,
     )
 
+
     resolved = _Path(root) if root is not None else None
     # Cache duplicate-read: SATU instance per build_registry (= per task), dibagi
     # antara ReadFileTool (yang mengisi) dan tool mutasi (yang menginvalidasi).
@@ -170,7 +171,7 @@ def build_registry(
     reg = ToolRegistry()
     reg.register(ListFilesTool(root=resolved))
     reg.register(ReadFileTool(root=resolved, read_cache=read_cache))
-    reg.register(SearchCodeTool(root=resolved))
+    reg.register(SearchCodeTool(root=resolved, read_cache=read_cache))
     reg.register(WriteFileTool(root=resolved, change_sink=change_sink, read_cache=read_cache))
     reg.register(EditFileTool(root=resolved, change_sink=change_sink, read_cache=read_cache))
     reg.register(DeleteFileTool(root=resolved, change_sink=change_sink, read_cache=read_cache))

@@ -1,37 +1,63 @@
-"""Read cache ringan (per task/session) untuk mendeteksi read_file duplikat.
+"""Read cache ringan (per task/session) untuk dedup retrieval duplikat.
 
-Tujuan: menghindari mengirim source yang SAMA dua kali ke LLM dalam satu
-task/session. Ini BUKAN "second brain" dan bukan cache lintas-task:
+Tujuan: menghindari (a) physical read ulang untuk sumber yang SUDAH tersedia,
+dan (b) mengirim source yang SAMA dua kali ke LLM dalam satu task/session. Ini
+BUKAN "second brain" dan BUKAN cache lintas-task:
 
     - Scope = SATU instance per task/session. Instance dibuat fresh oleh
       `build_registry()` / `build_consultant_registry()` (dipanggil per task),
       BUKAN singleton global. Tool yang dikonstruksi langsung tanpa cache
       (mis. di script verifier) berperilaku persis seperti sebelumnya
       (dedup tidak aktif) -> backward compatible.
-    - Dua rentang BERBEDA tidak pernah dianggap duplikat: kunci = (start, end).
-    - Konten yang berubah (mis. setelah edit_file) TIDAK dianggap duplikat:
-      selain (start, end), dibandingkan juga digest konten yang benar-benar
-      dikirim. `edit_file`/`write_file`/`delete_file`/`move_file` juga
-      memanggil `invalidate()` untuk path yang berubah.
+    - Exact-duplicate: rentang (start, end) identik + digest konten identik.
+    - Covered-range: rentang yang sudah TERCakup penuh oleh rentang yang pernah
+      dibaca (mis. 100-200 dibaca, lalu 120-150 diminta) tidak dibaca ulang
+      SELAMA file belum berubah (dicek via signature mtime_ns+size).
+    - In-flight dedup: `key_lock()` menserialkan permintaan identik untuk path
+      yang sama sehingga permintaan paralel tidak melakukan physical read
+      berkali-kali (request kedua memakai hasil yang sudah tercatat).
+    - Search dedup: `claim_search()` mencegah `search_code(query, scope)` yang
+      sama dijalankan fisik berulang.
+    - Invalidation: `invalidate()` (dipanggil tool mutasi) melupakan rentang
+      baca + hasil search untuk path yang berubah; perubahan file eksternal
+      juga dideteksi via perubahan signature.
 
-Modul ini murni struktur data (tanpa I/O) dan tidak menyimpan source lintas
-task.
+Modul TIDAK menyimpan source lintas task: digest konten (bukan isi) dipakai
+untuk exact-duplicate; cuplikan span (start, end) angka dipakai untuk covered
+range.
 """
 
 from __future__ import annotations
 
 import hashlib
-from typing import Dict, Optional, Tuple
+import threading
+from typing import Dict, List, Optional, Set, Tuple
 
 #: Kunci satu rentang baca: (start_line, end_line) 1-based inklusif.
 RangeKey = Tuple[Optional[int], Optional[int]]
 
+#: Signature file: (mtime_ns, size_bytes).
+FileSignature = Tuple[int, int]
+
 
 class ToolReadCache:
-    """Catatan read_file per task: path -> {rentang -> digest konten}."""
+    """Catatan retrieval per task: read range + search, untuk dedup.
+
+    Struktur internal (semua dilindungi `_lock` untuk akses paralel):
+        - _ranges  : path -> {(start,end): digest konten}  (exact-duplicate)
+        - _covered : path -> [(start,end), ...] yang tercakup (union)
+        - _sig     : path -> (mtime_ns, size, total_lines)
+        - _searches: set (query, path, context_lines)
+        - _locks   : path -> threading.Lock (in-flight dedup)
+    """
 
     def __init__(self) -> None:
+        self._lock = threading.Lock()
         self._ranges: Dict[str, Dict[RangeKey, str]] = {}
+        self._covered: Dict[str, List[Tuple[int, int]]] = {}
+        self._sig: Dict[str, Tuple[int, int, int]] = {}
+        self._searches: Set[Tuple[str, str, int]] = set()
+        self._locks: Dict[str, threading.Lock] = {}
 
     # ------------------------------------------------------------------ #
     # Digest
@@ -41,7 +67,19 @@ class ToolReadCache:
         return hashlib.sha1(content.encode("utf-8", "replace")).hexdigest()
 
     # ------------------------------------------------------------------ #
-    # Query / record
+    # In-flight lock (dedup permintaan paralel)
+    # ------------------------------------------------------------------ #
+    def key_lock(self, rel_path: str) -> threading.Lock:
+        """Lock per-path: menserialkan read identik yang datang bersamaan."""
+        with self._lock:
+            lock = self._locks.get(rel_path)
+            if lock is None:
+                lock = threading.Lock()
+                self._locks[rel_path] = lock
+            return lock
+
+    # ------------------------------------------------------------------ #
+    # Exact-duplicate (backward compatible)
     # ------------------------------------------------------------------ #
     def is_duplicate(
         self,
@@ -51,13 +89,14 @@ class ToolReadCache:
         content: str,
     ) -> bool:
         """True bila (path, start, end) sudah pernah dibaca dengan konten IDENTIK."""
-        entry = self._ranges.get(rel_path)
-        if not entry:
-            return False
-        stored = entry.get((start, end))
-        if stored is None:
-            return False
-        return stored == self._digest(content)
+        with self._lock:
+            entry = self._ranges.get(rel_path)
+            if not entry:
+                return False
+            stored = entry.get((start, end))
+            if stored is None:
+                return False
+            return stored == self._digest(content)
 
     def record(
         self,
@@ -67,23 +106,156 @@ class ToolReadCache:
         content: str,
     ) -> None:
         """Catat bahwa (path, start, end) sudah dikirim dengan konten `content`."""
-        self._ranges.setdefault(rel_path, {})[(start, end)] = self._digest(content)
+        with self._lock:
+            self._ranges.setdefault(rel_path, {})[(start, end)] = self._digest(content)
+
+    # ------------------------------------------------------------------ #
+    # Covered-range (skip physical read)
+    # ------------------------------------------------------------------ #
+    def covered(
+        self,
+        rel_path: str,
+        start: Optional[int],
+        end: Optional[int],
+        signature: FileSignature,
+    ) -> Optional[Tuple[int, int, int]]:
+        """Kembalikan (start, end, total_lines) bila rentang sudah tersedia.
+
+        Rentang dianggap tersedia bila:
+            - signature file SAMA dengan saat terakhir dicatat (file tidak
+              berubah), DAN
+            - (start, end) tercakup penuh oleh salah satu rentang yang tercatat.
+
+        `start`/`end` None berarti "dari awal" / "sampai akhir" (di-resolve
+        memakai total_lines yang tercatat). Mengembalikan None bila tidak
+        tersedia (pemanggil harus melakukan read fisik).
+        """
+        with self._lock:
+            rec = self._sig.get(rel_path)
+            if rec is None:
+                return None
+            if (rec[0], rec[1]) != (int(signature[0]), int(signature[1])):
+                return None
+            total = rec[2]
+            if total <= 0:
+                return None
+            s = 1 if start is None else int(start)
+            e = total if end is None else int(end)
+            if s < 1 or e < 1 or s > e:
+                return None
+            if e > total:
+                e = total
+            if s > e:
+                return None
+            for span_start, span_end in self._covered.get(rel_path, ()):
+                if span_start <= s and e <= span_end:
+                    return (s, e, total)
+            return None
+
+    def record_read(
+        self,
+        rel_path: str,
+        start: Optional[int],
+        end: Optional[int],
+        signature: FileSignature,
+        total_lines: int,
+        content: str,
+    ) -> None:
+        """Catat read berhasil: digest + span tercakup + signature file.
+
+        Bila signature berbeda dari yang tercatat (file berubah), rentang lama
+        untuk path ini dibuang lebih dulu agar tidak dianggap masih valid.
+        """
+        try:
+            start_i = 1 if start is None else int(start)
+            end_i = int(end) if end is not None else int(total_lines)
+        except (TypeError, ValueError):
+            return
+        if end_i < start_i or total_lines <= 0:
+            return
+        with self._lock:
+            rec = self._sig.get(rel_path)
+            if rec is not None and (rec[0], rec[1]) != (
+                int(signature[0]),
+                int(signature[1]),
+            ):
+                # File berubah -> rentang tercatat lama tidak valid.
+                self._covered.pop(rel_path, None)
+                self._ranges.pop(rel_path, None)
+            self._sig[rel_path] = (
+                int(signature[0]),
+                int(signature[1]),
+                int(total_lines),
+            )
+            self._ranges.setdefault(rel_path, {})[(start, end)] = self._digest(content)
+            self._add_covered(rel_path, start_i, end_i)
+
+    def _add_covered(self, rel_path: str, start: int, end: int) -> None:
+        """Tambahkan span [start, end] ke union tanda tercakup (merge overlap)."""
+        spans = self._covered.setdefault(rel_path, [])
+        spans.append((start, end))
+        spans.sort()
+        merged: List[Tuple[int, int]] = []
+        for span_start, span_end in spans:
+            if merged and span_start <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], span_end))
+            else:
+                merged.append((span_start, span_end))
+        self._covered[rel_path] = merged
+
+    # ------------------------------------------------------------------ #
+    # Search dedup
+    # ------------------------------------------------------------------ #
+    def claim_search(self, query: str, rel_path: str, context_lines: int) -> bool:
+        """Klaim satu pencarian secara atomic.
+
+        Returns:
+            True bila pencarian (query, path, context_lines) SUDAH pernah
+            dijalankan (duplicate); False bila ini yang pertama (dan langsung
+            diklaim, sehingga request paralel identik tidak dobel).
+        """
+        key = (str(query), str(rel_path), int(context_lines))
+        with self._lock:
+            if key in self._searches:
+                return True
+            self._searches.add(key)
+            return False
+
+    def record_search(self, query: str, rel_path: str, context_lines: int) -> None:
+        """Catat pencarian (kompatibilitas; `claim_search` sudah mencatat)."""
+        key = (str(query), str(rel_path), int(context_lines))
+        with self._lock:
+            self._searches.add(key)
 
     # ------------------------------------------------------------------ #
     # Invalidation
     # ------------------------------------------------------------------ #
     def invalidate(self, rel_path: Optional[str]) -> None:
-        """Lupakan seluruh rentang untuk satu path (dipakai setelah mutasi file)."""
+        """Lupakan satu path (dipakai setelah mutasi file).
+
+        Selain rentang baca path tersebut, SELURUH hasil search dibuang
+        (konservatif: search bisa mencakup banyak file/project-wide, jadi setiap
+        mutasi file membuat hasil search berpotensi stale).
+        """
         if not rel_path:
             return
-        self._ranges.pop(rel_path, None)
+        with self._lock:
+            self._ranges.pop(rel_path, None)
+            self._covered.pop(rel_path, None)
+            self._sig.pop(rel_path, None)
+            self._searches.clear()
 
     def reset(self) -> None:
         """Kosongkan seluruh cache (scope tetap satu instance/task)."""
-        self._ranges.clear()
+        with self._lock:
+            self._ranges.clear()
+            self._covered.clear()
+            self._sig.clear()
+            self._searches.clear()
 
     def __len__(self) -> int:  # pragma: no cover - introspection
-        return sum(len(v) for v in self._ranges.values())
+        with self._lock:
+            return sum(len(v) for v in self._ranges.values())
 
 
-__all__ = ["ToolReadCache", "RangeKey"]
+__all__ = ["ToolReadCache", "RangeKey", "FileSignature"]

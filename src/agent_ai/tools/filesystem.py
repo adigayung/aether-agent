@@ -228,6 +228,32 @@ def _coerce_non_negative_int(value: Any, name: str, default: int = 0) -> int:
     return number
 
 
+def _coerce_cache_int(value: Any) -> tuple[Optional[int], bool]:
+    """Konversi nilai line-number untuk fast-path cache.
+
+    Returns:
+        (number, ok). `ok=False` berarti nilai TIDAK dapat dipakai untuk
+        fast-path cache (mis. string non-numerik) sehingga validasi normal
+        (yang akan melempar error yang tepat) harus dijalankan.
+    """
+    if value is None:
+        return None, True
+    if isinstance(value, bool):  # bool adalah subclass int; tolak eksplisit.
+        return None, False
+    if isinstance(value, int):
+        return value, True
+    if isinstance(value, float):
+        if value.is_integer():
+            return int(value), True
+        return None, False
+    if isinstance(value, str):
+        try:
+            return int(value.strip()), True
+        except ValueError:
+            return None, False
+    return None, False
+
+
 # Batas panjang potongan baris match pada search_code (locator-first).
 _MATCH_SNIPPET_LIMIT = 200
 
@@ -329,6 +355,7 @@ class ReadFileTool(BaseTool):
         - read_file(path, start_line, end_line) -> rentang baris 1-based inklusif.
     """
 
+
     name = "read_file"
     description = (
         "Membaca isi sebuah file. Ini cara utama membaca file (bukan cat/type). "
@@ -342,8 +369,9 @@ class ReadFileTool(BaseTool):
         "Opsional context_lines=N menambah N baris sebelum/sesudah symbol/range. "
         "mode='raw' -> hanya 'content' (tanpa duplikasi 'content_numbered'); "
         "mode='numbered' -> sertakan 'content_numbered' (prefix nomor baris). "
-        "Membaca ulang rentang yang sama dalam satu task dapat diringkas menjadi "
-        "penanda 'already_read' (pakai force=true untuk memaksa kirim ulang). "
+        "Membaca ulang rentang yang sama (atau rentang yang sudah TERCakup) dalam "
+        "satu task diringkas menjadi penanda 'already_available'/'already_read' "
+        "(pakai force=true untuk memaksa kirim ulang). "
         "Untuk melihat isi directory gunakan list_files; untuk mencari teks "
         "gunakan search_code."
     )
@@ -416,6 +444,59 @@ class ReadFileTool(BaseTool):
         except ValueError:
             return str(target)
 
+
+
+
+    @staticmethod
+    def _already_available_stub(
+        display_path: str,
+        key_path: str,
+        start: int,
+        end: int,
+        total_lines: int,
+    ) -> Dict[str, Any]:
+        """Stub eksplisit untuk LLM: source sudah tersedia, jangan reread.
+
+        Ditandai `already_read` (kompatibilitas) + `already_available` (sinyal
+        jelas) + `cache_hit` (observability). TIDAK memuat `content`.
+        """
+        return {
+            "path": display_path,
+            "start_line": start,
+            "end_line": end,
+            "total_lines": total_lines,
+            "already_read": True,
+            "already_available": True,
+            "cache_hit": True,
+            "message": (
+                "ALREADY_AVAILABLE: The requested source context "
+                f"({key_path}:{start}-{end}) is already available in the "
+                "conversation and the source has NOT changed. Do not request the "
+                "same file/range again; continue analysis using the existing "
+                "context. Pass force=true only if the content must be re-sent."
+            ),
+        }
+
+    def _cache_hit(
+        self,
+        cache: ToolReadCache,
+        key_path: str,
+        arguments: Dict[str, Any],
+        signature: tuple,
+    ) -> Optional[tuple]:
+        """Cek fast-path: (start, end, total_lines) bila range sudah tersedia."""
+        start, ok_start = _coerce_cache_int(arguments.get("start_line"))
+        end, ok_end = _coerce_cache_int(arguments.get("end_line"))
+        if not ok_start or not ok_end:
+            return None
+        if start is not None and start < 1:
+            return None
+        if end is not None and end < 1:
+            return None
+        if start is not None and end is not None and start > end:
+            return None
+        return cache.covered(key_path, start, end, signature)
+
     def _maybe_dedupe(
         self,
         key_path: str,
@@ -424,26 +505,19 @@ class ReadFileTool(BaseTool):
         end: int,
         total_lines: int,
         content: str,
+        signature: tuple,
         result: Dict[str, Any],
         force: bool,
     ) -> Dict[str, Any]:
-        """Kembalikan stub 'already_read' bila rentang sama sudah dikirim identik."""
+        """Stub 'already_available' bila konten rentang ini sudah dikirim identik."""
         cache = self._read_cache
         if cache is None:
             return result
         if not force and cache.is_duplicate(key_path, start, end, content):
-            return {
-                "path": display_path,
-                "start_line": start,
-                "end_line": end,
-                "total_lines": total_lines,
-                "already_read": True,
-                "message": (
-                    f"Already read: {key_path}:{start}-{end} (unchanged since an "
-                    "earlier read in this task). Pass force=true to re-send content."
-                ),
-            }
-        cache.record(key_path, start, end, content)
+            return self._already_available_stub(
+                display_path, key_path, start, end, total_lines
+            )
+        cache.record_read(key_path, start, end, signature, total_lines, content)
         return result
 
     def execute(self, **arguments: Any) -> Dict[str, Any]:
@@ -477,107 +551,147 @@ class ReadFileTool(BaseTool):
                 "Gunakan 'symbol' ATAU 'start_line'/'end_line', bukan keduanya."
             )
 
+
         target = _resolve_within_root(rel_path, self.root)
         if not target.exists():
             raise ToolExecutionError(f"File tidak ditemukan: {rel_path}")
         if not target.is_file():
             raise ToolValidationError(f"'{rel_path}' bukan sebuah file.")
 
-        size = target.stat().st_size
+        try:
+            stat = target.stat()
+        except OSError as exc:
+            raise ToolExecutionError(f"Gagal membaca file '{rel_path}': {exc}") from exc
+        size = stat.st_size
         if size > _DEFAULT_MAX_FILE_BYTES:
             raise ToolExecutionError(
                 f"File terlalu besar untuk dibaca ({size} bytes > {_DEFAULT_MAX_FILE_BYTES})."
             )
-
-        try:
-            text = target.read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:
-            raise ToolExecutionError(f"Gagal membaca file '{rel_path}': {exc}") from exc
-
-        lines = text.splitlines()
-        total_lines = len(lines)
+        # Signature murah (mtime+size): mendeteksi perubahan file TANPA membaca
+        # isinya -> memungkinkan skip physical read yang aman.
+        signature = (int(getattr(stat, "st_mtime_ns", 0)), int(size))
         key_path = self._rel_key(target)
 
-        # --- mode structure: outline tanpa body source ----------------------
-        if mode == "structure":
-            return structure_payload(key_path, text, total_lines)
+        cache = self._read_cache
+        # In-flight dedup: permintaan identik untuk path sama diserialkan,
+        # sehingga request paralel tidak melakukan physical read berkali-kali.
+        lock = cache.key_lock(key_path) if cache is not None else None
+        if lock is not None:
+            lock.acquire()
+        try:
+            # Fast path: rentang yang SUDAH tersedia (exact/covered) dikembalikan
+            # tanpa physical read, selama file belum berubah (signature sama).
+            if (
+                cache is not None
+                and not force
+                and symbol is None
+                and mode != "structure"
+            ):
+                hit = self._cache_hit(cache, key_path, arguments, signature)
+                if hit is not None:
+                    hit_start, hit_end, hit_total = hit
+                    return self._already_available_stub(
+                        rel_path, key_path, hit_start, hit_end, hit_total
+                    )
 
-        # --- symbol read ----------------------------------------------------
-        if symbol is not None:
-            matches = find_symbols(key_path, text, symbol)
-            if not matches:
+            try:
+                text = target.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
                 raise ToolExecutionError(
-                    f"Symbol '{symbol}' tidak ditemukan pada '{rel_path}'. "
-                    "Gunakan read_file(mode='structure') untuk melihat daftar symbol."
+                    f"Gagal membaca file '{rel_path}': {exc}"
+                ) from exc
+
+            lines = text.splitlines()
+            total_lines = len(lines)
+
+            # --- mode structure: outline tanpa body source ------------------
+            if mode == "structure":
+                return structure_payload(key_path, text, total_lines)
+
+            # --- symbol read ------------------------------------------------
+            if symbol is not None:
+                matches = find_symbols(key_path, text, symbol)
+                if not matches:
+                    raise ToolExecutionError(
+                        f"Symbol '{symbol}' tidak ditemukan pada '{rel_path}'. "
+                        "Gunakan read_file(mode='structure') untuk melihat daftar symbol."
+                    )
+                if len(matches) > 1:
+                    names = ", ".join(sorted(m.qualified_name for m in matches))
+                    raise ToolValidationError(
+                        f"Symbol '{symbol}' ambigu pada '{rel_path}' "
+                        f"({len(matches)} kandidat: {names}). Gunakan nama qualified "
+                        "seperti 'Class.method'."
+                    )
+                span = matches[0]
+                start_line = max(1, span.start_line - context_lines)
+                end_line = span.end_line + context_lines
+                if total_lines:
+                    end_line = min(end_line, total_lines)
+                end_line = max(start_line, end_line)
+                selected = lines[start_line - 1 : end_line]
+                content = "\n".join(selected)
+                result: Dict[str, Any] = {
+                    "path": rel_path,
+                    "symbol": span.to_dict(),
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "total_lines": total_lines,
+                    "content": content,
+                }
+                if context_lines:
+                    result["context_lines"] = context_lines
+                if mode == "numbered":
+                    result["content_numbered"] = format_numbered_lines(
+                        selected, start_line
+                    )
+                return self._maybe_dedupe(
+                    key_path, rel_path, start_line, end_line, total_lines, content,
+                    signature, result, force,
                 )
-            if len(matches) > 1:
-                names = ", ".join(sorted(m.qualified_name for m in matches))
-                raise ToolValidationError(
-                    f"Symbol '{symbol}' ambigu pada '{rel_path}' "
-                    f"({len(matches)} kandidat: {names}). Gunakan nama qualified "
-                    "seperti 'Class.method'."
+
+            # --- range / full-file read (perilaku lama) ---------------------
+            start_line, end_line = normalize_line_range(
+                arguments.get("start_line"),
+                arguments.get("end_line"),
+                total_lines,
+            )
+
+            if start_line is None:
+                # Tanpa range: perilaku lama (seluruh file) tidak berubah.
+                result = {
+                    "path": rel_path,
+                    "total_lines": total_lines,
+                    "content": text,
+                }
+                if mode == "numbered" and total_lines:
+                    result["content_numbered"] = format_numbered_lines(lines, 1)
+                return self._maybe_dedupe(
+                    key_path, rel_path, 1, total_lines, total_lines, text,
+                    signature, result, force,
                 )
-            span = matches[0]
-            start_line = max(1, span.start_line - context_lines)
-            end_line = span.end_line + context_lines
-            if total_lines:
-                end_line = min(end_line, total_lines)
-            end_line = max(start_line, end_line)
+
             selected = lines[start_line - 1 : end_line]
             content = "\n".join(selected)
-            result: Dict[str, Any] = {
+            result = {
                 "path": rel_path,
-                "symbol": span.to_dict(),
                 "start_line": start_line,
                 "end_line": end_line,
                 "total_lines": total_lines,
                 "content": content,
             }
-            if context_lines:
-                result["context_lines"] = context_lines
-            if mode == "numbered":
+            # Default (mode tidak disebut) mempertahankan perilaku lama: mode
+            # rentang menyertakan 'content_numbered'. mode='raw' menghilangkan
+            # duplikasi, mode='numbered' memaksanya.
+            if mode != "raw":
                 result["content_numbered"] = format_numbered_lines(selected, start_line)
             return self._maybe_dedupe(
-                key_path, rel_path, start_line, end_line, total_lines, content, result, force
+                key_path, rel_path, start_line, end_line, total_lines, content,
+                signature, result, force,
             )
-
-        # --- range / full-file read (perilaku lama) -------------------------
-        start_line, end_line = normalize_line_range(
-            arguments.get("start_line"),
-            arguments.get("end_line"),
-            total_lines,
-        )
-
-        if start_line is None:
-            # Tanpa range: perilaku lama (seluruh file) tidak berubah.
-            result = {
-                "path": rel_path,
-                "total_lines": total_lines,
-                "content": text,
-            }
-            if mode == "numbered" and total_lines:
-                result["content_numbered"] = format_numbered_lines(lines, 1)
-            return self._maybe_dedupe(
-                key_path, rel_path, 1, total_lines, total_lines, text, result, force
-            )
-
-        selected = lines[start_line - 1 : end_line]
-        content = "\n".join(selected)
-        result = {
-            "path": rel_path,
-            "start_line": start_line,
-            "end_line": end_line,
-            "total_lines": total_lines,
-            "content": content,
-        }
-        # Default (mode tidak disebut) mempertahankan perilaku lama: mode rentang
-        # menyertakan 'content_numbered'. mode='raw' menghilangkan duplikasi,
-        # mode='numbered' memaksanya.
-        if mode != "raw":
-            result["content_numbered"] = format_numbered_lines(selected, start_line)
-        return self._maybe_dedupe(
-            key_path, rel_path, start_line, end_line, total_lines, content, result, force
-        )
+        finally:
+            if lock is not None:
+                lock.release()
 
 
 class SearchCodeTool(BaseTool):
@@ -620,8 +734,16 @@ class SearchCodeTool(BaseTool):
         "required": ["query"],
     }
 
-    def __init__(self, root: Optional[Path] = None) -> None:
+
+    def __init__(
+        self,
+        root: Optional[Path] = None,
+        read_cache: Optional[ToolReadCache] = None,
+    ) -> None:
         self.root = Path(root) if root else _DEFAULT_ROOT
+        # Cache retrieval per task (dibuat oleh build_registry/build_consultant_
+        # registry). None = tanpa dedup search (backward compatible).
+        self._read_cache = read_cache
 
     def execute(self, **arguments: Any) -> Dict[str, Any]:
         query = arguments.get("query")
@@ -642,9 +764,30 @@ class SearchCodeTool(BaseTool):
             arguments.get("context_lines"), "context_lines", 0
         )
 
+
+
+
         base = _resolve_within_root(rel_path, self.root)
         if not base.exists():
             raise ToolExecutionError(f"Path tidak ditemukan: {rel_path}")
+
+        cache = self._read_cache
+        # Dedup: pencarian (query, scope, context_lines) identik untuk state
+        # source yang sama tidak dijalankan fisik dua kali dalam satu task.
+        if cache is not None and cache.claim_search(query, rel_path, context_lines):
+            return {
+                "query": query,
+                "path": rel_path,
+                "already_searched": True,
+                "search_dedup": True,
+                "message": (
+                    "ALREADY_SEARCHED: The same search_code(query, path) has "
+                    "already been performed for the current source state and its "
+                    "result is already in the conversation. Do NOT repeat it; use "
+                    "the previous result. Call search_code again only with a "
+                    "DIFFERENT query or scope."
+                ),
+            }
 
         root_resolved = self.root.resolve()
         matches: List[Dict[str, Any]] = []

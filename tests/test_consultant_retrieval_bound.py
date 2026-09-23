@@ -477,6 +477,7 @@ def test_g_investigation_still_allows_source_level_work(monkeypatch) -> None:
     atlas = FakeMapTool("atlas_query")  # hasil non-zero (bukan zero-result streak)
     rig = FakeMapTool("rig_query")
 
+
     monkeypatch.setattr(
         pm_mod,
         "build_project_map_tools",
@@ -486,8 +487,12 @@ def test_g_investigation_still_allows_source_level_work(monkeypatch) -> None:
             FakeMapTool("project_map_status"),
         ],
     )
-    monkeypatch.setattr(fs_mod, "SearchCodeTool", lambda root=None: search)
-    monkeypatch.setattr(fs_mod, "ReadFileTool", lambda root=None: read)
+    monkeypatch.setattr(
+        fs_mod, "SearchCodeTool", lambda root=None, read_cache=None: search
+    )
+    monkeypatch.setattr(
+        fs_mod, "ReadFileTool", lambda root=None, read_cache=None: read
+    )
     monkeypatch.setattr(fs_mod, "ListFilesTool", lambda root=None: listf)
 
     guard = ConsultantRetrievalGuard(mode=MODE_INVESTIGATE)
