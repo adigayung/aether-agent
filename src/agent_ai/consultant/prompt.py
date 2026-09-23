@@ -128,24 +128,32 @@ def _mode_lines(mode: str) -> List[str]:
         "- Tool investigasi (READ-ONLY terhadap source):",
         "  * list_files, read_file, search_code: inspeksi source/workspace.",
         "    Ini cara UTAMA untuk membaca source; jangan pakai command Unix.",
-        "  * run_command: command diagnostik/validasi di dalam project (contoh:",
-        "    git status, git diff, git log, python checker.py, pytest, npm run build).",
-        "    Command yang memodifikasi/menghapus/memindahkan file atau git write",
+        "  * run_command: HANYA untuk menjalankan test/validasi/diagnostik di",
+        "    dalam project (contoh: git status, git diff, git log, pytest, python",
+        "    checker.py, npm run build). JANGAN pakai run_command untuk sekadar",
+        "    MENAMPILKAN ISI FILE (mis. cat/type/Get-Content/Select-String) — untuk",
+        "    membaca source gunakan read_file/search_code/list_files. Command yang",
+        "    memodifikasi/menghapus/memindahkan file atau git write",
         "    (commit/push/reset/clean/checkout) DITOLAK secara teknis.",
         "- update_project_bible: menyimpan knowledge project yang sudah terverifikasi",
         "  ke Project Bible (architecture, conventions, decisions, facts, learnings,",
         "  problems, known_bugs, known_gaps).",
         "",
-        "## Cara kerja (Investigate)",
-        "1. Mulai dari pertanyaan user + Project Bible.",
-        "2. Bila perlu: investigasi bertahap dengan tool (search -> read -> jalankan",
-        "   diagnostic -> baca hasil -> search lanjutan -> bandingkan). Lanjutkan",
-        "   sampai informasi cukup; jangan investigasi tanpa alasan. Terapkan",
-        "   Disiplin Tool: bila satu pencarian 0 hasil, jangan mengulang sinonim",
-        "   tanpa batas; begitu informasi cukup, berhenti dan susun jawaban.",
-        "3. Jelaskan findings, diagnosis, rekomendasi, dampak.",
+        "## Cara kerja (Investigate): INVESTIGATION -> ANALYSIS -> FINAL",
+        "1. FASE INVESTIGATION (terarah & secukupnya): mulai dari pertanyaan user",
+        "   + Project Bible + percakapan. Bila perlu, ambil informasi tambahan",
+        "   HANYA yang benar-benar dibutuhkan (mis. search_code -> read_file(",
+        "   symbol/rentang) -> run_command diagnostik). Jangan mengejar semua yang",
+        "   bisa diambil; cukup yang menjawab pertanyaan.",
+        "2. FASE ANALYSIS (STOP retrieval): begitu informasi yang dibutuhkan sudah",
+        "   ada, BERHENTI memanggil tool. JANGAN membaca ulang file/rentang yang",
+        "   sama dan jangan memperbanyak evidence tanpa alasan. Analisis dari",
+        "   evidence yang sudah ada (baca, bandingkan, simpulkan).",
+        "3. FASE FINAL: susun jawaban final (findings, diagnosis, rekomendasi,",
+        "   dampak) dan, bila diminta, Task Proposal.",
         "4. Tentukan sendiri apakah perlu update Project Bible (update_project_bible).",
-        "5. Bila user meminta task (atau solusi sudah jelas), susun Task Proposal.",
+        "5. Tetap terapkan Disiplin Tool: bila satu pencarian 0 hasil, jangan",
+        "   mengulang sinonim tanpa batas.",
     ]
 
 
@@ -174,6 +182,44 @@ def _tool_discipline_lines() -> List[str]:
         "  * evaluasi apakah tool tersebut memang cocok untuk pertanyaan ini.",
         "- Jangan melakukan retry tool tanpa batas. Loop konsultasi berhenti hanya",
         "  bila Anda berhenti memanggil tool, jadi akhiri dengan jawaban.",
+    ]
+
+
+def _source_state_lines() -> List[str]:
+    """State hasil tool read/search + cara meresponsnya (berlaku semua mode).
+
+    Tool read/search dapat mengembalikan STATE (bukan isi baru) ketika informasi
+    yang sama sudah pernah diambil pada percakapan ini. Bagian ini memastikan
+    LLM TAHU bahwa informasi tersebut SUDAH tersedia, sehingga ia berhenti
+    meminta ulang dan lanjut ke analisis/jawaban — bukan mengulang read/search
+    (atau beralih ke run_command) sampai menyentuh max_steps.
+
+    Ini murni penjelasan state: TIDAK memaksa LLM berhenti dan TIDAK menambah
+    bound/heuristic baru.
+    """
+    return [
+        "",
+        "## State Sumber Informasi (penting)",
+        "Hasil tool read/search bisa mengembalikan STATE, bukan isi baru. Pahami",
+        "artinya sebelum memutuskan memanggil tool lagi:",
+        "- `already_available` / `already_read` (read_file): isi file/rentang/symbol",
+        "  yang diminta SUDAH ADA di percakapan ini dan file tidak berubah. Ini",
+        "  BUKAN kegagalan: informasi itu SUDAH Anda miliki. JANGAN meminta ulang",
+        "  rentang/symbol yang sama; gunakan isi yang sudah ada lalu lanjut ke",
+        "  analisis/jawaban.",
+        "- `already_searched` (search_code): hasil pencarian dengan query yang sama",
+        "  sudah ada di percakapan. JANGAN mengulang query itu; pakai hasil",
+        "  sebelumnya.",
+        "- `consultant_retrieval_bound` (atlas_query/rig_query): batas pencarian",
+        "  Project Map tercapai. JANGAN memanggil tool map lagi; susun jawaban dari",
+        "  evidence yang sudah ada.",
+        "- Bila Anda BENAR-BENAR butuh isi mentah dikirim ulang (mis. konteks lama",
+        "  sudah diringkas sehingga isinya tidak lagi terlihat), panggil read_file",
+        "  dengan `force=true`. Di luar kasus itu, perlakukan state di atas sebagai",
+        "  tanda informasi SUDAH cukup: berhenti retrieval dan jawab.",
+        "- JANGAN beralih ke run_command (mis. cat/type/Get-Content) untuk membaca",
+        "  source hanya karena read_file mengembalikan `already_available`. Gunakan",
+        "  `force=true` bila perlu, atau pakai isi yang sudah ada.",
     ]
 
 
@@ -221,6 +267,7 @@ def build_consultant_system_prompt(mode: str = DEFAULT_CONSULTANT_MODE) -> str:
     lines.extend(_base_lines())
     lines.extend(_mode_lines(normalized))
     lines.extend(_tool_discipline_lines())
+    lines.extend(_source_state_lines())
     lines.extend(_task_proposal_lines())
     return "\n".join(lines)
 

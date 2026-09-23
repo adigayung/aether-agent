@@ -189,14 +189,16 @@ class ConsultantRunCommandTool(RunCommandTool):
     name = "run_command"
     description = (
         "[Consultant] Menjalankan command DIAGNOSTIK/VALIDASI di dalam project "
-        "dan menangkap output (contoh: git status, git diff, git log, python "
-        "checker.py, pytest, npm run build). READ-ONLY terhadap source code: "
-        "command yang memodifikasi/menghapus/memindahkan file (del/rmdir/move/"
-        "ren/copy/mkdir/redirect '>') atau git write (commit/push/reset/clean/"
-        "checkout) DITOLAK. Pada Windows gunakan executable native (python, git, "
-        "node, pytest) atau CMD builtins; JANGAN pakai command Unix. Gunakan "
-        "search_code/read_file/list_files untuk inspeksi source. Gunakan cwd "
-        "untuk working directory; jangan pakai 'cd' di dalam command."
+        "dan menangkap output (contoh: git status, git diff, git log, pytest, "
+        "python checker.py, npm run build). INI BUKAN alat baca source: JANGAN "
+        "pakai run_command untuk menampilkan isi file (mis. cat/type/Get-Content/"
+        "Select-String) — untuk membaca source gunakan read_file/search_code/"
+        "list_files. READ-ONLY terhadap source code: command yang memodifikasi/"
+        "menghapus/memindahkan file (del/rmdir/move/ren/copy/mkdir/redirect '>') "
+        "atau git write (commit/push/reset/clean/checkout) DITOLAK. Pada Windows "
+        "gunakan executable native (python, git, node, pytest) atau CMD builtins; "
+        "JANGAN pakai command Unix. Gunakan cwd untuk working directory; jangan "
+        "pakai 'cd' di dalam command."
     )
 
     def execute(self, **arguments: Any) -> Dict[str, Any]:
