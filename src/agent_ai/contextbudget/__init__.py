@@ -28,6 +28,10 @@ from agent_ai.contextbudget.profiles import (
     RetrievalProfile,
 )
 from agent_ai.contextbudget.retrieval import IntelligentRetriever, RetrievedFile
+from agent_ai.contextbudget.tool_compaction import (
+    CompactedToolResult,
+    ToolResultCompactor,
+)
 
 __all__ = [
     "Budget",
@@ -45,4 +49,6 @@ __all__ = [
     "RetrievedFile",
     "ContextCompactor",
     "CompactContext",
+    "ToolResultCompactor",
+    "CompactedToolResult",
 ]

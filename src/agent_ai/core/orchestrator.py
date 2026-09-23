@@ -40,7 +40,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from agent_ai.core.cancel import CancellationToken
 from agent_ai.core.coding import CodingTask
@@ -120,6 +120,11 @@ class AgentOrchestrator:
         environment_context: Environment Context project-local (markdown dari
             `.aether/ENVIRONMENT.md`). Bila diisi, disisipkan sebagai system
             message pada awal session continuous loop. Disiapkan pemanggil.
+        context_budget_tokens: anggaran token untuk konteks percakapan
+            (system + task + history) pada continuous loop. Bila None, anggaran
+            diturunkan dari provider (`knowledge_budget_tokens`) atau config
+            context yang ada. Riwayat yang melebihi anggaran dipadatkan secara
+            DETERMINISTIK (tanpa LLM); task pendek tidak berubah.
     """
 
     def __init__(
@@ -138,6 +143,7 @@ class AgentOrchestrator:
         use_continuous_loop: bool = False,
         environment_context: Optional[str] = None,
         cancel_token: Optional[CancellationToken] = None,
+        context_budget_tokens: Optional[int] = None,
     ) -> None:
         self.provider = provider
         self.executor = executor or ToolExecutor()
@@ -172,6 +178,13 @@ class AgentOrchestrator:
         # setiap tool call) dan berhenti sebagai CANCELLED tanpa tool call baru.
         # Bukan sistem cancellation kedua: satu token dibagikan lintas layer.
         self.cancel_token = cancel_token
+        # Anggaran token untuk konteks percakapan (system + task + history).
+        # Bila None, anggaran diturunkan dari provider (context window) atau
+        # config context yang sudah ada; lihat `_context_budget_tokens()`.
+        # Dipakai runtime compaction continuous loop agar riwayat lama tidak
+        # dikirim mentah setiap round. None + fallback None = tanpa batas
+        # (perilaku lama).
+        self.context_budget_tokens = context_budget_tokens
 
     # ------------------------------------------------------------------ #
     # Tool definitions
@@ -332,6 +345,98 @@ class AgentOrchestrator:
         if not text:
             return None
         return Message(role="system", content=text)
+
+    # ------------------------------------------------------------------ #
+    # Runtime context compaction (hemat token tanpa kehilangan memori)
+    # ------------------------------------------------------------------ #
+    def _context_budget_tokens(self) -> Optional[int]:
+        """Anggaran token untuk daftar pesan (system + task + history).
+
+        Prioritas (memakai mekanisme yang SUDAH ada, tanpa angka liar):
+            1. Override eksplisit `context_budget_tokens`.
+            2. Anggaran yang dilaporkan provider (`knowledge_budget_tokens()`),
+               sehingga mengikuti context window provider yang terbatas.
+            3. Budget konteks yang sudah ada di config
+               (`settings.context.max_tokens`).
+
+        Returns:
+            Anggaran token pesan, atau None bila tidak diketahui (tanpa batas ->
+            perilaku lama: riwayat dikirim apa adanya).
+        """
+        explicit = self.context_budget_tokens
+        if explicit is not None:
+            value = int(explicit)
+            return value if value > 0 else None
+        provider_budget = self._knowledge_budget_tokens()
+        if provider_budget is not None:
+            return provider_budget
+        try:
+            from agent_ai.config.settings import settings
+
+            value = int(getattr(settings.context, "max_tokens", 0) or 0)
+        except Exception:  # noqa: BLE001 - budget opsional, jangan gagalkan task
+            return None
+        return value if value > 0 else None
+
+    def _tool_definitions_tokens(self, tools: List[ToolDefinition]) -> int:
+        """Estimasi token definisi tool (dikirim pada request yang sama).
+
+        Definisi tool ikut memakan context window, jadi diperhitungkan sebagai
+        overhead saat menentukan kompilasi pesan. Estimasi kasar (len/4),
+        konsisten dengan estimator konteks yang sudah ada.
+        """
+        total = 0
+        for tool in tools or []:
+            try:
+                payload = json.dumps(tool.to_dict(), ensure_ascii=False, default=str)
+            except Exception:  # noqa: BLE001 - estimasi tidak boleh gagalkan task
+                payload = getattr(tool, "name", "") or ""
+            total += max(1, len(payload) // _KNOWLEDGE_CHARS_PER_TOKEN)
+        return total
+
+    def _compile_context_messages(
+        self,
+        history: ConversationHistory,
+        tools: List[ToolDefinition],
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Kompilasi pesan ke format provider DENGAN runtime context compaction.
+
+        Bila anggaran token diketahui, riwayat yang panjang dipadatkan secara
+        DETERMINISTIK (tanpa LLM) sehingga request tidak lagi membawa seluruh
+        riwayat mentah setiap round. Task pendek (muat budget) dikembalikan APA
+        ADANYA -> perilaku lama tidak berubah. Detail yang dipadatkan dapat
+        diambil ulang oleh Agent lewat tool yang sudah ada.
+
+        Returns:
+            (messages, stats) -- messages siap kirim; stats ringkas (untuk
+            observability/verifikasi, tanpa isi konten) bila anggaran diketahui.
+        """
+        budget = self._context_budget_tokens()
+        if budget is None:
+            return history.to_provider_format(), {}
+
+        overhead = self._tool_definitions_tokens(tools)
+        before = history.estimate_tokens()
+        original = history.messages
+        compiled = history.compile_compacted_messages(
+            budget, overhead_tokens=overhead
+        )
+        after = history.estimate_messages_tokens(compiled)
+        tool_stats = ConversationHistory.tool_compaction_stats(original, compiled)
+        stats: Dict[str, Any] = {
+            "context_budget_tokens": int(budget),
+            "context_overhead_tokens": int(overhead),
+            "context_before_tokens": int(before),
+            "context_tokens": int(after),
+            "context_compacted": after < before,
+            # Ringkasan compaction hasil tool (tanpa isi konten): berapa tool
+            # result yang dipadatkan struktur + karakter yang dihemat.
+            "context_tool_results": int(tool_stats["tool_results"]),
+            "context_tool_compacted": int(tool_stats["tool_compacted"]),
+            "context_tool_raw_chars": int(tool_stats["tool_raw_chars"]),
+            "context_tool_compacted_chars": int(tool_stats["tool_compacted_chars"]),
+        }
+        return [message.to_provider_dict() for message in compiled], stats
 
     def _model_name(self) -> str:
         """Nama model aktif untuk logging. Tidak pernah secret.
@@ -1199,7 +1304,9 @@ class AgentOrchestrator:
                 )
                 break
 
-            messages = history.to_provider_format()
+            # Runtime context compaction: kirim konteks yang BOUNDED, bukan
+            # seluruh riwayat mentah. Task pendek dikembalikan apa adanya.
+            messages, context_stats = self._compile_context_messages(history, tools)
             emit_event(
                 self.event_sink,
                 "provider_request",
@@ -1208,6 +1315,7 @@ class AgentOrchestrator:
                     "model": self._model_name(),
                     "iteration": loop.iteration,
                     "tool_count": len(tools),
+                    **context_stats,
                 },
             )
             try:
