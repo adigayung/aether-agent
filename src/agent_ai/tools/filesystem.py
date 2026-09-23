@@ -18,6 +18,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent_ai.tools.base import BaseTool, ToolExecutionError, ToolValidationError
+from agent_ai.tools.read_cache import ToolReadCache
+from agent_ai.tools.source_symbols import (
+    enclosing_symbol,
+    extract_symbols,
+    find_symbols,
+    structure_payload,
+)
 
 # ---------------------------------------------------------------------------
 # Project root yang diizinkan untuk diakses tool.
@@ -189,6 +196,63 @@ def format_numbered_lines(lines: List[str], start_line: int) -> str:
     )
 
 
+def _coerce_non_negative_int(value: Any, name: str, default: int = 0) -> int:
+    """Konversi argumen menjadi integer >= 0 (atau `default` bila tidak diisi).
+
+    Raises:
+        ToolValidationError: bila nilai bukan integer >= 0.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):  # bool adalah subclass int; tolak eksplisit.
+        raise ToolValidationError(f"Argumen '{name}' harus integer >= 0, bukan boolean.")
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, float) and value.is_integer():
+        number = int(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        try:
+            number = int(text)
+        except ValueError:
+            raise ToolValidationError(
+                f"Argumen '{name}' harus berupa integer >= 0, bukan {value!r}."
+            ) from None
+    else:
+        raise ToolValidationError(
+            f"Argumen '{name}' harus berupa integer >= 0, bukan tipe "
+            f"{type(value).__name__}."
+        )
+    if number < 0:
+        raise ToolValidationError(f"Argumen '{name}' harus >= 0.")
+    return number
+
+
+# Batas panjang potongan baris match pada search_code (locator-first).
+_MATCH_SNIPPET_LIMIT = 200
+
+
+def _clip_match(line: str, query: str, limit: int = _MATCH_SNIPPET_LIMIT) -> str:
+    """Potong baris match agar tidak mengirim potongan source panjang.
+
+    Bila baris lebih panjang dari `limit`, jendela difokuskan di sekitar posisi
+    match sehingga token yang dicari tetap terlihat.
+    """
+    stripped = line.strip()
+    if len(stripped) <= limit:
+        return stripped
+    index = stripped.find(query)
+    if index < 0:
+        return stripped[: limit - 1] + "…"
+    half = max(0, (limit - len(query)) // 2)
+    start = max(0, index - half)
+    end = min(len(stripped), start + limit)
+    start = max(0, end - limit)
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(stripped) else ""
+    return f"{prefix}{stripped[start:end]}{suffix}"
+
+
 class ListFilesTool(BaseTool):
     """Daftar file/directory dalam sebuah directory (read-only).
 
@@ -251,25 +315,37 @@ class ListFilesTool(BaseTool):
 
 
 class ReadFileTool(BaseTool):
-    """Baca isi file (read-only), dengan optional line range.
+    """Baca isi file (read-only): seluruh file, rentang baris, symbol, atau struktur.
 
-    Ini adalah cara utama untuk membaca isi file.
-    Gunakan tool ini untuk membaca file, bukan run_command dengan cat/type.
+    Pola penggunaan yang disarankan (hemat context):
+
+        search_code  -> locate (file + line + symbol)
+        read_file(symbol=...) / read_file(start_line/end_line) -> inspect bagian yg tepat
+        read_file(mode="structure") -> outline file tanpa body source
+        edit_file    -> modify
+
+    Backward compatible:
+        - read_file(path)                    -> SELURUH file (perilaku lama).
+        - read_file(path, start_line, end_line) -> rentang baris 1-based inklusif.
     """
 
     name = "read_file"
     description = (
-        "Membaca isi sebuah file, opsional dengan rentang baris (1-based, inklusif). "
-        "Ini adalah cara utama untuk membaca isi file. "
+        "Membaca isi sebuah file. Ini cara utama membaca file (bukan cat/type). "
+        "PILIH mode paling hemat: "
+        "(1) read_file(path, symbol='nama') -> HANYA function/class/method itu "
+        "(pakai hasil search_code/atlas_query); error jelas bila symbol tak ada. "
+        "(2) read_file(path, start_line, end_line) -> rentang baris 1-based, inklusif. "
         "Tanpa start_line/end_line: membaca SELURUH file. "
-        "Hanya start_line: dari baris itu sampai akhir file. "
-        "Hanya end_line: dari awal file sampai baris itu. "
-        "Keduanya: hanya baris start_line..end_line. "
-        "Pada mode rentang, hasil juga memuat 'content_numbered' (setiap baris "
-        "diberi prefix nomor baris) sehingga lokasi baris dapat dipakai untuk "
-        "edit_file. Gunakan tool ini untuk membaca file, bukan run_command "
-        "dengan cat/type. Untuk melihat isi directory, gunakan list_files. "
-        "Untuk mencari teks dalam file, gunakan search_code."
+        "(3) read_file(path, mode='structure') -> outline (class/function + line) "
+        "tanpa body source, lalu pilih symbol untuk dibaca. "
+        "Opsional context_lines=N menambah N baris sebelum/sesudah symbol/range. "
+        "mode='raw' -> hanya 'content' (tanpa duplikasi 'content_numbered'); "
+        "mode='numbered' -> sertakan 'content_numbered' (prefix nomor baris). "
+        "Membaca ulang rentang yang sama dalam satu task dapat diringkas menjadi "
+        "penanda 'already_read' (pakai force=true untuk memaksa kirim ulang). "
+        "Untuk melihat isi directory gunakan list_files; untuk mencari teks "
+        "gunakan search_code."
     )
     input_schema = {
         "type": "object",
@@ -287,17 +363,119 @@ class ReadFileTool(BaseTool):
                     "Baris akhir (1-based, inklusif). Kosong = sampai akhir file."
                 ),
             },
+            "symbol": {
+                "type": "string",
+                "description": (
+                    "Baca HANYA symbol (function/class/method) ini. Gunakan "
+                    "'Class.method' bila ambigu. Tidak dapat digabung dengan "
+                    "start_line/end_line."
+                ),
+            },
+            "context_lines": {
+                "type": "integer",
+                "description": (
+                    "Jumlah baris konteks sebelum/sesudah symbol atau rentang "
+                    "(default 0 = tanpa konteks tambahan)."
+                ),
+            },
+            "mode": {
+                "type": "string",
+                "description": (
+                    "Salah satu: 'raw' (hanya content), 'numbered' (content + "
+                    "content_numbered), 'structure' (outline file tanpa body)."
+                ),
+            },
+            "force": {
+                "type": "boolean",
+                "description": (
+                    "True untuk mengabaikan deteksi duplicate-read dan tetap "
+                    "mengirim source."
+                ),
+            },
         },
         "required": ["path"],
     }
 
-    def __init__(self, root: Optional[Path] = None) -> None:
+    #: Mode valid untuk argumen `mode`.
+    _VALID_MODES = ("raw", "numbered", "structure")
+
+    def __init__(
+        self,
+        root: Optional[Path] = None,
+        read_cache: Optional[ToolReadCache] = None,
+    ) -> None:
         self.root = Path(root) if root else _DEFAULT_ROOT
+        # Cache duplicate-read. Hanya aktif bila diberikan (per task/session,
+        # dibuat oleh build_registry). None = tanpa dedup (backward compatible).
+        self._read_cache = read_cache
+
+    def _rel_key(self, target: Path) -> str:
+        """Path relatif (posix) untuk kunci cache/pesan."""
+        try:
+            return target.resolve().relative_to(self.root.resolve()).as_posix()
+        except ValueError:
+            return str(target)
+
+    def _maybe_dedupe(
+        self,
+        key_path: str,
+        display_path: str,
+        start: int,
+        end: int,
+        total_lines: int,
+        content: str,
+        result: Dict[str, Any],
+        force: bool,
+    ) -> Dict[str, Any]:
+        """Kembalikan stub 'already_read' bila rentang sama sudah dikirim identik."""
+        cache = self._read_cache
+        if cache is None:
+            return result
+        if not force and cache.is_duplicate(key_path, start, end, content):
+            return {
+                "path": display_path,
+                "start_line": start,
+                "end_line": end,
+                "total_lines": total_lines,
+                "already_read": True,
+                "message": (
+                    f"Already read: {key_path}:{start}-{end} (unchanged since an "
+                    "earlier read in this task). Pass force=true to re-send content."
+                ),
+            }
+        cache.record(key_path, start, end, content)
+        return result
 
     def execute(self, **arguments: Any) -> Dict[str, Any]:
         rel_path = arguments.get("path")
         if not rel_path:
             raise ToolValidationError("Argumen 'path' wajib diisi.")
+
+        mode = arguments.get("mode")
+        if mode is not None:
+            if not isinstance(mode, str) or mode.strip().lower() not in self._VALID_MODES:
+                raise ToolValidationError(
+                    "Argumen 'mode' harus salah satu dari: raw, numbered, structure."
+                )
+            mode = mode.strip().lower()
+
+        symbol = arguments.get("symbol")
+        if symbol is not None and (not isinstance(symbol, str) or not symbol.strip()):
+            raise ToolValidationError("Argumen 'symbol' harus berupa string tak kosong.")
+        symbol = symbol.strip() if isinstance(symbol, str) else None
+
+        context_lines = _coerce_non_negative_int(
+            arguments.get("context_lines"), "context_lines", 0
+        )
+        force = bool(arguments.get("force", False))
+
+        if symbol is not None and (
+            arguments.get("start_line") is not None
+            or arguments.get("end_line") is not None
+        ):
+            raise ToolValidationError(
+                "Gunakan 'symbol' ATAU 'start_line'/'end_line', bukan keduanya."
+            )
 
         target = _resolve_within_root(rel_path, self.root)
         if not target.exists():
@@ -318,7 +496,52 @@ class ReadFileTool(BaseTool):
 
         lines = text.splitlines()
         total_lines = len(lines)
+        key_path = self._rel_key(target)
 
+        # --- mode structure: outline tanpa body source ----------------------
+        if mode == "structure":
+            return structure_payload(key_path, text, total_lines)
+
+        # --- symbol read ----------------------------------------------------
+        if symbol is not None:
+            matches = find_symbols(key_path, text, symbol)
+            if not matches:
+                raise ToolExecutionError(
+                    f"Symbol '{symbol}' tidak ditemukan pada '{rel_path}'. "
+                    "Gunakan read_file(mode='structure') untuk melihat daftar symbol."
+                )
+            if len(matches) > 1:
+                names = ", ".join(sorted(m.qualified_name for m in matches))
+                raise ToolValidationError(
+                    f"Symbol '{symbol}' ambigu pada '{rel_path}' "
+                    f"({len(matches)} kandidat: {names}). Gunakan nama qualified "
+                    "seperti 'Class.method'."
+                )
+            span = matches[0]
+            start_line = max(1, span.start_line - context_lines)
+            end_line = span.end_line + context_lines
+            if total_lines:
+                end_line = min(end_line, total_lines)
+            end_line = max(start_line, end_line)
+            selected = lines[start_line - 1 : end_line]
+            content = "\n".join(selected)
+            result: Dict[str, Any] = {
+                "path": rel_path,
+                "symbol": span.to_dict(),
+                "start_line": start_line,
+                "end_line": end_line,
+                "total_lines": total_lines,
+                "content": content,
+            }
+            if context_lines:
+                result["context_lines"] = context_lines
+            if mode == "numbered":
+                result["content_numbered"] = format_numbered_lines(selected, start_line)
+            return self._maybe_dedupe(
+                key_path, rel_path, start_line, end_line, total_lines, content, result, force
+            )
+
+        # --- range / full-file read (perilaku lama) -------------------------
         start_line, end_line = normalize_line_range(
             arguments.get("start_line"),
             arguments.get("end_line"),
@@ -327,37 +550,58 @@ class ReadFileTool(BaseTool):
 
         if start_line is None:
             # Tanpa range: perilaku lama (seluruh file) tidak berubah.
-            return {
+            result = {
                 "path": rel_path,
                 "total_lines": total_lines,
                 "content": text,
             }
+            if mode == "numbered" and total_lines:
+                result["content_numbered"] = format_numbered_lines(lines, 1)
+            return self._maybe_dedupe(
+                key_path, rel_path, 1, total_lines, total_lines, text, result, force
+            )
 
         selected = lines[start_line - 1 : end_line]
-        return {
+        content = "\n".join(selected)
+        result = {
             "path": rel_path,
             "start_line": start_line,
             "end_line": end_line,
             "total_lines": total_lines,
-            "content": "\n".join(selected),
-            "content_numbered": format_numbered_lines(selected, start_line),
+            "content": content,
         }
+        # Default (mode tidak disebut) mempertahankan perilaku lama: mode rentang
+        # menyertakan 'content_numbered'. mode='raw' menghilangkan duplikasi,
+        # mode='numbered' memaksanya.
+        if mode != "raw":
+            result["content_numbered"] = format_numbered_lines(selected, start_line)
+        return self._maybe_dedupe(
+            key_path, rel_path, start_line, end_line, total_lines, content, result, force
+        )
 
 
 class SearchCodeTool(BaseTool):
-    """Cari teks di file dalam project root (read-only).
+    """Cari teks di file dalam project root (read-only, LOCATOR-FIRST).
 
     Ini adalah cara utama untuk mencari source code di dalam project.
     Gunakan tool ini untuk inspeksi kode, bukan run_command dengan find/grep.
+
+    Default (locator-first): tiap match hanya memuat lokasi ringkas
+    (file, line, potongan match terbatas, dan symbol induk bila tersedia) —
+    BUKAN potongan source panjang. Setelah menemukan lokasi, baca bagian yang
+    tepat via read_file(symbol=...) atau read_file(start_line/end_line).
     """
 
     name = "search_code"
     description = (
-        "Mencari teks pada file di dalam project root. "
-        "Ini adalah cara utama untuk mencari source code. "
-        "Gunakan tool ini untuk inspeksi kode, bukan run_command dengan find/grep. "
-        "Untuk membaca file, gunakan read_file. "
-        "Untuk melihat isi directory, gunakan list_files."
+        "Mencari teks pada file di dalam project root (locator-first: hanya "
+        "lokasi + potongan pendek, bukan source panjang). Ini cara utama "
+        "mencari source code (bukan find/grep). Setiap match memuat 'file', "
+        "'line', 'text' (dipotong), dan 'symbol' induk bila terdeteksi. "
+        "Alur yang disarankan: search_code -> read_file(symbol=...) -> "
+        "edit_file. Tambahkan context_lines=N bila butuh sedikit potongan "
+        "sekitar match. Untuk membaca file gunakan read_file; untuk melihat "
+        "isi directory gunakan list_files."
     )
     input_schema = {
         "type": "object",
@@ -365,6 +609,13 @@ class SearchCodeTool(BaseTool):
             "query": {"type": "string", "description": "Teks yang dicari."},
             "path": {"type": "string", "description": "Sub-path relatif terhadap project root."},
             "max_results": {"type": "integer", "description": "Batas jumlah hasil."},
+            "context_lines": {
+                "type": "integer",
+                "description": (
+                    "Opsional. Bila > 0, sertakan 'snippet' N baris sebelum/"
+                    "sesudah tiap match (default 0 = hanya lokasi)."
+                ),
+            },
         },
         "required": ["query"],
     }
@@ -378,14 +629,45 @@ class SearchCodeTool(BaseTool):
             raise ToolValidationError("Argumen 'query' wajib diisi.")
 
         rel_path = arguments.get("path", ".") or "."
-        max_results = int(arguments.get("max_results", _DEFAULT_MAX_RESULTS))
+        if arguments.get("max_results") is None:
+            max_results = _DEFAULT_MAX_RESULTS
+        else:
+            try:
+                max_results = int(arguments.get("max_results"))
+            except (TypeError, ValueError):
+                raise ToolValidationError(
+                    "Argumen 'max_results' harus berupa integer."
+                ) from None
+        context_lines = _coerce_non_negative_int(
+            arguments.get("context_lines"), "context_lines", 0
+        )
 
         base = _resolve_within_root(rel_path, self.root)
         if not base.exists():
             raise ToolExecutionError(f"Path tidak ditemukan: {rel_path}")
 
+        root_resolved = self.root.resolve()
         matches: List[Dict[str, Any]] = []
         truncated = False
+        # Cache symbol per file (dihitung sekali, hanya untuk file yang match).
+        spans_by_file: Dict[str, List[Any]] = {}
+
+        def _symbol_of(rel_file: str, text: str, lineno: int) -> Optional[str]:
+            spans = spans_by_file.get(rel_file)
+            if spans is None:
+                # Guard: file sangat besar dilewati (anotasi best-effort saja).
+                if len(text) > _DEFAULT_MAX_FILE_BYTES:
+                    spans = []
+                else:
+                    try:
+                        spans = extract_symbols(rel_file, text)
+                    except Exception:  # noqa: BLE001 - anotasi bersifat best-effort
+                        spans = []
+                spans_by_file[rel_file] = spans
+            if not spans:
+                return None
+            span = enclosing_symbol(spans, lineno)
+            return span.qualified_name if span is not None else None
 
         files = [base] if base.is_file() else _iter_files(base)
         for file_path in files:
@@ -396,23 +678,38 @@ class SearchCodeTool(BaseTool):
                 text = file_path.read_text(encoding="utf-8", errors="replace")
             except (OSError, UnicodeError):
                 continue
-            for lineno, line in enumerate(text.splitlines(), start=1):
-                if query in line:
-                    matches.append(
-                        {
-                            "file": str(file_path.relative_to(self.root.resolve())),
-                            "line": lineno,
-                            "text": line.strip(),
-                        }
-                    )
-                    if len(matches) >= max_results:
-                        truncated = True
-                        break
+            lines = text.splitlines()
+            try:
+                rel_file = str(file_path.relative_to(root_resolved))
+            except ValueError:
+                rel_file = str(file_path)
+            for lineno, line in enumerate(lines, start=1):
+                if query not in line:
+                    continue
+                match: Dict[str, Any] = {
+                    "file": rel_file,
+                    "line": lineno,
+                    "text": _clip_match(line, query),
+                }
+                symbol_name = _symbol_of(rel_file, text, lineno)
+                if symbol_name:
+                    match["symbol"] = symbol_name
+                if context_lines > 0:
+                    start = max(1, lineno - context_lines)
+                    end = min(len(lines), lineno + context_lines)
+                    match["snippet"] = "\n".join(lines[start - 1 : end])
+                matches.append(match)
+                if len(matches) >= max_results:
+                    truncated = True
+                    break
 
-        return {
+        result: Dict[str, Any] = {
             "query": query,
             "path": rel_path,
             "count": len(matches),
             "truncated": truncated,
             "matches": matches,
         }
+        if context_lines > 0:
+            result["context_lines"] = context_lines
+        return result

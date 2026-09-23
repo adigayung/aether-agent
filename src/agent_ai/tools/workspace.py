@@ -169,9 +169,27 @@ class _WorkspaceChangeTool(BaseTool):
         self,
         root: Optional[Path] = None,
         change_sink: Optional[ChangeSink] = None,
+        read_cache: "Any | None" = None,
     ) -> None:
         self.root = Path(root) if root else _DEFAULT_ROOT
         self._change_sink = change_sink
+        # Cache duplicate-read (opsional). Bila ada, setiap mutasi file
+        # menginvalidasi rentang baca yang tercatat untuk path tersebut agar
+        # read_file berikutnya mengirim source TERBARU (bukan "already_read").
+        self._read_cache = read_cache
+
+    def _invalidate_read_cache(self, *paths: Any) -> None:
+        """Lupakan rentang baca tercatat untuk path yang baru dimutasi."""
+        cache = self._read_cache
+        if cache is None:
+            return
+        for path in paths:
+            rel = self._to_rel(path)
+            if rel:
+                try:
+                    cache.invalidate(rel)
+                except Exception:  # noqa: BLE001 - cache tidak boleh gagalkan operasi
+                    pass
 
     def _to_rel(self, path: Any) -> str:
         """Normalisasi path menjadi relative terhadap workspace root (posix)."""
@@ -243,8 +261,9 @@ class WriteFileTool(_WorkspaceChangeTool):
         self,
         root: Optional[Path] = None,
         change_sink: Optional[ChangeSink] = None,
+        read_cache: "Any | None" = None,
     ) -> None:
-        super().__init__(root=root, change_sink=change_sink)
+        super().__init__(root=root, change_sink=change_sink, read_cache=read_cache)
 
     def execute(self, **arguments: Any) -> Dict[str, Any]:
         rel_path = arguments.get("path")
@@ -278,8 +297,15 @@ class WriteFileTool(_WorkspaceChangeTool):
             before=before,
             after=after,
         )
+        # Source berubah: baca ulang berikutnya harus mengirim konten baru.
+        self._invalidate_read_cache(rel_path)
 
-        return {"path": rel_path, "bytes": target.stat().st_size, "written": True}
+        return {
+            "path": rel_path,
+            "bytes": target.stat().st_size,
+            "written": True,
+            "changed": True,
+        }
 
 
 class EditFileTool(_WorkspaceChangeTool):
@@ -335,8 +361,9 @@ class EditFileTool(_WorkspaceChangeTool):
         self,
         root: Optional[Path] = None,
         change_sink: Optional[ChangeSink] = None,
+        read_cache: "Any | None" = None,
     ) -> None:
-        super().__init__(root=root, change_sink=change_sink)
+        super().__init__(root=root, change_sink=change_sink, read_cache=read_cache)
 
     def execute(self, **arguments: Any) -> Dict[str, Any]:
         rel_path = arguments.get("path")
@@ -407,8 +434,23 @@ class EditFileTool(_WorkspaceChangeTool):
             after = new_content.encode("utf-8")
         # Live event HANYA setelah edit benar-benar berhasil.
         self._emit_change(path=rel_path, kind="modified", before=before, after=after)
+        # Source berubah: baca ulang berikutnya harus mengirim konten baru
+        # (bukan "already_read"), sehingga Agent TIDAK dipaksa re-read.
+        self._invalidate_read_cache(rel_path)
 
-        result: Dict[str, Any] = {"path": rel_path, "replaced": 1, "edited": True}
+        # Hasil edit memberi cukup info (file, rentang baris yang berubah,
+        # status) agar Agent tidak perlu read_file hanya untuk tahu edit sukses.
+        changed_start = text.count("\n", 0, index) + 1
+        changed_line_count = str(arguments["new_text"]).count("\n") + 1
+        total_lines = len(new_content.splitlines())
+        result: Dict[str, Any] = {
+            "path": rel_path,
+            "replaced": 1,
+            "edited": True,
+            "changed_start_line": changed_start,
+            "changed_end_line": changed_start + changed_line_count - 1,
+            "total_lines": total_lines,
+        }
         if start_line is not None:
             result["start_line"] = start_line
             result["end_line"] = end_line
@@ -432,8 +474,9 @@ class DeleteFileTool(_WorkspaceChangeTool):
         self,
         root: Optional[Path] = None,
         change_sink: Optional[ChangeSink] = None,
+        read_cache: "Any | None" = None,
     ) -> None:
-        super().__init__(root=root, change_sink=change_sink)
+        super().__init__(root=root, change_sink=change_sink, read_cache=read_cache)
 
     def execute(self, **arguments: Any) -> Dict[str, Any]:
         rel_path = arguments.get("path")
@@ -466,6 +509,7 @@ class DeleteFileTool(_WorkspaceChangeTool):
             before=before,
             after=None,
         )
+        self._invalidate_read_cache(rel_path)
 
         return {"path": rel_path, "type": kind, "deleted": True}
 
@@ -488,8 +532,9 @@ class MoveFileTool(_WorkspaceChangeTool):
         self,
         root: Optional[Path] = None,
         change_sink: Optional[ChangeSink] = None,
+        read_cache: "Any | None" = None,
     ) -> None:
-        super().__init__(root=root, change_sink=change_sink)
+        super().__init__(root=root, change_sink=change_sink, read_cache=read_cache)
 
     def execute(self, **arguments: Any) -> Dict[str, Any]:
         source = arguments.get("source")
@@ -526,5 +571,6 @@ class MoveFileTool(_WorkspaceChangeTool):
             kind="moved",
             old_path=source,
         )
+        self._invalidate_read_cache(source, destination)
 
         return {"source": source, "destination": destination, "moved": True}

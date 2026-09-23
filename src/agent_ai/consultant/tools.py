@@ -401,6 +401,9 @@ def build_consultant_registry(
             SearchCodeTool,
         )
 
+        # Catatan: read_file/search_code Consultant memakai default tool (tanpa
+        # read_cache) agar behavior Consultant TIDAK berubah. Optimasi
+        # duplicate-read di-scope ke registry Agent (per task).
         registry.register(ListFilesTool(root=resolved))
         registry.register(ReadFileTool(root=resolved))
         registry.register(SearchCodeTool(root=resolved))

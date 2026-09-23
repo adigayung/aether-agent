@@ -100,11 +100,16 @@ class ToolRegistry:
 # ---------------------------------------------------------------------------
 registry = ToolRegistry()
 
+#: Sentinel: "buat ToolReadCache baru" (per-task default). Bila pemanggil
+#: mengirim `read_cache=None` eksplisit, dedup duplicate-read DIMATIKAN.
+_AUTO_READ_CACHE = object()
+
 
 def build_registry(
     root: "Path | None" = None,
     change_sink: "Callable[[dict], None] | None" = None,
     cancel_token: "Any | None" = None,
+    read_cache: "Any" = _AUTO_READ_CACHE,
 ) -> ToolRegistry:
     """Bangun ToolRegistry dengan semua tool bawaan.
 
@@ -123,6 +128,11 @@ def build_registry(
             Diteruskan ke `run_command` agar proses yang sedang berjalan dapat
             dihentikan saat user Stop (bukan hanya menunggu timeout). Bila None,
             perilaku run_command persis seperti sebelumnya.
+        read_cache: cache duplicate-read opsional (ToolReadCache). Default
+            (sentinel internal) = buat instance BARU per build_registry, sehingga
+            dedup read_file ter-scope per task/session (build_registry dipanggil
+            per task). Kirim `None` eksplisit untuk MEMATIKAN dedup (dipakai
+            untuk registry global; agar tidak ada cache lintas task).
 
     Returns:
         ToolRegistry baru berisi seluruh tool bawaan.
@@ -142,6 +152,7 @@ def build_registry(
         SearchCodeTool,
     )
     from agent_ai.tools.project_map import build_project_map_tools
+    from agent_ai.tools.read_cache import ToolReadCache
     from agent_ai.tools.terminal import RunCommandTool
     from agent_ai.tools.workspace import (
         DeleteFileTool,
@@ -151,14 +162,19 @@ def build_registry(
     )
 
     resolved = _Path(root) if root is not None else None
+    # Cache duplicate-read: SATU instance per build_registry (= per task), dibagi
+    # antara ReadFileTool (yang mengisi) dan tool mutasi (yang menginvalidasi).
+    # Scope task-scoped, bukan singleton global.
+    if read_cache is _AUTO_READ_CACHE:
+        read_cache = ToolReadCache()
     reg = ToolRegistry()
     reg.register(ListFilesTool(root=resolved))
-    reg.register(ReadFileTool(root=resolved))
+    reg.register(ReadFileTool(root=resolved, read_cache=read_cache))
     reg.register(SearchCodeTool(root=resolved))
-    reg.register(WriteFileTool(root=resolved, change_sink=change_sink))
-    reg.register(EditFileTool(root=resolved, change_sink=change_sink))
-    reg.register(DeleteFileTool(root=resolved, change_sink=change_sink))
-    reg.register(MoveFileTool(root=resolved, change_sink=change_sink))
+    reg.register(WriteFileTool(root=resolved, change_sink=change_sink, read_cache=read_cache))
+    reg.register(EditFileTool(root=resolved, change_sink=change_sink, read_cache=read_cache))
+    reg.register(DeleteFileTool(root=resolved, change_sink=change_sink, read_cache=read_cache))
+    reg.register(MoveFileTool(root=resolved, change_sink=change_sink, read_cache=read_cache))
     reg.register(RunCommandTool(root=resolved, cancel_token=cancel_token))
     # Project Map (Agent): termasuk refresh_project_map (Agent-only).
     for tool in build_project_map_tools(root=resolved, include_refresh=True):
@@ -167,6 +183,8 @@ def build_registry(
 
 
 # Daftarkan tool bawaan ke registry global (default root = project AETHER).
-for _tool in build_registry()._tools.values():  # noqa: SLF001 - internal init
+# read_cache=None -> dedup duplicate-read DIMATIKAN untuk registry global agar
+# tidak ada cache read lintas task yang bocor antar task fallback.
+for _tool in build_registry(read_cache=None)._tools.values():  # noqa: SLF001 - internal init
     registry.register(_tool)
 
