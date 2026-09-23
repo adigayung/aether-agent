@@ -343,7 +343,7 @@ def check_atlas() -> None:
     payload_keys = set(result.keys())
     _expect(
         payload_keys
-        <= {"query", "kind", "total", "returned", "truncated", "results", "message", "map_status"},
+        <= {"query", "kind", "total", "returned", "truncated", "results", "message", "map_status", "hint"},
         "payload query tidak boleh memuat dump map; keys={}".format(sorted(payload_keys)),
     )
     _expect(
@@ -412,6 +412,25 @@ def check_atlas() -> None:
     direct = AtlasMapQuery(data).query("AgentRuntime.run")
     _expect(direct["total"] >= 1, "adapter langsung harus bekerja")
     print("(10) AtlasMapQuery(data).query() : OK")
+
+    # (11) Konsep yang TIDAK ter-index (mis. 'safeguard') -> 0 hasil + sinyal jelas
+    #      bahwa Atlas adalah lookup map/index, BUKAN pencarian full-text source.
+    concept = atlas_query(service, FIXTURE, "safeguard")
+    _expect(concept["total"] == 0 and concept["results"] == [], "query konsep harus 0 hasil")
+    _expect(bool(concept.get("message")), "0 hasil harus memberi message")
+    msg = str(concept.get("message", "")).lower()
+    _expect(
+        "full-text" in msg,
+        "message 0 hasil harus menyatakan Atlas BUKAN full-text source",
+    )
+    hint = str(concept.get("hint", ""))
+    _expect(bool(hint), "0 hasil harus memberi hint actionable")
+    low = hint.lower()
+    _expect("tidak ditemukan" in low, "hint harus menyatakan tidak ditemukan di Project Map")
+    _expect("full-text" in low, "hint harus menegaskan bukan full-text source")
+    _expect("mengulang" in low, "hint harus mencegah retry/sinonim tanpa batas")
+    _expect("safeguard" not in low, "hint tidak boleh menyuruh mencari sinonim 'safeguard'")
+    print("(11) konsep tak ter-index ('safeguard') -> 0 hasil + sinyal bukan full-text : OK")
 
 
 def check_rig() -> None:
@@ -496,7 +515,7 @@ def check_rig() -> None:
     keys = set(result.keys())
     _expect(
         keys
-        <= {"query", "kind", "relation", "total", "returned", "truncated", "results", "message", "map_status"},
+        <= {"query", "kind", "relation", "total", "returned", "truncated", "results", "message", "map_status", "hint"},
         "payload RIG tidak boleh memuat dump graph; keys={}".format(sorted(keys)),
     )
     _expect(
@@ -515,6 +534,26 @@ def check_rig() -> None:
     direct = RigMapQuery(data).query("AgentRuntime.run", relation="callers")
     _expect(direct["total"] >= 1, "adapter RIG langsung harus bekerja")
     print("(11) RigMapQuery(data).query() : OK")
+
+    # (12) RIG tanpa match -> 0 hasil + penjelasan lookup graph (callers/callees/
+    #      relationship), BUKAN pencarian full-text isi source.
+    none = rig_query(service, FIXTURE, "safeguard")
+    _expect(none["total"] == 0 and none["results"] == [], "query RIG tak ada harus 0")
+    _expect(bool(none.get("message")), "0 hasil RIG harus memberi message")
+    _expect(
+        "full-text" in str(none.get("message", "")).lower(),
+        "message RIG 0 hasil harus menyatakan bukan full-text",
+    )
+    rhint = str(none.get("hint", ""))
+    _expect(bool(rhint), "0 hasil RIG harus memberi hint")
+    rlow = rhint.lower()
+    _expect(
+        "relationship" in rlow,
+        "hint RIG harus menyatakan relationship/graph lookup tidak ditemukan",
+    )
+    _expect("full-text" in rlow, "hint RIG harus menyatakan bukan full-text source")
+    _expect("mengulang" in rlow, "hint RIG harus mencegah retry/sinonim tanpa batas")
+    print("(12) RIG tanpa match -> 0 hasil + penjelasan graph lookup : OK")
 
 
 def check_status() -> None:
@@ -656,11 +695,79 @@ def check_engine_best_effort() -> None:
     )
 
 
+def check_result_hints() -> None:
+    print()
+    print("-- Hint hasil (stale & backward compatibility) --")
+    service = ProjectMapService()
+
+    # (1) map_status stale TETAP terlihat + hint ringkas (BUKAN error, bukan
+    #     dorongan retry tanpa batas). Fixture tulisan-tangan tanpa meta.json
+    #     selalu stale.
+    stale = atlas_query(service, FIXTURE, "TaskExecutor")
+    _expect(stale["total"] >= 1, "query fixture harus punya hasil")
+    _expect("map_status" in stale, "map_status tidak boleh disembunyikan")
+    _expect(stale["map_status"] == "stale", "fixture tanpa meta harus stale")
+    hint = str(stale.get("hint", ""))
+    _expect(bool(hint), "map stale harus memberi hint")
+    low = hint.lower()
+    _expect("stale" in low, "hint harus menyebut stale")
+    _expect(
+        "bukan sebagai error" in low or "bukan error" in low,
+        "hint harus menegaskan stale BUKAN error",
+    )
+    _expect("keterbatasan" in low, "hint harus menyatakan hasil berketerbatasan")
+    _expect(
+        "mengulang" in low,
+        "hint harus melarang mengulang query/sinonim tanpa batas",
+    )
+    print("(1) map_status stale terlihat + hint keterbatasan (bukan error) : OK")
+
+    rig_stale = rig_query(service, FIXTURE, "TaskExecutor")
+    _expect(rig_stale["map_status"] == "stale", "rig fixture harus stale")
+    _expect(bool(rig_stale.get("hint")), "rig stale harus memberi hint")
+    print("(2) rig_query stale juga memberi hint : OK")
+
+    # (3) Backward compatibility: field existing tetap ada + invariant konsisten.
+    payloads = (
+        ("atlas_query", atlas_query(service, FIXTURE, "TaskExecutor.execute")),
+        ("rig_query", rig_query(service, FIXTURE, "TaskExecutor")),
+        ("atlas_query(0)", atlas_query(service, FIXTURE, "safeguard")),
+        ("rig_query(0)", rig_query(service, FIXTURE, "safeguard")),
+    )
+    for label, payload in payloads:
+        for key in ("query", "kind", "total", "returned", "truncated", "results", "map_status"):
+            _expect(key in payload, "{}: field '{}' harus tetap ada".format(label, key))
+        _expect(isinstance(payload["results"], list), "{}: results harus list".format(label))
+        _expect(
+            payload["returned"] == len(payload["results"]),
+            "{}: returned harus == len(results)".format(label),
+        )
+        _expect(
+            bool(payload["truncated"]) is (payload["total"] > payload["returned"]),
+            "{}: truncated harus konsisten dengan total/returned".format(label),
+        )
+        _expect(
+            not payload.get("hint") or isinstance(payload["hint"], str),
+            "{}: hint bila ada harus string ringkas".format(label),
+        )
+    print("(3) struktur result tetap backward compatible : OK")
+
+    # (4) Adapter langsung (tanpa wrapper) tidak menambah map_status/hint:
+    #     kontrak lama tetap berlaku, hanya `message` yang diperjelas.
+    direct = AtlasMapQuery(service.load_map(FIXTURE, "atlas")).query("safeguard")
+    _expect(direct["total"] == 0, "adapter langsung tetap 0 hasil")
+    _expect(bool(direct.get("message")), "adapter langsung tetap memberi message")
+    _expect("map_status" not in direct, "adapter langsung tidak menambah map_status")
+    _expect("hint" not in direct, "adapter langsung tidak menambah hint")
+    print("(4) adapter langsung tetap kompatibel (tanpa field baru) : OK")
+
+
 def _run() -> int:
     check_atlas()
     check_rig()
     check_status()
     check_tools()
+    check_result_hints()
     check_engine_best_effort()
     print()
     print("[OK] Project Map query capability terverifikasi.")

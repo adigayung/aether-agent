@@ -33,7 +33,16 @@ from agent_ai.consultant.models import (
     MODE_QUICK,
     normalize_consultant_mode,
 )
-from agent_ai.consultant.policy import build_consultant_permission_manager
+from agent_ai.consultant.guard import (
+    ConsultantBoundProvider,
+    ConsultantRetrievalGuard,
+    normalize_map_query,
+)
+from agent_ai.consultant.policy import (
+    ConsultantRetrievalBudget,
+    build_consultant_permission_manager,
+    retrieval_budget_for_mode,
+)
 from agent_ai.consultant.prompt import (
     CONSULTANT_SYSTEM_PROMPT,
     build_consultant_system_prompt,
@@ -52,6 +61,11 @@ __all__ = [
     "extract_task_proposal",
     "build_consultant_registry",
     "build_consultant_permission_manager",
+    "retrieval_budget_for_mode",
+    "ConsultantRetrievalBudget",
+    "ConsultantRetrievalGuard",
+    "ConsultantBoundProvider",
+    "normalize_map_query",
     "ConsultantBibleTool",
     "ConsultantRunCommandTool",
     "CONSULTANT_SYSTEM_PROMPT",

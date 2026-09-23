@@ -19,8 +19,16 @@ Bentuk output dirancang kecil + deterministik:
       "returned": 20,       # jumlah item yang benar-benar dikembalikan
       "truncated": True,    # True bila hasil dipotong limit
       "results": [ ... ],   # subset relevan (kecil)
-      "map_status": "fresh" # "fresh" | "stale" (map lama tetap boleh dibaca)
+      "map_status": "fresh",# "fresh" | "stale" (map lama tetap boleh dibaca)
+      "hint": "..."         # OPSIONAL: hanya saat 0 hasil dan/atau map stale
     }
+
+`message`/`hint` adalah sinyal RINGKAS untuk LLM: keduanya menegaskan bahwa map
+adalah LOOKUP pada data index (bukan pencarian full-text isi source), bahwa 0
+hasil berarti "tidak ditemukan di Project Map", dan bahwa `stale` BUKAN error
+maupun alasan mengulang query/sinonim tanpa batas. Hint hanya ditambahkan saat
+ada sinyal yang perlu ditindaklanjuti (0 hasil dan/atau stale) supaya output
+tetap hemat token.
 
 Catatan freshness: query SELALU boleh membaca map lama. `map_status` hanya
 memberi tahu LLM apakah map yang dibaca masih merepresentasikan source terbaru;
@@ -77,6 +85,49 @@ DEFAULT_MAX_RESULTS = 20
 DEFAULT_MAX_RELATED = 20
 #: Batas keras, apapun yang diminta caller (mencegah kirim map besar).
 HARD_MAX_RESULTS = 50
+
+# --------------------------------------------------------------------------- #
+# Pesan/hint hasil query (ringkas; hemat token)
+# --------------------------------------------------------------------------- #
+#: Pesan singkat saat Atlas tidak menemukan match. Menegaskan bahwa ini LOOKUP
+#: pada data map/index, BUKAN pencarian full-text isi source.
+_ZERO_RESULT_MESSAGE_ATLAS = (
+    "Tidak ada symbol/module/file yang cocok dengan query "
+    "(lookup Atlas pada map/index, BUKAN pencarian full-text isi source)."
+)
+#: Pesan singkat saat RIG tidak menemukan match.
+_ZERO_RESULT_MESSAGE_RIG = (
+    "Tidak ada entity/relationship yang cocok dengan query "
+    "(lookup RIG pada map/index, BUKAN pencarian full-text isi source)."
+)
+
+#: Hint actionable saat query menghasilkan 0 match (per tool). Ringkas, dan
+#: TIDAK mendorong retry/sinonim tanpa batas.
+_ZERO_RESULT_HINTS: Dict[str, str] = {
+    "atlas_query": (
+        "Tidak ditemukan match pada Project Map (Code Atlas). Tool ini melakukan "
+        "lookup pada data map/index, bukan pencarian full-text isi source. Jangan "
+        "mengulang query yang sama atau mengejar sinonim tanpa batas; bila butuh "
+        "isi source, gunakan kemampuan source search pada mode yang "
+        "menyediakannya (mis. mode Investigate)."
+    ),
+    "rig_query": (
+        "Tidak ditemukan relationship pada Project Map (RIG). Tool ini melakukan "
+        "lookup graph pada data map/index, bukan pencarian full-text isi source. "
+        "Pastikan query adalah nama entity yang ter-index + relation yang "
+        "didukung; jangan mengulang query yang sama atau mengejar sinonim tanpa "
+        "batas."
+    ),
+}
+
+#: Hint ringkas saat `map_status` = stale. Menegaskan stale BUKAN error dan
+#: BUKAN alasan mengulang query/sinonim tanpa batas.
+_STALE_HINT = (
+    "map_status=stale: map tersedia tetapi mungkin belum merepresentasikan "
+    "perubahan source terbaru - perlakukan hasil sebagai lokasi/evidence dengan "
+    "keterbatasan, bukan sebagai error, dan bukan alasan untuk mengulang query "
+    "yang sama atau mengejar sinonim tanpa batas."
+)
 
 #: Kind yang dikenal untuk query Atlas.
 ATLAS_KINDS: Tuple[str, ...] = ("symbol", "class", "function", "method", "module", "file")
@@ -330,7 +381,7 @@ class AtlasMapQuery:
             "results": window,
         }
         if total == 0:
-            payload["message"] = "Tidak ada symbol/module/file yang cocok dengan query."
+            payload["message"] = _ZERO_RESULT_MESSAGE_ATLAS
         return payload
 
 
@@ -551,7 +602,7 @@ class RigMapQuery:
             "results": window,
         }
         if total == 0:
-            payload["message"] = "Tidak ada entity RIG yang cocok dengan query."
+            payload["message"] = _ZERO_RESULT_MESSAGE_RIG
         return payload
 
 
@@ -571,6 +622,30 @@ def _map_freshness(service: ProjectMapService, project_path: Any, map_type: str)
         return STATUS_STALE
 
 
+def _result_hint(total: Any, map_status: str, tool_name: str) -> Optional[str]:
+    """Hint ringkas & actionable untuk hasil query (None bila tak perlu).
+
+    Ditambahkan HANYA ketika ada sinyal yang perlu ditindaklanjuti LLM:
+        - ``total == 0``          -> tidak ada match pada data map/index;
+        - ``map_status == stale`` -> map mungkin belum merepresentasikan source.
+
+    Hasil normal pada map fresh TIDAK diberi hint (agar output hemat token).
+    Hint tidak pernah mendorong retry/sinonim tanpa batas.
+    """
+    try:
+        zero = int(total) == 0
+    except (TypeError, ValueError):
+        zero = False
+
+    parts: List[str] = []
+    if zero:
+        parts.append(_ZERO_RESULT_HINTS.get(tool_name, ""))
+    if map_status == STATUS_STALE:
+        parts.append(_STALE_HINT)
+    hint = " ".join(part for part in parts if part)
+    return hint or None
+
+
 def atlas_query(
     service: ProjectMapService,
     project_path: Any,
@@ -585,6 +660,11 @@ def atlas_query(
     Hasil menyertakan `map_status` (`fresh`/`stale`) sehingga LLM tahu apakah
     map yang dibaca masih merepresentasikan source terbaru. Query TIDAK pernah
     meregenerasi map.
+
+    Bila ``total == 0`` dan/atau ``map_status == stale``, hasil menambahkan
+    field ``hint`` ringkas yang menjelaskan arti kondisi tersebut (lookup
+    map/index bukan full-text; stale bukan error) TANPA mendorong pencarian
+    berulang.
     """
     payload = AtlasMapQuery.from_project(service, project_path).query(
         query,
@@ -593,7 +673,11 @@ def atlas_query(
         max_results=max_results,
         max_related=max_related,
     )
-    payload["map_status"] = _map_freshness(service, project_path, MAP_TYPE_ATLAS)
+    map_status = _map_freshness(service, project_path, MAP_TYPE_ATLAS)
+    payload["map_status"] = map_status
+    hint = _result_hint(payload.get("total"), map_status, "atlas_query")
+    if hint:
+        payload["hint"] = hint
     return payload
 
 
@@ -610,6 +694,10 @@ def rig_query(
 
     Hasil menyertakan `map_status` (`fresh`/`stale`). Query TIDAK pernah
     meregenerasi map.
+
+    Bila ``total == 0`` dan/atau ``map_status == stale``, hasil menambahkan
+    field ``hint`` ringkas (lookup graph bukan full-text; stale bukan error)
+    TANPA mendorong pencarian berulang.
     """
     payload = RigMapQuery.from_project(service, project_path).query(
         query,
@@ -618,7 +706,11 @@ def rig_query(
         max_results=max_results,
         max_related=max_related,
     )
-    payload["map_status"] = _map_freshness(service, project_path, MAP_TYPE_RIG)
+    map_status = _map_freshness(service, project_path, MAP_TYPE_RIG)
+    payload["map_status"] = map_status
+    hint = _result_hint(payload.get("total"), map_status, "rig_query")
+    if hint:
+        payload["hint"] = hint
     return payload
 
 

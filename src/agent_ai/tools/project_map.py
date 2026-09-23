@@ -81,13 +81,18 @@ class AtlasQueryTool(_ProjectMapToolBase):
     name = "atlas_query"
     description = (
         "Mencari LOKASI kode yang relevan di project ini melalui peta navigasi "
-        "Code Atlas (.aether/map/atlas.json). Gunakan untuk menemukan di mana "
-        "sebuah class/function/method/module berada (nama file + rentang baris) "
-        "dan relasi dasarnya (callers/callees/inherits). Hasil yang dikembalikan "
-        "SELALU subset kecil (dibatasi max_results) - bukan seluruh peta. Setelah "
-        "menemukan lokasi, gunakan read_file(path, start_line, end_line) untuk "
-        "membaca kode aslinya. Tool ini READ-ONLY dan tidak meregenerasi peta; "
-        "bila peta belum ada, akan dikembalikan error yang jelas."
+        "Code Atlas (.aether/map/atlas.json): symbol, class, function, method, "
+        "module, atau file/path (nama file + rentang baris), beserta relasi "
+        "dasarnya (callers/callees/inherits) bila tersedia. PENTING: ini LOOKUP "
+        "pada data map/index, BUKAN pencarian full-text isi source - isi file "
+        "tidak dicari. Query cocok bila berupa nama symbol/module/file yang "
+        "ter-index atau potongan path (mis. 'TaskExecutor', "
+        "'TaskExecutor.execute', 'core.py'); konsep seperti "
+        "'safeguard'/'budget'/'retry' TIDAK otomatis ketemu hanya karena kata "
+        "itu ada di dalam kode. Hasil SELALU subset kecil (dibatasi "
+        "max_results). READ-ONLY: tidak meregenerasi peta. Setelah menemukan "
+        "lokasi, baca kode via read_file(path, start_line, end_line) bila tool "
+        "itu tersedia di mode Anda."
     )
     input_schema: Dict[str, Any] = {
         "type": "object",
@@ -97,7 +102,8 @@ class AtlasQueryTool(_ProjectMapToolBase):
                 "description": (
                     "Nama yang dicari: symbol/class/function/method (mis. "
                     "'TaskExecutor' atau 'TaskExecutor.execute'), nama module, "
-                    "atau potongan path file."
+                    "atau potongan path file. BUKAN teks isi source (bukan "
+                    "pencarian full-text)."
                 ),
             },
             "kind": {
@@ -148,13 +154,13 @@ class RigQueryTool(_ProjectMapToolBase):
     description = (
         "Mencari entity kode (class/function/method/module/component) dan "
         "RELATIONSHIP-nya melalui Repository Intelligence Graph "
-        "(.aether/map/rig.json). Gunakan untuk pertanyaan seperti 'siapa yang "
-        "memanggil X' (relation='callers'), 'X memanggil siapa' "
-        "(relation='callees'), 'apa yang di-import/di-inherit X', atau relasi "
-        "lain (imports, inherits, contains, depends_on, tests, related). Hasil "
-        "SELALU subset kecil (dibatasi max_results) - bukan seluruh graph. "
-        "READ-ONLY: tidak meregenerasi peta; bila peta belum ada, dikembalikan "
-        "error yang jelas."
+        "(.aether/map/rig.json). Menjawab 'terhubung ke apa': callers, callees, "
+        "imports, inherits, contains, depends_on, tests, external, related. Ini "
+        "LOOKUP graph pada data map/index, BUKAN pencarian full-text isi source. "
+        "Query harus berupa nama entity yang ter-index (mis. 'TaskExecutor' "
+        "atau 'TaskExecutor.execute'); kata/konsep yang hanya ada di isi file "
+        "TIDAK otomatis ditemukan. Hasil SELALU subset kecil (dibatasi "
+        "max_results). READ-ONLY: tidak meregenerasi peta."
     )
     input_schema: Dict[str, Any] = {
         "type": "object",
@@ -163,7 +169,8 @@ class RigQueryTool(_ProjectMapToolBase):
                 "type": "string",
                 "description": (
                     "Nama entity yang dicari, mis. 'TaskExecutor' atau "
-                    "'TaskExecutor.execute'."
+                    "'TaskExecutor.execute'. BUKAN teks isi source (bukan "
+                    "pencarian full-text)."
                 ),
             },
             "relation": {

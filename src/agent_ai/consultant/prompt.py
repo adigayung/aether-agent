@@ -89,14 +89,32 @@ def _mode_lines(mode: str) -> List[str]:
             "  update_project_bible (menyimpan knowledge project yang sudah",
             "  terverifikasi ke Project Bible).",
             "",
+            "## Disiplin Tool (Quick)",
+            "- Tetap QUICK: untuk pertanyaan kecil, jawab langsung dari",
+            "  Bible/percakapan/evidence yang sudah ada. Jangan memperluas",
+            "  eksplorasi hanya karena satu query tidak menemukan hasil.",
+            "- Bila atlas_query / rig_query 0 hasil, jangan beralih ke investigasi",
+            "  source-level yang mendalam atau eksplorasi repository. Akui",
+            "  keterbatasan dengan jujur dan arahkan user memakai mode Investigate",
+            "  untuk verifikasi tingkat source.",
+            "- Bila Project Map berstatus stale, jangan menganggap semua evidence",
+            "  tidak berguna dan jangan mengulang query tanpa batas. Gunakan",
+            "  evidence yang ada dengan catatan (caveat) bahwa peta mungkin belum",
+            "  mutakhir.",
+            "- Cukup beberapa query yang relevan, lalu jawab. Jangan mengejar",
+            "  kelengkapan evidence dengan puluhan query.",
+            "",
             "## Cara kerja (Quick)",
             "1. Pahami pertanyaan user + Project Bible + percakapan sebelumnya.",
             "2. Bila perlu (lokasi/struktur/relasi kode), panggil atlas_query /",
             "   rig_query / project_map_status. JANGAN panggil map untuk pertanyaan",
             "   yang sudah bisa dijawab dari Bible.",
-            "3. Jawab ringkas, analitis, dan actionable berdasarkan knowledge + map.",
-            "4. Bila perlu, susun Task Proposal (tanpa membaca source).",
-            "5. Simpan knowledge baru yang layak dipertahankan lewat",
+            "3. Setelah tiap query, evaluasi hasilnya: bila evidence sudah cukup",
+            "   untuk menjawab, berhenti memanggil tool dan jawab sekarang. Jangan",
+            "   mengulang query atau mencoba banyak sinonim saat hasil kosong.",
+            "4. Jawab ringkas, analitis, dan actionable berdasarkan knowledge + map.",
+            "5. Bila perlu, susun Task Proposal (tanpa membaca source).",
+            "6. Simpan knowledge baru yang layak dipertahankan lewat",
             "   update_project_bible (opsional, hanya bila memang ada knowledge baru).",
         ]
 
@@ -122,10 +140,40 @@ def _mode_lines(mode: str) -> List[str]:
         "1. Mulai dari pertanyaan user + Project Bible.",
         "2. Bila perlu: investigasi bertahap dengan tool (search -> read -> jalankan",
         "   diagnostic -> baca hasil -> search lanjutan -> bandingkan). Lanjutkan",
-        "   sampai informasi cukup; jangan investigasi tanpa alasan.",
+        "   sampai informasi cukup; jangan investigasi tanpa alasan. Terapkan",
+        "   Disiplin Tool: bila satu pencarian 0 hasil, jangan mengulang sinonim",
+        "   tanpa batas; begitu informasi cukup, berhenti dan susun jawaban.",
         "3. Jelaskan findings, diagnosis, rekomendasi, dampak.",
         "4. Tentukan sendiri apakah perlu update Project Bible (update_project_bible).",
         "5. Bila user meminta task (atau solusi sudah jelas), susun Task Proposal.",
+    ]
+
+
+def _tool_discipline_lines() -> List[str]:
+    """Disiplin penggunaan tool (berlaku untuk SEMUA mode).
+
+    Bagian ini mencegah eksplorasi tool yang berulang tanpa hasil: map BUKAN
+    full-text search, hasil kosong tidak memicu percobaan sinonim tanpa batas,
+    dan konsultasi berhenti begitu evidence yang relevan sudah cukup.
+    """
+    return [
+        "",
+        "## Disiplin Tool (berlaku semua mode)",
+        "- atlas_query / rig_query mencari LOKASI & RELASI symbol/module/file",
+        "  (nama file + rentang baris), BUKAN pencarian teks (full-text) isi source",
+        "  code. Jangan pakai untuk mencari potongan kalimat/kode di dalam file;",
+        "  untuk itu tidak ada tool yang cocok di sini.",
+        "- Pola yang benar: query -> evaluasi hasil -> sudah cukup? -> jawab.",
+        "  Bila hasil yang relevan sudah cukup untuk menjawab, BERHENTI memanggil",
+        "  tool dan berikan jawaban final.",
+        "- Jangan memakai tool hanya untuk memperbanyak evidence. Tool bukan",
+        "  pengganti penalaran dari Bible/percakapan/evidence yang sudah ada.",
+        "- Bila atlas_query / rig_query mengembalikan 0 hasil:",
+        "  * jangan mengulang query yang sama;",
+        "  * jangan mencoba banyak sinonim hanya demi mendapatkan hasil;",
+        "  * evaluasi apakah tool tersebut memang cocok untuk pertanyaan ini.",
+        "- Jangan melakukan retry tool tanpa batas. Loop konsultasi berhenti hanya",
+        "  bila Anda berhenti memanggil tool, jadi akhiri dengan jawaban.",
     ]
 
 
@@ -172,6 +220,7 @@ def build_consultant_system_prompt(mode: str = DEFAULT_CONSULTANT_MODE) -> str:
     lines: List[str] = []
     lines.extend(_base_lines())
     lines.extend(_mode_lines(normalized))
+    lines.extend(_tool_discipline_lines())
     lines.extend(_task_proposal_lines())
     return "\n".join(lines)
 

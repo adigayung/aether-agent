@@ -21,6 +21,10 @@ import threading
 import uuid
 from typing import Any, Dict, List, Optional
 
+from agent_ai.consultant.guard import (
+    ConsultantBoundProvider,
+    ConsultantRetrievalGuard,
+)
 from agent_ai.consultant.models import (
     ConsultantResult,
     ConsultantTurn,
@@ -222,7 +226,15 @@ class ConsultantService:
 
         session = self._get_session(session_id)
 
-        registry = build_consultant_registry(root, mode=effective_mode)
+        # Safety/control layer Consultant: bound retrieval Project Map per
+        # giliran (ATLAS: 3 query untuk quick / 6 untuk investigate). Guard ini
+        # HANYA milik Consultant dan tidak memengaruhi budget/perilaku Agent.
+        # Satu guard per panggilan consult() -> batas dihitung per pertanyaan.
+        retrieval_guard = ConsultantRetrievalGuard(mode=effective_mode)
+
+        registry = build_consultant_registry(
+            root, mode=effective_mode, guard=retrieval_guard
+        )
         executor = ToolExecutor(
             registry=registry,
             permission_manager=build_consultant_permission_manager(),
@@ -261,8 +273,13 @@ class ConsultantService:
                     }
                 )
 
+        # Provider dibungkus proxy Consultant: begitu bound retrieval tercapai,
+        # tool map (atlas_query/rig_query) dilepas dari penawaran ke LLM
+        # sehingga LLM berhenti mencari map dan menyusun jawaban final —
+        # konsultasi selesai NORMAL (bukan FAILED karena menyentuh max_steps).
+        # Provider asli tetap dipakai untuk ProjectBrain (konteks Bible).
         orchestrator = AgentOrchestrator(
-            provider=provider,
+            provider=ConsultantBoundProvider(provider, retrieval_guard),
             executor=executor,
             system_prompt=build_consultant_system_prompt(effective_mode),
             brain=brain,

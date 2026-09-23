@@ -37,7 +37,7 @@ Modul ini TIDAK membuat subsystem baru:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from agent_ai.consultant.models import (
     DEFAULT_CONSULTANT_MODE,
@@ -46,6 +46,9 @@ from agent_ai.consultant.models import (
 )
 from agent_ai.tools.base import BaseTool, ToolValidationError
 from agent_ai.tools.terminal import RunCommandTool, _split_command
+
+if TYPE_CHECKING:  # pragma: no cover - hanya untuk type hint, hindari import cycle
+    from agent_ai.consultant.guard import ConsultantRetrievalGuard
 
 
 # --------------------------------------------------------------------------- #
@@ -289,11 +292,51 @@ class ConsultantBibleTool(BaseTool):
         }
 
 
+class ConsultantBoundedMapTool(BaseTool):
+    """Wrapper READ-ONLY tool Project Map dengan bound retrieval Consultant.
+
+    Mendelegasikan eksekusi ke tool map existing (atlas_query/rig_query) TANPA
+    mengubahnya, tetapi menegakkan safety/control layer Consultant lewat
+    `ConsultantRetrievalGuard`:
+
+        - sebelum eksekusi  -> `guard.reserve(tool, args)`. Bila query harus
+          DIBLOKIR (berulang / melewati batas / pencarian map sudah dihentikan),
+          query TIDAK dieksekusi dan dikembalikan ToolResult "bound" yang jelas;
+        - setelah eksekusi  -> `guard.record(tool, args, result)` (counter +
+          deteksi zero-result beruntun).
+
+    Ini murni boundary: wrapper TIDAK menalar jawaban. Nama/description/schema
+    tool tetap identik dengan tool asli sehingga LLM melihat tool yang sama.
+    """
+
+    def __init__(self, inner: BaseTool, guard: "ConsultantRetrievalGuard") -> None:
+        self._inner = inner
+        self._guard = guard
+        # Ekspos kontrak tool persis seperti tool asli (name/description/schema).
+        self.name = inner.name
+        self.description = inner.description
+        self.input_schema = inner.input_schema
+
+    def validate(self, arguments: Dict[str, Any]) -> None:
+        # Delegasi validasi ke tool asli agar kontrak argumen tidak berubah.
+        self._inner.validate(arguments)
+
+    def execute(self, **arguments: Any) -> Any:
+        decision = self._guard.reserve(self.name, dict(arguments or {}))
+        if decision is not None:
+            # Query diblokir oleh bound: JANGAN eksekusi tool asli.
+            return decision
+        result = self._inner.execute(**arguments)
+        self._guard.record(self.name, dict(arguments or {}), result)
+        return result
+
+
 def build_consultant_registry(
     root: Optional[Path] = None,
     provider: Any = None,
     options: Any = None,
     mode: str = DEFAULT_CONSULTANT_MODE,
+    guard: Optional["ConsultantRetrievalGuard"] = None,
 ):
     """Bangun ToolRegistry Consultant (kurasi READ-ONLY + Bible) sesuai mode.
 
@@ -317,6 +360,11 @@ def build_consultant_registry(
                             READ-ONLY (atlas_query, rig_query,
                             project_map_status) + update_project_bible.
                             TANPA refresh_project_map.
+        guard: bound retrieval opsional (ConsultantRetrievalGuard). Bila diisi,
+            tool map PENCARIAN (atlas_query/rig_query) dibungkus
+            `ConsultantBoundedMapTool` sehingga query berulang / melewati batas
+            diblokir. Bila None, perilaku identik dengan sebelumnya (backward
+            compatible).
 
     Returns:
         ToolRegistry berisi tool yang AMAN untuk Consultant (tanpa tool tulis).
@@ -334,10 +382,17 @@ def build_consultant_registry(
     # sehingga Consultant tetap read-only terhadap Project Map (boleh query,
     # tidak boleh regenerate/menulis). Quick memakai map tanpa boleh membaca
     # source.
+    #
+    # Bound retrieval (opsional): tool PENCARIAN map dibungkus agar query
+    # berulang / melewati batas / zero-result runaway dihentikan secara graceful.
+    # `project_map_status` TIDAK dibungkus (bukan pencarian).
     from agent_ai.tools.project_map import build_project_map_tools
 
     for tool in build_project_map_tools(root=resolved, include_refresh=False):
-        registry.register(tool)
+        if guard is not None and guard.is_map_query_tool(tool.name):
+            registry.register(ConsultantBoundedMapTool(tool, guard))
+        else:
+            registry.register(tool)
 
     if normalized == MODE_INVESTIGATE:
         from agent_ai.tools.filesystem import (
