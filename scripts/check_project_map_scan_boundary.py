@@ -8,7 +8,8 @@ memverifikasi bahwa:
     1. Traversal Atlas memangkas directory ter-exclude SEBELUM rekursi.
     2. Traversal RIG tidak masuk dependency/environment tree.
     3. Source project valid TETAP terpetakan (src/, tests/, vendor/, lib/).
-    4. Directory ambigu (vendor, lib) TIDAK dibuang membabi buta.
+    4. Directory ambigu (app, core, common, modules, pkg, packages, external,
+       third_party) TIDAK dibuang membabi buta.
     5. `.aether/map/` tidak ikut dipindai.
     6. symlink/junction tidak ditelusuri (workspace boundary) [best-effort].
     7. Atlas & RIG tetap menghasilkan JSON valid.
@@ -51,6 +52,21 @@ FIXTURE = DUMMY_ROOT / "project_map_scan_fixture"
 EXTERNAL = DUMMY_ROOT / "project_map_scan_external"
 CACHE_DIR = DUMMY_ROOT / "project_map_scan_engineout"
 
+#: Directory ambigu (BUKAN environment/dependency) yang HARUS tetap dipetakan
+#: walaupun namanya sering dipakai untuk vendor/dependency tree pada sebagian
+#: ekosistem. ``vendor`` dan ``lib`` diuji langsung di EXPECTED_PRESENT; sisanya
+#: dibangun dari daftar ini supaya tidak ada yang dibuang membabi buta.
+AMBIGUOUS_DIRS = (
+    "app",
+    "core",
+    "common",
+    "modules",
+    "pkg",
+    "packages",
+    "external",
+    "third_party",
+)
+
 #: Path (relatif, '/' separated) yang HARUS masuk Project Map.
 EXPECTED_PRESENT = (
     "src/main.py",
@@ -58,7 +74,7 @@ EXPECTED_PRESENT = (
     "tests/test_main.py",
     "vendor/internal_source.py",
     "lib/internal_lib.py",
-)
+) + tuple("{0}/{0}_internal.py".format(name) for name in AMBIGUOUS_DIRS)
 
 #: Nama directory (lowercase) yang TIDAK boleh muncul sebagai komponen path.
 EXCLUDED_COMPONENTS = (
@@ -111,6 +127,7 @@ _PRESENT_TEST = (
 )
 _PRESENT_VENDOR = "def internal_source_function():\n    return 'vendor'\n"
 _PRESENT_LIB = "def internal_lib_function():\n    return 'lib'\n"
+_PRESENT_AMBIGUOUS = "def {0}_internal_function():\n    return '{0}'\n"
 _EXCLUDED_PY = "def excluded_dependency_function():\n    return 'should not be scanned'\n"
 
 
@@ -132,6 +149,15 @@ def setup_fixture() -> None:
     _write(FIXTURE / "tests" / "test_main.py", _PRESENT_TEST)
     _write(FIXTURE / "vendor" / "internal_source.py", _PRESENT_VENDOR)
     _write(FIXTURE / "lib" / "internal_lib.py", _PRESENT_LIB)
+
+    # Directory ambigu (app, core, common, modules, pkg, packages, external,
+    # third_party) — namanya sering dipakai dependency, tetapi di sini HARUS
+    # tetap dianggap source project sendiri.
+    for dirname in AMBIGUOUS_DIRS:
+        _write(
+            FIXTURE / dirname / "{0}_internal.py".format(dirname),
+            _PRESENT_AMBIGUOUS.format(dirname),
+        )
 
     # --- directory yang TIDAK boleh dipindai ------------------------------
     _write(FIXTURE / "conda" / "Lib" / "site-packages" / "fake_dependency.py", _EXCLUDED_PY)
@@ -342,7 +368,7 @@ def check_service_boundary() -> None:
         )
     print("[OK] .aether (termasuk .aether/map) tidak dipindai")
 
-    # (4) source ambigu (vendor/lib) TIDAK dibuang membabi buta.
+    # (4) source ambigu (vendor/lib/app/pkg/...) TIDAK dibuang membabi buta.
     for map_type, paths in ((MAP_TYPE_ATLAS, atlas_paths), (MAP_TYPE_RIG, rig_paths)):
         missing = _missing_expected(paths)
         _expect(
@@ -352,7 +378,17 @@ def check_service_boundary() -> None:
         present = set(paths)
         _expect("vendor/internal_source.py" in present, "vendor/ dibuang (salah)")
         _expect("lib/internal_lib.py" in present, "lib/ dibuang (salah)")
-        print("[OK] {} tetap menemukan source (src/tests/vendor/lib)".format(map_type))
+        for name in AMBIGUOUS_DIRS:
+            expected = "{0}/{0}_internal.py".format(name)
+            _expect(
+                expected in present,
+                "{} dibuang membabi buta oleh {}".format(name, map_type),
+            )
+        print(
+            "[OK] {} tetap menemukan source (src/tests/vendor/lib + ambiguous)".format(
+                map_type
+            )
+        )
 
     # (5) symlink/junction boundary (best-effort).
     linked = FIXTURE / "linked_external"
