@@ -46,6 +46,14 @@ import {
 } from "./api.js";
 import { playStatusSound, resetAudioTracker } from "./audioRegistry.js";
 import { createDurationTicker, eventTimeMs, formatDuration } from "./timeUtils.js";
+// Pemisahan "task yang dipantau (viewed/running)" dari "task yang baru dibuat
+// (bisa masih pending)". Logika murni ini mencegah submit Task B saat Task A
+// RUNNING meng-overwrite tampilan/stream Task A (lihat taskView.js).
+import {
+  isViewedTaskRunning,
+  shouldAdoptSubmittedTask,
+  shouldFollowStartedTask,
+} from "./taskView.js";
 
 // Navigasi berorientasi user (bukan subsystem internal AETHER).
 // `icon` = path SVG (stroke) inline — tanpa dependency icon baru.
@@ -369,6 +377,22 @@ async function refreshRunningTask() {
     const running = items.find(
       (t) => t.queue_state === "running" && t.task_id !== terminalTaskId.value
     );
+    // Fallback follow: bila scheduler sudah menjalankan task yang kita antrikan
+    // (deferred) sementara kita TIDAK memantau task running mana pun -> ikuti
+    // task itu. Menutup celah race bila event `task_started` tiba lebih dulu
+    // dari respons antrian ini (atau koneksi SSE sempat terputus).
+    if (
+      running &&
+      shouldFollowStartedTask({
+        startedTaskId: running.task_id,
+        viewedTaskId: task.id || "",
+        isViewingRunning: isViewingRunningTask(),
+        viewingHistory: Boolean(historyEvents.value),
+        deferredTaskIds,
+      })
+    ) {
+      adoptRunningTask(running.task_id, running.task);
+    }
     runningTaskId.value = running ? running.task_id : "";
   } catch {
     // Endpoint queue belum tersedia: pertahankan state existing (fallback).
@@ -382,6 +406,48 @@ async function refreshRunningTask() {
 function releaseRunningTask(taskId) {
   if (!runningTaskId.value) return;
   if (!taskId || taskId === runningTaskId.value) runningTaskId.value = "";
+}
+
+// Task yang kita ANTRIKAN: task yang dibuat saat ADA task lain yang benar-benar
+// running, sehingga UI SENGAJA tidak berpindah ke task itu (B tetap pending di
+// daftar antrian). Map task_id -> teks task, dipakai agar UI dapat MENGIKUTI
+// task ini begitu scheduler benar-benar menjalankannya (event task_started).
+// Ini BUKAN queue subsystem kedua: hanya penanda UI.
+const deferredTaskIds = new Map();
+
+// Apakah yang SEDANG dipantau benar-benar task yang berjalan? Sumber utama =
+// Global Task Queue (runningTaskId); fallback = status lifecycle task yang
+// dipantau (bila respons antrian belum termuat). SENGAJA bukan state kedua.
+const ACTIVE_TASK_STATUSES = ["running", "prepared", "planning", "executing", "validating"];
+function isViewingRunningTask() {
+  if (isViewedTaskRunning(task.id, runningTaskId.value)) return true;
+  return (
+    Boolean(task.id) &&
+    ACTIVE_TASK_STATUSES.includes(String(task.status || "").toLowerCase())
+  );
+}
+
+// Pastikan stream SSE terbuka (tanpa menutup/membuka ulang bila sudah ada).
+function ensureStream() {
+  if (!source) connectStream();
+}
+
+// Pindahkan pantauan (Task Card + Agent Activity) ke task yang BENAR-BENAR
+// mulai running. Dipakai HANYA saat UI mengikuti task antrian berikutnya
+// setelah task sebelumnya selesai. Murni memilih task mana yang ditampilkan:
+// TIDAK menyentuh scheduler/queue backend.
+function adoptRunningTask(taskId, text = "") {
+  if (!taskId || taskId === task.id) return;
+  task.id = taskId;
+  if (text) task.text = text;
+  task.status = "running";
+  runningTaskId.value = taskId;
+  // Task ini tidak lagi "tertunda" follow.
+  deferredTaskIds.delete(taskId);
+  // Pantauan berpindah task -> buang activity/timing task sebelumnya.
+  resetWorkspace();
+  ensureStream();
+  if (taskStartedAt.value == null) taskStartedAt.value = Date.now();
 }
 
 // isRunning = ADA task yang sedang RUNNING (bukan apakah task yang sedang
@@ -478,10 +544,12 @@ async function runConsultantTask(payload) {
     payload && typeof payload === "object" ? payload.providerInstanceId : null;
   const overrideModelId =
     payload && typeof payload === "object" ? payload.modelId : null;
-  await submitTask(text, overrideProviderId, overrideModelId);
-  // Task baru (queue_state=pending) -> refresh panel TASKS + beri tahu
-  // ConsultantChat task mana yang menjadi milik tombol Run Task.
-  submittedTaskId.value = task.id || "";
+  const record = await submitTask(text, overrideProviderId, overrideModelId);
+  // Beri tahu ConsultantChat task mana milik tombol Run Task. WAJIB memakai
+  // task_id yang BARU dibuat (dari respons createTask), BUKAN task.id: task.id
+  // adalah task yang sedang DIPANTAU, yang bisa jadi Task A lain yang masih
+  // running saat Task B hanya masuk antrian (pending).
+  submittedTaskId.value = (record && record.task_id) || "";
   queueRefresh.value += 1;
 }
 
@@ -622,6 +690,33 @@ function upsertChange(entry) {
 
 function handleEvent(evt) {
   if (!evt || !evt.event_type) return;
+
+  // Stream SSE bersifat GLOBAL (satu queue global AETHER): event untuk task
+  // LAIN tidak boleh mengubah Task Card/Agent Activity/runtime task yang sedang
+  // dipantau — inilah mekanisme bug "UI ikut pindah ke Task B yang masih
+  // pending lalu Agent seolah berhenti". PENGECUALIAN: task yang KITA antrikan
+  // BENAR-BENAR mulai running setelah task sebelumnya selesai -> UI mengikuti.
+  const viewedId = task.id || "";
+  const evtTaskId = evt.task_id || "";
+  if (evtTaskId && viewedId && evtTaskId !== viewedId) {
+    if (
+      evt.event_type === "task_started" &&
+      shouldFollowStartedTask({
+        startedTaskId: evtTaskId,
+        viewedTaskId: viewedId,
+        isViewingRunning: isViewingRunningTask(),
+        viewingHistory: Boolean(historyEvents.value),
+        deferredTaskIds,
+      })
+    ) {
+      // teks task dibaca SEBELUM adoptRunningTask menghapus entri deferred.
+      adoptRunningTask(evtTaskId, deferredTaskIds.get(evtTaskId));
+      // lanjut: proses event task_started untuk task yang baru diadopsi.
+    } else {
+      return;
+    }
+  }
+
   // Event live untuk task aktif -> tampilkan alur SSE (bukan history lama).
   if (evt.task_id && task.id && evt.task_id === task.id) {
     historyEvents.value = null;
@@ -775,7 +870,12 @@ function handleEvent(evt) {
 
 function connectStream() {
   if (source) source.close();
-  source = openEventStream({ taskId: task.id || null, onEvent: handleEvent });
+  // Stream SSE GLOBAL (satu queue global AETHER). TIDAK difilter per task di
+  // server agar UI dapat mengenali task antrian berikutnya yang BENAR-BENAR
+  // mulai running (event task_started) TANPA harus me-rebind stream saat task
+  // baru di-submit. Pemilihan event yang diproses dilakukan di handleEvent
+  // (hanya event milik task yang dipantau + task deferred yang mulai running).
+  source = openEventStream({ onEvent: handleEvent });
   source.onopen = () => {
     connected.value = true;
   };
@@ -846,8 +946,6 @@ async function submitTask(text, overrideProviderInstanceId = null, overrideModel
       selectedProjectId.value || null,
       Object.keys(metadata).length ? metadata : null
     );
-    task.id = record.task_id;
-    task.text = record.task;
     // Status awal = KEBENARAN backend, BUKAN optimistik. Task yang dikirim
     // (Workbench Agent Input maupun Consultant Run Task) masuk SATU Global Task
     // Queue; bila slot eksekusi sedang terpakai, backend mengembalikan
@@ -855,32 +953,56 @@ async function submitTask(text, overrideProviderInstanceId = null, overrideModel
     // ditampilkan sebagai "queued", bukan "running". Promosi ke running datang
     // dari SSE `task_started` (atau queue_state="running" pada respons ini).
     const queueState = record.queue_state;
-    if (queueState === "pending") {
-      // Menunggu execution slot Global Task Queue -> "queued" (bukan running).
-      task.status = "queued";
-    } else if (queueState === "running") {
-      task.status = "running";
-      // Task ini langsung mendapat slot -> target tombol Stop.
-      runningTaskId.value = record.task_id;
+    // Pisahkan "task yang baru dibuat" dari "task yang sedang dipantau". Bila ada
+    // task yang BENAR-BENAR running sedang dipantau, submit task baru TIDAK boleh
+    // meng-overwrite tampilan/streamnya: task baru hanya masuk antrian (pending).
+    const adopt = shouldAdoptSubmittedTask({
+      queueState,
+      isViewingRunning: isViewingRunningTask(),
+    });
+
+    if (adopt) {
+      task.id = record.task_id;
+      task.text = record.task;
+      if (queueState === "pending") {
+        // Menunggu execution slot Global Task Queue -> "queued" (bukan running).
+        task.status = "queued";
+      } else if (queueState === "running") {
+        task.status = "running";
+        // Task ini langsung mendapat slot -> target tombol Stop.
+        runningTaskId.value = record.task_id;
+      } else {
+        task.status = record.status || "prepared";
+      }
+      resetAudioTracker();
+      resetWorkspace();
+      // Bila task LANGSUNG mendapat slot eksekusi (queue_state="running"), mulai
+      // timer dari sekarang. Pengaman bila event task_started terlewat sebelum
+      // SSE tersambung; bila event datang, nilai ini TIDAK ditimpa (guard == null).
+      if (queueState === "running" && taskStartedAt.value == null) {
+        taskStartedAt.value = Date.now();
+      }
+      connectStream();
     } else {
-      task.status = record.status || "prepared";
-    }
-    resetAudioTracker();
-    resetWorkspace();
-    // Bila task LANGSUNG mendapat slot eksekusi (queue_state="running"), mulai
-    // timer dari sekarang. Pengaman bila event task_started terlewat sebelum
-    // SSE tersambung; bila event datang, nilai ini TIDAK ditimpa (guard == null).
-    if (queueState === "running" && taskStartedAt.value == null) {
-      taskStartedAt.value = Date.now();
+      // Task A sedang running & dipantau -> biarkan TETAP tampil. Task B baru
+      // masuk Global Task Queue sebagai pending (terlihat di panel TASKS),
+      // TIDAK diadopsi dan TIDAK me-rebind stream. Ingat B agar UI mengikuti
+      // begitu scheduler benar-benar menjalankannya (setelah A selesai).
+      deferredTaskIds.set(record.task_id, record.task);
+      // Stream harus tetap terbuka agar event task_started B nanti terlihat.
+      ensureStream();
     }
     await refreshTasks();
-    connectStream();
     composerOpen.value = false;
     // Task baru -> panel TASKS (queue global) ikut refresh meski dibuat dari
     // Agent Input (satu queue yang sama).
     queueRefresh.value += 1;
+    // Kembalikan record: pemanggil (mis. Run Task Consultant) memakai task_id
+    // task yang BARU dibuat, yang belum tentu == task yang sedang dipantau.
+    return record;
   } catch (e) {
     error.value = e.message || "Failed to create task.";
+    return null;
   } finally {
     submitting.value = false;
   }
