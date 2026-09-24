@@ -1,7 +1,7 @@
 """Verifikasi Agent Loop (fondasi).
 
 Menguji: AgentAction, AgentObservation, beberapa step, status DONE/FAILED,
-dan proteksi max_iterations.
+dan ketiadaan hard limit iterasi (loop tidak berhenti karena jumlah step).
 
 Jalankan:
     python scripts/check_agent_loop.py
@@ -22,7 +22,6 @@ from agent_ai.core import (  # noqa: E402
     AgentLoop,
     AgentObservation,
     AgentStatus,
-    MaxIterationsExceeded,
 )
 
 
@@ -64,21 +63,20 @@ def main() -> int:
     assert loop2.status == AgentStatus.FAILED
     print()
 
-    # 4) Proteksi max_iterations.
+    # 4) TIDAK ada hard limit iterasi: melewati max_iterations tetap boleh.
     loop3 = AgentLoop(task="infinite", max_iterations=2)
     loop3.start()
-    try:
-        for i in range(5):
-            loop3.record_action(AgentAction(name=f"action_{i}"))
-            loop3.record_observation(AgentObservation(content=f"obs_{i}"))
-        print("[ERROR] seharusnya MaxIterationsExceeded")
-        return 1
-    except MaxIterationsExceeded as exc:
-        print(f"max_iterations OK -> {exc}")
-        print(f"  status akhir = {loop3.status.value}, iter={loop3.iteration}")
+    for i in range(5):
+        loop3.record_action(AgentAction(name=f"action_{i}"))
+        loop3.record_observation(AgentObservation(content=f"obs_{i}"))
+    print(f"tanpa hard limit OK -> iter={loop3.iteration}, status={loop3.status.value}")
+    assert loop3.iteration == 5, loop3.iteration
+    assert not loop3.is_finished, "loop tidak boleh berhenti karena jumlah step"
+    loop3.finish(result="selesai oleh keputusan final LLM")
+    assert loop3.status == AgentStatus.DONE
 
     print()
-    print("[OK] Agent Loop (action/observation/step, DONE/FAILED, max_iterations) bekerja.")
+    print("[OK] Agent Loop (action/observation/step, DONE/FAILED tanpa hard limit iterasi) bekerja.")
     return 0
 
 

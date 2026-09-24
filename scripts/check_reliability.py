@@ -11,7 +11,7 @@ Menguji secara deterministik (tanpa API cloud):
     8. repeated failed action
     9. no-progress detection
    10. legitimate repeated action tidak langsung dianggap failure
-   11. iteration limit
+   11. iteration limit tidak lagi memicu terminasi
    12. provider error
    13. timeout
    14. decision: retry/recover/stop/fail
@@ -134,12 +134,12 @@ def _run() -> int:
     assert EventType.NO_PROGRESS not in legit_types
     print("[10] legitimate repeated action tidak dianggap failure OK")
 
-    # 11) iteration limit.
+    # 11) iteration limit TIDAK lagi menjadi event/terminasi task.
     hist_limit = [ProgressSnapshot(iteration=10, action_signature="x", outcome="success",
                                    observation_signature="o", made_progress=True)]
     limit_events = det.detect(hist_limit)
-    assert EventType.ITERATION_LIMIT in {e.type for e in limit_events}
-    print("[11] iteration limit OK")
+    assert EventType.ITERATION_LIMIT not in {e.type for e in limit_events}
+    print("[11] iteration limit tidak lagi memicu terminasi OK")
 
     # 12) provider error.
     pe = det.detect_error(RuntimeError("provider down"))
@@ -169,23 +169,24 @@ def _run() -> int:
     assert dec_recover.action == DecisionAction.RECOVER
     print(f"[14b] decision RECOVER OK -> {dec_recover.reason}")
 
-    # stop (iteration limit)
+    # stop default (tanpa event): iteration limit sudah TIDAK memicu apa pun.
     mgr3 = ReliabilityManager(detector=Detector(iteration_limit=3))
     mgr3.record_progress(ProgressSnapshot(iteration=3, action_signature="x",
                                           outcome="success", observation_signature="o", made_progress=True))
+    assert EventType.ITERATION_LIMIT not in {e.type for e in mgr3.events}
     dec_stop = mgr3.decide()
     assert dec_stop.action == DecisionAction.STOP
-    print(f"[14c] decision STOP OK -> {dec_stop.reason}")
+    print("[14c] tanpa event -> STOP default (iteration limit tidak memicu STOP) OK")
 
-    # fail (repeated failed action)
+    # recover (repeated failed action -> sinyal ke LLM, bukan FAIL task)
     mgr4 = ReliabilityManager(detector=Detector(repeat_threshold=3, iteration_limit=10))
     for i in range(1, 4):
         mgr4.record_progress(ProgressSnapshot(
             iteration=i, action_signature="run_command:test", outcome="command_failure",
             observation_signature="err", made_progress=False))
-    dec_fail = mgr4.decide()
-    assert dec_fail.action == DecisionAction.FAIL
-    print(f"[14d] decision FAIL OK -> {dec_fail.reason}")
+    dec_recover_fail = mgr4.decide()
+    assert dec_recover_fail.action == DecisionAction.RECOVER
+    print(f"[14d] repeated failed action -> RECOVER OK -> {dec_recover_fail.reason}")
 
     # 15) OpenRouter-style repeated verification scenario.
     #     Model melakukan verifikasi berulang (read_file + run_command) dengan
@@ -209,9 +210,9 @@ def _run() -> int:
             observation_signature=obs, made_progress=prog))
     detected = {e.type for e in mgr5.latest_events()}
     assert EventType.NO_PROGRESS in detected, "harus mendeteksi no-progress"
-    assert EventType.ITERATION_LIMIT in detected, "harus mendeteksi mendekati iteration limit"
+    assert EventType.ITERATION_LIMIT not in detected, "iteration limit bukan lagi event"
     dec_or = mgr5.decide()
-    assert dec_or.action in (DecisionAction.RECOVER, DecisionAction.STOP)
+    assert dec_or.action == DecisionAction.RECOVER
     print(f"[15] OpenRouter-style repeated verification OK -> events={sorted(t.value for t in detected)} decision={dec_or.action.value}")
 
     # 16) tidak ada duplicate terminal/provider executor.

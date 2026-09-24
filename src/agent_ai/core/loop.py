@@ -1,8 +1,13 @@
 """Agent Loop (fondasi).
 
-Mengelola siklus iteration/action/observation dengan status yang jelas dan
-batas maksimum iterasi. Loop ini TIDAK memanggil provider, TIDAK mengeksekusi
-tool, dan TIDAK memparse response model secara otomatis.
+Mengelola siklus iteration/action/observation dengan status yang jelas. Loop ini
+TIDAK memanggil provider, TIDAK mengeksekusi tool, dan TIDAK memparse response
+model secara otomatis.
+
+CATATAN PENTING: AgentLoop TIDAK lagi menghentikan task karena jumlah
+iterasi/step. `max_iterations` dipertahankan sebagai metadata (kompatibilitas)
+tetapi BUKAN hard limit: autonomous task berhenti hanya karena keputusan final
+LLM, user cancel, atau fatal error nyata.
 
 Caller (atau orkestrator di masa depan) yang menggerakkan loop:
 
@@ -28,7 +33,12 @@ from agent_ai.core.models import (
 
 
 class MaxIterationsExceeded(Exception):
-    """Dilempar bila loop melewati batas maksimum iterasi."""
+    """Exception historis untuk batas iterasi.
+
+    Dipertahankan untuk kompatibilitas API (impor/`except` pada pemanggil),
+    tetapi TIDAK lagi dilempar oleh AgentLoop: batas iterasi bukan lagi alasan
+    untuk menghentikan autonomous task.
+    """
 
 
 class AgentLoop:
@@ -36,7 +46,8 @@ class AgentLoop:
 
     Args:
         task: task awal.
-        max_iterations: batas maksimum iterasi (harus >= 1).
+        max_iterations: metadata batas iterasi (harus >= 1). TIDAK menghentikan
+            loop; disimpan untuk observability/kompatibilitas saja.
     """
 
     def __init__(self, task: str = "", max_iterations: int = 10) -> None:
@@ -70,19 +81,16 @@ class AgentLoop:
     # Step management
     # ------------------------------------------------------------------ #
     def _ensure_running(self) -> None:
+        # Agent task harus dapat berjalan selama diperlukan: TIDAK ada hard
+        # stop berbasis jumlah iterasi/step/tool call. Loop berhenti hanya
+        # karena keputusan final LLM, user cancel, atau fatal error nyata.
         if self.state.is_finished:
             raise RuntimeError(f"Loop sudah selesai (status={self.state.status.value}).")
-        if self.state.iteration >= self.state.max_iterations:
-            self.fail("Batas maksimum iterasi tercapai.")
-            raise MaxIterationsExceeded(
-                f"Melebihi max_iterations={self.state.max_iterations}."
-            )
 
     def record_action(self, action: AgentAction) -> AgentStep:
         """Catat action sebagai step baru (status -> WAITING).
 
         Raises:
-            MaxIterationsExceeded: bila batas iterasi tercapai.
             RuntimeError: bila loop sudah selesai.
         """
         self._ensure_running()

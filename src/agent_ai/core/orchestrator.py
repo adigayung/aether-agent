@@ -75,15 +75,15 @@ if TYPE_CHECKING:  # pragma: no cover - hanya untuk type hint, hindari import cy
     from agent_ai.projects.brain import ProjectBrain
 
 
-# Emergency safety guard untuk continuous loop Native Tool Calling.
-# Nilai TINGGI murni proteksi infrastruktur terhadap runaway loop (mis. model
-# mengulang tool call yang sama tanpa henti). Ini BUKAN limit behavior agent,
-# BUKAN target iterasi, dan BUKAN mekanisme completion: loop normal berhenti
-# ketika LLM memberi response final TANPA tool call.
+# Dipertahankan untuk KOMPATIBILITAS API (default parameter yang diimpor
+# sebagian verifier). Nilainya BUKAN lagi digunakan sebagai hard stop:
+# continuous loop TIDAK di-FAIL karena jumlah step. Loop berhenti hanya ketika
+# LLM memberi response final TANPA tool call, user cancel, atau fatal error
+# nyata. Agent task dapat berjalan selama diperlukan.
 _CONTINUOUS_SAFETY_MAX_STEPS = 1000
 
 #: Estimasi kasar karakter per token, dipakai untuk mengubah anggaran token
-#: provider (mis. context window Ollama) menjadi anggaran karakter konteks
+#: provider (mis. context window default provider) menjadi anggaran karakter konteks
 #: pengetahuan. Heuristik sederhana tanpa tokenizer eksternal.
 _KNOWLEDGE_CHARS_PER_TOKEN = 4
 
@@ -698,7 +698,7 @@ class AgentOrchestrator:
         """Nama model aktif untuk logging. Tidak pernah secret.
 
         Prioritas: `options.model` (model eksplisit per-run) -> `provider.config.model`
-        (model default provider, mis. OllamaConfig.model). Fallback ke config
+        (model default provider, mis. config provider). Fallback ke config
         provider penting agar log `provider_request` tidak menampilkan model
         kosong ketika provider memakai model default-nya (bukan bug runtime,
         hanya akurasi logging). Tidak mengubah payload yang dikirim provider.
@@ -801,9 +801,9 @@ class AgentOrchestrator:
     # (lihat tools/workspace.py). Dipakai generik, bukan hardcode nama tool.
     _MUTATION_MARKERS = ("written", "edited", "deleted", "moved")
 
-    # Batas berapa kali response provider yang TERPOTONG (finish_reason=length,
-    # tool-call tidak lengkap) boleh dipulihkan sebelum menyerah dengan pesan
-    # yang jelas. Ini safety-limit (seperti max_iterations), bukan target.
+    # Dipertahankan untuk kompatibilitas. Batas ini BUKAN lagi mematikan task:
+    # response terpotong yang berulang tetap dipulihkan (pesan lanjut dikirim
+    # ke LLM) dan TIDAK men-FAIL seluruh task.
     _MAX_TRUNCATION_RECOVERIES = 3
 
     # ------------------------------------------------------------------ #
@@ -1357,15 +1357,9 @@ class AgentOrchestrator:
                         "recovery": truncation_recoveries,
                     },
                 )
-                # Safety limit: bila model terus menghasilkan response terpotong,
-                # berhenti dengan kegagalan yang JELAS (bukan exception parsing).
-                if truncation_recoveries > self._MAX_TRUNCATION_RECOVERIES:
-                    loop.fail(
-                        "Provider response terpotong berulang kali "
-                        f"(finish_reason=length, {truncation_recoveries}x); "
-                        "model tidak menghasilkan tool-call yang lengkap."
-                    )
-                    break
+                # Catatan: response terpotong yang BERULANG TIDAK lagi mematikan
+                # task; agent tetap diberi kesempatan melanjutkan (recovery di
+                # bawah). Hanya hard-termination-nya yang dihilangkan.
 
             # 3) TOOL_CALL -> eksekusi tiap action, catat step, kirim balik.
             try:
@@ -1560,14 +1554,6 @@ class AgentOrchestrator:
             if self._cancel_requested():
                 loop.cancel(self._cancel_reason())
                 break
-            # Safety guard (infrastruktur, bukan completion): cegah runaway.
-            if len(loop.state.steps) >= loop.state.max_iterations:
-                loop.fail(
-                    "Continuous loop dihentikan oleh safety guard "
-                    f"(max_steps={loop.state.max_iterations}); ini proteksi "
-                    "runaway, bukan limit behavior agent."
-                )
-                break
 
             # Runtime context compaction: kirim konteks yang BOUNDED, bukan
             # seluruh riwayat mentah. Task pendek dikembalikan apa adanya.
@@ -1661,13 +1647,9 @@ class AgentOrchestrator:
                             "recovery": truncation_recoveries,
                         },
                     )
-                    if truncation_recoveries > self._MAX_TRUNCATION_RECOVERIES:
-                        loop.fail(
-                            "Provider response terpotong berulang kali "
-                            f"(finish_reason=length, {truncation_recoveries}x); "
-                            "model tidak menghasilkan jawaban final lengkap."
-                        )
-                        break
+                    # Catatan: truncation berulang TIDAK lagi mematikan task;
+                    # agent terus diberi kesempatan melanjutkan sampai LLM
+                    # menghasilkan jawaban final (bukan FAILED karena cap).
                     history.append_user_message(self._truncation_message().content)
                     continue
                 history.append_assistant_message(content=response.text or "")
@@ -1758,7 +1740,6 @@ class AgentOrchestrator:
                 cancel_check=self._cancel_requested,
             )
 
-            stop = False
             # Hasil dipetakan kembali sesuai urutan input (tool_call id),
             # bukan urutan selesai. Payload None = tidak dieksekusi (cancel).
             for action, payload in zip(model_tool_calls, batch.payloads):
@@ -1769,23 +1750,11 @@ class AgentOrchestrator:
                     payload.tool_call_id, payload.tool_name, payload.to_content()
                 )
                 # Catat step untuk observability (bukan keputusan completion).
-                # Guard runaway tetap berlaku.
-                try:
-                    loop.record_action(self.executor.to_agent_action(action))
-                    loop.record_observation(
-                        self._tool_payload_to_observation(payload)
-                    )
-                except MaxIterationsExceeded:
-                    loop.fail(
-                        "Continuous loop dihentikan oleh safety guard "
-                        f"(max_steps={loop.state.max_iterations})."
-                    )
-                    stop = True
-                    break
+                # Tidak ada hard limit step: agent berjalan selama diperlukan.
+                loop.record_action(self.executor.to_agent_action(action))
+                loop.record_observation(self._tool_payload_to_observation(payload))
             if batch.cancelled:
                 loop.cancel(self._cancel_reason())
-                stop = True
-            if stop:
                 break
 
         learning = self._learn_from_run(task, loop)

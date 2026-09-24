@@ -31,8 +31,10 @@ class Detector:
         repeat_threshold: jumlah pengulangan identik sebelum dianggap repetisi.
         no_progress_threshold: jumlah iterasi tanpa progres sebelum dianggap
             no-progress.
-        iteration_limit: batas iterasi; mendekati batas memicu ITERATION_LIMIT.
-        iteration_warn_margin: jarak dari batas untuk memicu peringatan.
+        iteration_limit: dipertahankan untuk kompatibilitas konfigurasi. TIDAK
+            lagi memicu event/terminasi (iteration limit bukan alasan
+            menghentikan autonomous task).
+        iteration_warn_margin: dipertahankan untuk kompatibilitas konfigurasi.
     """
 
     def __init__(
@@ -57,7 +59,8 @@ class Detector:
         events.extend(self._detect_repeated_arguments(history))
         events.extend(self._detect_repeated_failed_action(history))
         events.extend(self._detect_no_progress(history))
-        events.extend(self._detect_iteration_limit(history))
+        # CATATAN: iteration limit TIDAK lagi dipakai sebagai alasan mengakhiri
+        # autonomous task, sehingga tidak diemit sebagai event di sini.
         return events
 
     def _detect_repeated_action(
@@ -150,33 +153,6 @@ class Detector:
                     message=f"{len(tail)} iterasi berturut-turut tanpa progres.",
                     severity=0.7,
                     metadata={"count": len(tail)},
-                )
-            ]
-        return []
-
-    def _detect_iteration_limit(
-        self, history: List[ProgressSnapshot]
-    ) -> List[ReliabilityEvent]:
-        """Mendekati atau mencapai batas iterasi."""
-        if not history:
-            return []
-        current = history[-1].iteration
-        if current >= self.iteration_limit:
-            return [
-                ReliabilityEvent(
-                    type=EventType.ITERATION_LIMIT,
-                    message=f"Iterasi {current} mencapai batas {self.iteration_limit}.",
-                    severity=1.0,
-                    metadata={"iteration": current, "limit": self.iteration_limit},
-                )
-            ]
-        if current >= self.iteration_limit - self.iteration_warn_margin:
-            return [
-                ReliabilityEvent(
-                    type=EventType.ITERATION_LIMIT,
-                    message=f"Iterasi {current} mendekati batas {self.iteration_limit}.",
-                    severity=0.5,
-                    metadata={"iteration": current, "limit": self.iteration_limit},
                 )
             ]
         return []

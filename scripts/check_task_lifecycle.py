@@ -15,7 +15,7 @@ Menguji:
     9. snapshot (isolasi dari mutasi luar)
    10. integration compatibility dengan Runtime/Orchestrator
    11. task_id dapat diteruskan ke Change Tracking tanpa merusak API lama
-   12. lifecycle tetap konsisten saat provider error / tool error / iteration limit
+   12. lifecycle tetap konsisten saat provider error / tool error / melewati max_iterations
 
 Jalankan:
     python scripts/check_task_lifecycle.py
@@ -243,18 +243,22 @@ def _run() -> int:
     assert prepared_no_id.task_id is None
     print("[11b] TaskPreparation meneruskan task_id OK")
 
-    # 12) lifecycle tetap konsisten saat iteration limit tercapai.
-    #     Provider yang selalu meminta tool call -> orchestrator kena limit.
-    #     Iteration limit adalah proteksi jalur LEGACY -> pakai use_continuous_loop=False.
-    loop_provider = ScriptedProvider([{"tool": "read_file", "arguments": {"path": "a.txt"}}] * 20)
+    # 12) lifecycle tetap konsisten walau loop melewati max_iterations.
+    #     TIDAK ada hard limit: provider terus minta tool call lalu final ->
+    #     task COMPLETED dan lifecycle ikut COMPLETED.
+    loop_provider = ScriptedProvider(
+        [{"tool": "read_file", "arguments": {"path": "a.txt"}}] * 5
+        + ["FINAL: selesai loop"]
+    )
     prepared_loop = PreparedTask(task="task loop", task_id="task-loop")
     lc_loop = TaskLifecycle("task loop", task_id=prepared_loop.task_id)
     result_loop = AgentRuntime(
         provider=loop_provider, max_iterations=3, use_continuous_loop=False
     ).run(prepared_loop, lifecycle=lc_loop)
-    assert result_loop.status == RuntimeStatus.FAILED
-    assert lc_loop.status == TaskStatus.FAILED, f"lifecycle harus FAILED, dapat {lc_loop.status}"
-    print("[12] lifecycle konsisten saat iteration limit OK")
+    assert result_loop.status == RuntimeStatus.COMPLETED, result_loop.status
+    assert result_loop.iterations > 3, result_loop.iterations
+    assert lc_loop.status == TaskStatus.COMPLETED, f"lifecycle harus COMPLETED, dapat {lc_loop.status}"
+    print("[12] lifecycle konsisten melewati max_iterations OK")
 
     print()
     print("[OK] Task Lifecycle & Execution State bekerja (transition, timestamps, integrasi).")

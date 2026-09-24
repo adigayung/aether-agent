@@ -100,40 +100,34 @@ class ReliabilityManager:
         return self.retry.can_retry(outcome)
 
     def should_recover(self) -> bool:
-        """True bila perlu strategi pemulihan (repetisi/no-progress).
-
-        Iteration limit TIDAK memicu recover (harus stop).
-        """
-        if self._has(EventType.ITERATION_LIMIT):
-            return False
+        """True bila perlu strategi pemulihan (repetisi/no-progress)."""
         return self._has(EventType.REPEATED_ACTION) or self._has(EventType.NO_PROGRESS)
 
     def should_stop(self) -> bool:
-        """True bila loop harus berhenti dengan aman (iteration limit)."""
-        return self._has(EventType.ITERATION_LIMIT)
+        """True bila loop harus berhenti dengan aman.
+
+        Iteration limit TIDAK lagi menjadi alasan berhenti: autonomous task
+        berjalan selama diperlukan dan berhenti murni dari keputusan LLM
+        (final), user cancel, atau fatal error nyata.
+        """
+        return False
 
     def decide(self, outcome: Optional[str] = None) -> ReliabilityDecision:
         """Buat keputusan lengkap berdasarkan event + outcome.
 
         Prioritas:
-            1. iteration limit        -> STOP
-            2. outcome retryable      -> RETRY (dengan backoff)
-            3. repeated failed action -> FAIL
-            4. repeated/no-progress   -> RECOVER
-            5. selain itu             -> RECOVER (bila ada event) / STOP
+            1. outcome retryable      -> RETRY (dengan backoff)
+            2. repeated failed action -> RECOVER (sinyal ke LLM, bukan FAIL)
+            3. repeated/no-progress   -> RECOVER
+            4. selain itu             -> RECOVER (bila ada event) / STOP
+
+        CATATAN: iteration limit BUKAN lagi alasan menghentikan autonomous
+        task. Berhenti murni dari keputusan LLM (final), user cancel, atau
+        fatal error nyata.
         """
         events = self.latest_events() or self._events
 
-        # 1) Iteration limit -> stop.
-        if self._has(EventType.ITERATION_LIMIT):
-            return ReliabilityDecision(
-                action=DecisionAction.STOP,
-                reason="Iteration limit tercapai.",
-                retryable=False,
-                events=events,
-            )
-
-        # 2) Outcome retryable -> retry.
+        # 1) Outcome retryable -> retry.
         if outcome is not None and self.should_retry(outcome):
             delay = self.retry.next_delay(outcome)
             return ReliabilityDecision(
@@ -145,16 +139,18 @@ class ReliabilityManager:
                 metadata={"attempt": self.retry.attempts},
             )
 
-        # 3) Repeated failed action -> fail.
+        # 2) Repeated failed action -> RECOVER: kirim sinyal ke LLM agar
+        #    mengubah pendekatan. JANGAN mematikan seluruh task hanya karena
+        #    action identik gagal berulang.
         if self._has(EventType.REPEATED_FAILED_ACTION):
             return ReliabilityDecision(
-                action=DecisionAction.FAIL,
-                reason="Action gagal berulang identik.",
+                action=DecisionAction.RECOVER,
+                reason="Action gagal berulang identik; minta LLM ubah pendekatan.",
                 retryable=False,
                 events=events,
             )
 
-        # 4) Repetisi / no-progress -> recover.
+        # 3) Repetisi / no-progress -> recover.
         if self.should_recover():
             return ReliabilityDecision(
                 action=DecisionAction.RECOVER,
@@ -163,7 +159,7 @@ class ReliabilityManager:
                 events=events,
             )
 
-        # 5) Default: bila ada event -> recover, jika tidak -> stop.
+        # 4) Default: bila ada event -> recover, jika tidak -> stop.
         if events:
             return ReliabilityDecision(
                 action=DecisionAction.RECOVER,

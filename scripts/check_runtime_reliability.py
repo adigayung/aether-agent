@@ -11,11 +11,11 @@ Menguji:
     6. exponential backoff policy dihormati
     7. repeated identical action + unchanged observation -> recovery
     8. repeated legitimate action + changed observation -> tetap lanjut
-    9. repeated failed action -> fail/recover sesuai policy
+    9. repeated failed action -> recover (sinyal ke LLM, bukan FAIL task)
    10. timeout -> reliability decision
    11. provider error -> reliability decision
    12. malformed tool response -> reliability decision
-   13. iteration limit -> controlled stop/fail
+   13. iteration limit TIDAK lagi menghentikan task
    14. recover tidak membuat execution loop kedua
    15. final response tidak menjalankan tool
    16. existing AgentLoop tetap digunakan
@@ -207,7 +207,13 @@ def _run() -> int:
     mgr7 = ReliabilityManager(
         detector=Detector(repeat_threshold=3, no_progress_threshold=3, iteration_limit=10),
     )
-    provider7 = ScriptedProvider([tool_call("echo", {"value": "same"})])  # selalu sama
+    provider7 = ScriptedProvider([
+        tool_call("echo", {"value": "same"}),
+        tool_call("echo", {"value": "same"}),
+        tool_call("echo", {"value": "same"}),
+        tool_call("echo", {"value": "same"}),
+        final("selesai setelah recovery"),
+    ])
     tool7 = EchoTool()
     orch7 = AgentOrchestrator(
         provider=provider7, executor=ToolExecutor(registry=_registry(tool7)),
@@ -217,6 +223,7 @@ def _run() -> int:
     # Harus ada recovery message di history.
     joined7 = "\n".join(m.content for m in provider7.last_messages)
     assert "[reliability]" in joined7, "harus ada pesan recovery"
+    assert result7.status == AgentStatus.DONE, result7.error
     print(f"[7] repeated identical action -> recovery OK -> status={result7.status.value}")
 
     # 8) repeated legitimate action + changed observation -> tetap lanjut.
@@ -254,14 +261,19 @@ def _run() -> int:
     mgr9 = ReliabilityManager(
         detector=Detector(repeat_threshold=3, iteration_limit=10),
     )
-    provider9 = ScriptedProvider([tool_call("echo", {"value": "x"})])
+    provider9 = ScriptedProvider([
+        tool_call("echo", {"value": "x"}),
+        tool_call("echo", {"value": "x"}),
+        tool_call("echo", {"value": "x"}),
+        final("menyerah; jawaban final setelah gagal berulang"),
+    ])
     orch9 = AgentOrchestrator(
         provider=provider9, executor=ToolExecutor(registry=_registry(EchoTool(fail=True))),
         max_iterations=10, reliability=mgr9,
     )
     result9 = orch9.run("gagal terus")
-    assert result9.status == AgentStatus.FAILED, "repeated failed action harus fail"
-    print(f"[9] repeated failed action -> fail OK -> status={result9.status.value}")
+    assert result9.status == AgentStatus.DONE, "repeated failed action -> recover (bukan FAIL)"
+    print(f"[9] repeated failed action -> recover OK -> status={result9.status.value}")
 
     # 10) timeout -> reliability decision.
     mgr10 = ReliabilityManager(
@@ -317,16 +329,23 @@ def _run() -> int:
     assert any(e.type.value == "malformed_tool_response" for e in mgr12.events)
     print("[12] malformed tool response -> reliability decision OK")
 
-    # 13) iteration limit -> controlled stop/fail.
+    # 13) iteration limit TIDAK lagi menghentikan task.
     mgr13 = ReliabilityManager(detector=Detector(iteration_limit=3, iteration_warn_margin=0))
-    provider13 = ScriptedProvider([tool_call("echo", {"value": "x"})])
+    provider13 = ScriptedProvider([
+        tool_call("echo", {"value": "x"}),
+        tool_call("echo", {"value": "x"}),
+        tool_call("echo", {"value": "x"}),
+        tool_call("echo", {"value": "x"}),
+        final("selesai melewati iteration limit lama"),
+    ])
     orch13 = AgentOrchestrator(
         provider=provider13, executor=ToolExecutor(registry=_registry(EchoTool())),
         max_iterations=3, reliability=mgr13,
     )
     result13 = orch13.run("loop terus")
-    assert result13.status == AgentStatus.FAILED, "iteration limit harus stop/fail terkendali"
-    print(f"[13] iteration limit -> controlled stop/fail OK -> status={result13.status.value}")
+    assert result13.status == AgentStatus.DONE, result13.error
+    assert result13.iterations > 3, result13.iterations
+    print(f"[13] iteration limit tidak lagi menghentikan task OK -> status={result13.status.value} iterations={result13.iterations}")
 
     # 14) recover tidak membuat execution loop kedua.
     #     Bukti: hanya satu AgentLoop yang dipakai; jumlah pemanggilan LLM

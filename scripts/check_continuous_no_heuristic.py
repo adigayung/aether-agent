@@ -11,8 +11,8 @@ Membuktikan kontrak completion `AgentOrchestrator.run_continuous_loop`:
       memaksa step tambahan dan TIDAK memutus loop.
     - `_completion_detected()` (heuristic loop lama) TIDAK pernah dipanggil;
       walau dipaksa mengembalikan True, loop continuous tetap MENGABAIKAN-nya.
-    - Safety guard tetap ada sebagai proteksi runaway (FAILED jelas), bukan
-      sebagai mekanisme completion.
+    - TIDAK ada cap jumlah step: melewati `max_steps` TIDAK mem-FAIL task;
+      loop berhenti hanya karena LLM final (atau cancel/error fatal).
 
 Provider palsu (scripted) -> tanpa network/API. Fixture workspace berada di
 `J:\\Agent_Ai\\dummy_test` (workspace uji terisolasi, BUKAN bagian AETHER) dan
@@ -244,8 +244,9 @@ def scenario_forced_heuristic_ignored(executor: ToolExecutor) -> None:
     print("OK: _completion_detected dipaksa True pun DIABAIKAN oleh continuous loop")
 
 
-def scenario_safety_guard_is_infrastructure(executor: ToolExecutor) -> None:
-    """Safety guard tetap ada: runaway -> FAILED jelas (bukan 'selesai')."""
+def scenario_no_step_cap(executor: ToolExecutor) -> None:
+    """Tidak ada cap step: melewati `max_steps` tetap lanjut sampai LLM final."""
+    (FIXTURE / "a.txt").write_text("hi", encoding="utf-8")
     script = [
         _tool_turn(f"baca {i}", [_tool_call(f"r{i}", "read_file", {"path": "a.txt"})])
         for i in range(6)
@@ -253,11 +254,11 @@ def scenario_safety_guard_is_infrastructure(executor: ToolExecutor) -> None:
     provider = ScriptedProvider(script)
     orch = _make_orch(provider, executor)
     result = orch.run_continuous_loop("Baca terus tanpa henti", max_steps=3)
-    print(f"[F] status={result.status.value} calls={provider.calls} err={result.error!r}")
-    assert result.status == AgentStatus.FAILED, result.status
-    assert "safety guard" in (result.error or "").lower(), result.error
-    assert provider.calls == 3, provider.calls
-    print("OK: safety guard = proteksi runaway (FAILED jelas), bukan completion")
+    print(f"[F] status={result.status.value} calls={provider.calls} iterations={result.iterations}")
+    assert result.status == AgentStatus.DONE, result.error
+    assert provider.calls == 7, provider.calls
+    assert result.iterations == 6, result.iterations
+    print("OK: tidak ada cap step; loop berhenti karena LLM final (bukan FAILED)")
 
 
 def main() -> int:
@@ -276,7 +277,7 @@ def main() -> int:
         scenario_tool_error_then_continue(executor())
         scenario_task_keywords_ignored(executor())
         scenario_forced_heuristic_ignored(executor())
-        scenario_safety_guard_is_infrastructure(executor())
+        scenario_no_step_cap(executor())
     finally:
         shutil.rmtree(FIXTURE, ignore_errors=True)
         # Bersihkan root dummy_test hanya bila sudah kosong.

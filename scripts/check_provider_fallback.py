@@ -321,7 +321,10 @@ def _run() -> int:
         assert dec9.selected is None
     # Runtime: tool failure (bukan provider error) TIDAK memicu fallback.
     tool = EchoTool(fail=True)
-    provider9 = ScriptedProvider("provider_a", responses=[tool_call("echo", {"value": "x"})])
+    provider9 = ScriptedProvider("provider_a", responses=[
+        tool_call("echo", {"value": "x"}),
+        final("selesai; tool gagal tapi provider tidak di-fallback"),
+    ])
     fallback_calls = {"n": 0}
 
     def factory(name):
@@ -338,7 +341,7 @@ def _run() -> int:
         use_continuous_loop=False,
     )
     result9 = runtime9.run(PreparedTask(task="tool gagal", plan=TaskPlanner().create_plan("Perbaiki bug")))
-    assert result9.status == RuntimeStatus.FAILED, result9.status
+    assert result9.status == RuntimeStatus.COMPLETED, result9.status
     assert fallback_calls["n"] == 0, "tool failure tidak boleh memicu provider fallback"
     print("[9] tool/command/validation failures tidak memicu fallback OK")
 

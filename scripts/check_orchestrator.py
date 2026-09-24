@@ -5,7 +5,7 @@ sehingga tidak memanggil API cloud dan tidak bergantung pada Ollama.
 
 Skenario:
     1) task -> LLM tool call -> tool dieksekusi -> observation -> LLM FINAL.
-    2) max_iterations bekerja.
+    2) TIDAK ada hard limit iterasi (melewati max_iterations tetap lanjut).
     3) tool error tidak membuat loop crash.
 
 Jalankan:
@@ -85,13 +85,20 @@ def main() -> int:
     print("history observation terkirim ke LLM -> OK")
     print()
 
-    # 2) max_iterations bekerja (provider selalu minta tool call).
-    provider2 = ScriptedProvider([tool_call("list_files", {"path": "src"})])
+    # 2) TIDAK ada hard limit iterasi: melewati max_iterations tetap lanjut
+    #    sampai LLM memberi response final.
+    provider2 = ScriptedProvider([
+        tool_call("list_files", {"path": "src"}),
+        tool_call("list_files", {"path": "src"}),
+        tool_call("list_files", {"path": "src"}),
+        tool_call("list_files", {"path": "src"}),
+        final("Selesai."),
+    ])
     orch2 = AgentOrchestrator(provider=provider2, max_iterations=3)
     result2 = orch2.run("Loop terus.")
-    print(f"max_iter status = {result2.status.value}, iterations = {result2.iterations}")
-    assert result2.status == AgentStatus.FAILED
-    assert result2.iterations == 3
+    print(f"tanpa hard limit status = {result2.status.value}, iterations = {result2.iterations}")
+    assert result2.status == AgentStatus.DONE
+    assert result2.iterations == 4, result2.iterations
     print()
 
     # 3) Tool error tidak membuat loop crash -> dikirim sebagai observation.
@@ -107,7 +114,7 @@ def main() -> int:
     print("tool error dikirim sebagai observation -> OK")
     print()
 
-    print("[OK] Agent Orchestrator (iterative loop, FINAL, max_iterations, tool error) bekerja.")
+    print("[OK] Agent Orchestrator (iterative loop, FINAL, tanpa hard limit iterasi, tool error) bekerja.")
     return 0
 
 
