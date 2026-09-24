@@ -572,14 +572,15 @@ class ConversationHistory:
         messages = list(self._messages)
         if max_tokens is None:
             return messages
-        budget = int(max_tokens) - max(int(overhead_tokens), 0)
+        max_budget = int(max_tokens)
+        overhead = max(int(overhead_tokens), 0)
+        budget = max_budget - overhead
         if self.estimate_messages_tokens(messages) <= budget:
             return messages
 
         head, tail = self._split_protected_head(messages)
         head_tokens = self.estimate_messages_tokens(head)
         tail_budget = budget - head_tokens
-        limit = max(tail_budget, 0)
 
         # BUGFIX (kontinuitas state kerja antar-round): bila KEPALA (system
         # prompt + konteks pengetahuan/Project Bible + task) SENDIRI sudah
@@ -594,6 +595,25 @@ class ConversationHistory:
         # (`keep_recent`) tetap terkirim. Pada kondisi NORMAL (kepala muat)
         # perilaku lama tidak berubah sama sekali.
         head_oversized = head_tokens > budget
+
+        # BUGFIX LANJUTAN (kontinuitas ISI jendela kerja, bukan hanya
+        # kehadirannya): saat kepala melampaui anggaran, `limit` = 0 membuat
+        # Tahap 5/5b MEMADATKAN SELURUH jendela kerja terbaru -- termasuk hasil
+        # tool yang BARUSAN diterima -- menjadi ringkasan lossy (mis. read_file
+        # hanya menyisa preview + locator). Agent lalu kehilangan ISI sumber
+        # yang baru dibaca dan mengulang `read_file`/`search_code`/command yang
+        # sama (gejala "percakapan seolah di-reset"). Karena `max_tokens` adalah
+        # anggaran KONSERVATIF (provider menyisakan reserve di luar ini), kita
+        # beri ekor anggaran GRACE sehingga total request boleh mencapai ~2x
+        # `max_tokens`; jendela kerja terbaru yang muat di dalamnya dipertahankan
+        # UTUH (diisi apa adanya, bukan dipadatkan). Bila tetap tidak muat, hanya
+        # pesan PALING LAMA di jendela itu yang dipadatkan (Tahap 5) dan pesan
+        # TERAKHIR tidak pernah dipadatkan (lihat Tahap 5b). Pada kondisi NORMAL
+        # (kepala muat) perilaku lama tidak berubah sama sekali.
+        if head_oversized:
+            grace_budget = 2 * max_budget - overhead
+            tail_budget = max(tail_budget, grace_budget - head_tokens)
+        limit = max(tail_budget, 0)
 
         keep_recent = max(int(keep_recent), 0)
         recent_start = max(len(tail) - keep_recent, 0)
@@ -617,8 +637,15 @@ class ConversationHistory:
             index += 1
 
         # Tahap 5b: bila MASIH lebih, padatkan juga pesan TERAKHIR (pesan tetap
-        # ada -- hanya isinya dipadatkan) sebelum menempuh pembuangan.
-        if compiled_tail and self.estimate_messages_tokens(compiled_tail) > limit:
+        # ada -- hanya isinya dipadatkan) sebelum menempuh pembuangan. KECUALI
+        # saat kepala melampaui anggaran: pesan terakhir adalah hasil tool
+        # TERBARU Agent, dan memadatkannya menghilangkan ISI yang baru diterima
+        # (memicu pengulangan eksplorasi). Lihat BUGFIX LANJUTAN di atas.
+        if (
+            not head_oversized
+            and compiled_tail
+            and self.estimate_messages_tokens(compiled_tail) > limit
+        ):
             compiled_tail[-1] = self._compact_message(
                 compiled_tail[-1], head_chars, tail_chars, arg_chars
             )

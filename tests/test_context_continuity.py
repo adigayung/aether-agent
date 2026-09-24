@@ -244,6 +244,129 @@ def test_j4_normal_head_still_respects_budget() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# K1-K3. Kontinuitas ISI jendela kerja (bug lanjutan): hasil tool terbaru
+#       tidak boleh DIPADATKAN menjadi ringkasan lossy saat kepala melebihi
+#       anggaran (itu memicu Agent mengulang read_file yang sama).
+# --------------------------------------------------------------------------- #
+def test_k1_oversized_head_preserves_last_tool_content() -> None:
+    history = ConversationHistory()
+    history.append_system_message(SYSTEM_PROMPT)
+    history.append_system_message("PROJECT BIBLE: " + "K" * 24_000)
+    history.append_user_message(HEAD_TASK)
+    marker = "TAIL_MARKER_K1_ZZZ"
+    raw = json.dumps(
+        {"path": "f0.py", "content": ("y" * 1500) + marker, "total_lines": 1}
+    )
+    call = ToolCall.create("read_file", {"path": "f0.py"}, id="c0")
+    history.append_assistant_message(content=None, tool_calls=[call])
+    history.append_tool_result(call.id, "read_file", raw)
+
+    budget = 4000
+    head_tokens = ConversationHistory.estimate_messages_tokens(history.messages[:2])
+    assert head_tokens > budget, "skenario butuh kepala > anggaran"
+
+    compiled = history.compile_compacted_messages(budget, overhead_tokens=0)
+    tool_msgs = [m for m in compiled if m.role == "tool"]
+    assert tool_msgs, "hasil tool terakhir harus tetap terkirim"
+    last = tool_msgs[-1]
+    # ISI penuh (bukan ringkasan): pesan TERAKHIR tidak boleh dipadatkan.
+    assert last.content == raw, "pesan terakhir dipadatkan padahal kepala oversized"
+    assert marker in (last.content or "")
+
+
+def test_k2_oversized_head_keeps_recent_content_and_stays_bounded() -> None:
+    history = ConversationHistory()
+    history.append_system_message(SYSTEM_PROMPT)
+    history.append_system_message("PROJECT BIBLE: " + "K" * 20_000)
+    history.append_user_message(HEAD_TASK)
+    marker = "RECENT_MIDDLE_MARKER_ZZZ"
+    for i in range(3):
+        # Marker di TENGAH konten -> TIDAK ikut preview ringkasan (head/tail).
+        raw = json.dumps(
+            {
+                "path": f"f{i}.py",
+                "content": ("z" * 700) + marker + ("z" * 700),
+                "total_lines": 1,
+            }
+        )
+        call = ToolCall.create("read_file", {"path": f"f{i}.py"}, id=f"c{i}")
+        history.append_assistant_message(content=None, tool_calls=[call])
+        history.append_tool_result(call.id, "read_file", raw)
+
+    max_tokens = 4000
+    compiled = history.compile_compacted_messages(max_tokens, overhead_tokens=0)
+    tool_msgs = [m for m in compiled if m.role == "tool"]
+    last = tool_msgs[-1]
+    # Jendela kerja terbaru dipertahankan UTUH: marker TENGAH tetap ada (bukti
+    # ISI penuh, bukan ringkasan).
+    assert marker in (last.content or ""), "isi hasil tool terbaru hilang (dipadatkan)"
+    # Tetap BOUNDED: grace dibatasi ~2x max_tokens (tidak melar tak terkendali).
+    total = ConversationHistory.estimate_messages_tokens(compiled)
+    assert total <= 2 * max_tokens, total
+
+
+def _assert_k3(root: Path) -> None:
+    from agent_ai.tools.registry import build_registry  # noqa: PLC0415
+
+    rel = "betrayer/data/cache.py"
+    marker = "MARKER_MIDDLE_K3_ZZZ"
+    # File cukup besar: marker diletakkan di TENGAH sehingga TIDAK masuk preview
+    # ringkasan (head 500 char) -- jadi kehadirannya membuktikan ISI UTUH dikirim.
+    lines = [f"value_{i:03d} = 'filler filler filler filler filler'" for i in range(240)]
+    lines[120] = f"value_120 = '{marker}'"
+    target = root / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("\n".join(lines), encoding="utf-8")
+
+    script = [
+        _tool_turn("baca data layer", [_tool_call("r1", "read_file", {"path": rel})]),
+        _tool_turn("coba baca ulang", [_tool_call("r2", "read_file", {"path": rel})]),
+        _final_turn("selesai"),
+    ]
+    provider = ScriptedProvider(script)
+    registry = build_registry(root=root)
+    environment = "KNOWLEDGE\n" + ("x" * 80 + "\n") * 150
+    orchestrator = AgentOrchestrator(
+        provider=provider,
+        executor=ToolExecutor(registry=registry),
+        options=GenerateOptions(model="scripted-model"),
+        system_prompt=SYSTEM_PROMPT,
+        use_continuous_loop=True,
+        context_budget_tokens=5000,
+        environment_context=environment,
+    )
+    result = orchestrator.run("pakai data layer")
+    assert result.status == AgentStatus.DONE, result.error
+
+    # (1) KONTINUITAS ISI sampai provider request: request round-2 memuat ISI
+    #     LENGKAP hasil read_file (marker tengah), bukan ringkasan lossy.
+    second = provider.requests[1]
+    tool_texts = [m.get("content") or "" for m in second if m.get("role") == "tool"]
+    assert any(marker in text for text in tool_texts), (
+        "hasil read_file tidak dikirim UTUH ke provider (hanya ringkasan) -> "
+        "Agent akan mengulang read_file yang sama"
+    )
+
+    # (2) Dedup TETAP benar: baca ULANG file yang isinya masih terlihat tidak
+    #     mengirim isi lagi, melainkan stub `already_available`.
+    third = provider.requests[2]
+    third_tools = [m for m in third if m.get("role") == "tool"]
+    last_tool = third_tools[-1]
+    assert "already_available" in (last_tool.get("content") or ""), last_tool
+    assert marker not in (last_tool.get("content") or ""), last_tool
+
+
+def test_k3_runtime_recent_read_reaches_provider(tmp_path: Optional[Path] = None) -> None:
+    if tmp_path is None:
+        import tempfile  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _assert_k3(Path(tmp))
+        return
+    _assert_k3(tmp_path)
+
+
+# --------------------------------------------------------------------------- #
 # Standalone runner (tanpa pytest)
 # --------------------------------------------------------------------------- #
 def _standalone() -> int:
@@ -252,6 +375,9 @@ def _standalone() -> int:
         test_j2_oversized_head_keeps_more_than_head_plus_one,
         test_j3_continuous_loop_survives_oversized_head,
         test_j4_normal_head_still_respects_budget,
+        test_k1_oversized_head_preserves_last_tool_content,
+        test_k2_oversized_head_keeps_recent_content_and_stays_bounded,
+        test_k3_runtime_recent_read_reaches_provider,
     ]
     failures = 0
     for test in tests:
