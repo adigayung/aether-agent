@@ -11,6 +11,10 @@
 // Bootstrap 5 dipakai untuk layout/spacing/form/button/dropdown/responsive.
 
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+// Versi AETHER dibaca dari SINGLE SOURCE OF TRUTH `data/version.json` (Vite
+// meng-inline JSON saat build). TIDAK ada file versi kedua dan TIDAK ada
+// sistem version baru: mengubah data/version.json -> footer ikut berubah.
+import versionInfo from "../../../data/version.json";
 import ProjectLauncher from "./components/ProjectLauncher.vue";
 import AgentActivity from "./components/AgentActivity.vue";
 import CodeEditor from "./components/CodeEditor.vue";
@@ -482,6 +486,8 @@ function navBadge(id) {
 // Footer status bar (dari runtime AETHER, bukan hardcode).
 const modelLabel = computed(() => runtime.model || config.value.model || "—");
 const providerLabel = computed(() => runtime.provider || config.value.provider || "—");
+// Versi AETHER untuk footer (sumber sama dengan data/version.json).
+const aetherVersion = versionInfo.version;
 
 // Task Composer modal (dibuka dari agent input).
 const composerOpen = ref(false);
@@ -1800,7 +1806,7 @@ onBeforeUnmount(() => {
           <span class="dot" :class="connected ? '' : 'err'"></span> workspace
           <span class="v">{{ connected ? "synced" : "offline" }}</span>
         </span>
-        <span class="sb">AETHER v0.1.0</span>
+        <span class="sb">AETHER v{{ aetherVersion }}</span>
       </span>
     </footer>
 
