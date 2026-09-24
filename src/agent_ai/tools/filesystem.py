@@ -714,8 +714,10 @@ class SearchCodeTool(BaseTool):
         "'line', 'text' (dipotong), dan 'symbol' induk bila terdeteksi. "
         "Alur yang disarankan: search_code -> read_file(symbol=...) -> "
         "edit_file. Tambahkan context_lines=N bila butuh sedikit potongan "
-        "sekitar match. Untuk membaca file gunakan read_file; untuk melihat "
-        "isi directory gunakan list_files."
+        "sekitar match. Query yang SAMA persis (query + path + context_lines) "
+        "pada state source yang sama diringkas menjadi penanda 'already_searched' "
+        "(hasilnya sudah ada di percakapan; jangan diulang). Untuk membaca file "
+        "gunakan read_file; untuk melihat isi directory gunakan list_files."
     )
     input_schema = {
         "type": "object",

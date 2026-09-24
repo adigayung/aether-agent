@@ -684,12 +684,25 @@ class AgentRuntime:
         Environment Context project-local (bila ada) diteruskan sebagai system
         message pada awal session continuous loop.
         """
+        # System prompt default Agent: bila pemanggil TIDAK memberi system
+        # prompt, pakai panduan Agent bawaan (retrieval -> cukup -> implementasi
+        # -> validasi). Ini murni GUIDANCE agar LLM tahu pola retrieval, kapan
+        # retrieval cukup, dan bagaimana merespons state
+        # `already_available`/`already_read`/`already_searched`; ia TIDAK
+        # memaksa loop berhenti (keputusan selesai tetap murni dari response LLM
+        # tanpa tool call). Bila pemanggil memberi system prompt sendiri (mis.
+        # Consultant), prompt itu yang dipakai.
+        system_prompt = self.system_prompt
+        if system_prompt is None:
+            from agent_ai.core.agent_prompt import build_agent_system_prompt
+
+            system_prompt = build_agent_system_prompt()
         return AgentOrchestrator(
             provider=provider,
             executor=self.executor,
             max_iterations=self.max_iterations,
             options=self.options,
-            system_prompt=self.system_prompt,
+            system_prompt=system_prompt,
             event_sink=self._event_sink,
             brain=self._brain,
             brain_learning=False,

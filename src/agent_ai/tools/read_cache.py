@@ -21,6 +21,11 @@ BUKAN "second brain" dan BUKAN cache lintas-task:
     - Invalidation: `invalidate()` (dipanggil tool mutasi) melupakan rentang
       baca + hasil search untuk path yang berubah; perubahan file eksternal
       juga dideteksi via perubahan signature.
+    - Context-aware (runtime compaction): `sync_from_context()` menyelaraskan
+      tanda "tersedia" dengan ISI konteks yang BENAR-BENAR dikirim ke LLM.
+      Bila runtime compaction membuang detail sumber dari konteks, rentang itu
+      TIDAK lagi diklaim "already_available" (menghindari false positive),
+      sehingga Agent dapat mengambil ulang sumber yang sudah tidak terlihat.
 
 Modul TIDAK menyimpan source lintas task: digest konten (bukan isi) dipakai
 untuk exact-duplicate; cuplikan span (start, end) angka dipakai untuk covered
@@ -31,7 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 #: Kunci satu rentang baca: (start_line, end_line) 1-based inklusif.
 RangeKey = Tuple[Optional[int], Optional[int]]
@@ -190,18 +195,88 @@ class ToolReadCache:
             self._ranges.setdefault(rel_path, {})[(start, end)] = self._digest(content)
             self._add_covered(rel_path, start_i, end_i)
 
-    def _add_covered(self, rel_path: str, start: int, end: int) -> None:
-        """Tambahkan span [start, end] ke union tanda tercakup (merge overlap)."""
-        spans = self._covered.setdefault(rel_path, [])
-        spans.append((start, end))
-        spans.sort()
+    @staticmethod
+    def _merge_spans(spans: Iterable[Tuple[int, int]]) -> List[Tuple[int, int]]:
+        """Gabungkan span yang overlap/bersebelahan menjadi union terurut.
+
+        Deterministis dan murni (tanpa state): dipakai baik oleh penambahan
+        covered-range bertahap maupun oleh penyelarasan konteks penuh.
+        """
         merged: List[Tuple[int, int]] = []
-        for span_start, span_end in spans:
+        for span_start, span_end in sorted(spans):
             if merged and span_start <= merged[-1][1] + 1:
                 merged[-1] = (merged[-1][0], max(merged[-1][1], span_end))
             else:
                 merged.append((span_start, span_end))
-        self._covered[rel_path] = merged
+        return merged
+
+    @staticmethod
+    def _span_covered(spans: Sequence[Tuple[int, int]], start: int, end: int) -> bool:
+        """True bila [start, end] tercakup penuh oleh salah satu span."""
+        for span_start, span_end in spans:
+            if span_start <= start and end <= span_end:
+                return True
+        return False
+
+    def _add_covered(self, rel_path: str, start: int, end: int) -> None:
+        """Tambahkan span [start, end] ke union tanda tercakup (merge overlap)."""
+        spans = list(self._covered.get(rel_path, ()))
+        spans.append((start, end))
+        self._covered[rel_path] = self._merge_spans(spans)
+
+    # ------------------------------------------------------------------ #
+    # Context-aware availability (runtime compaction)
+    # ------------------------------------------------------------------ #
+    def sync_from_context(
+        self,
+        available_spans: Dict[str, Sequence[Tuple[int, int]]],
+        seen_paths: Iterable[str],
+    ) -> None:
+        """Selaraskan tanda "tersedia" dengan ISI konteks yang dikirim ke LLM.
+
+        Dipanggil runtime SETELAH context compaction menentukan pesan mana yang
+        BENAR-BENAR masih terlihat oleh LLM. Kontrak:
+
+            - Untuk SETIAP path di `seen_paths`, tanda covered-range DIGANTI
+              dengan union `available_spans[path]` (rentang read_file yang
+              masih ada di konteks; belum dipadatkan/dibuang). Path yang seluruh
+              hasilnya hilang dari konteks menjadi TIDAK tersedia -> permintaan
+              berikutnya melakukan physical read dan mengirim isi lagi
+              (menghilangkan false positive "already_available").
+            - Entri exact-duplicate (`_ranges`) yang rentangnya TIDAK lagi
+              tercakup ikut dibuang, agar dedup exact tidak berbohong.
+            - Signature (`_sig`) TIDAK diubah: perubahan file tetap terdeteksi
+              dan `covered()` tetap mengembalikan None bila file berubah.
+
+        Aman dipanggil berulang (idempoten): memanggil dengan konteks yang sama
+        menghasilkan state yang sama.
+        """
+        paths = list(seen_paths)
+        if not paths:
+            return
+        with self._lock:
+            for rel_path in paths:
+                merged = self._merge_spans(available_spans.get(rel_path, ()) or ())
+                self._covered[rel_path] = merged
+                entry = self._ranges.get(rel_path)
+                if not entry:
+                    continue
+                for key in list(entry.keys()):
+                    start, end = key
+                    if not self._span_covered(merged, int(start), int(end)):
+                        entry.pop(key, None)
+
+    def forget_search(self, query: str, rel_path: str, context_lines: int) -> None:
+        """Lupakan satu klaim pencarian (hasilnya tidak lagi ada di konteks).
+
+        Dipakai runtime compaction: bila hasil `search_code(query, path, ctx)`
+        sudah TIDAK terlihat di konteks, pencarian yang sama HARUS dapat
+        dijalankan ulang (bukan "already_searched" palsu). Mutasi file tetap
+        memakai `invalidate()` (membuang semua hasil search).
+        """
+        key = (str(query), str(rel_path), int(context_lines))
+        with self._lock:
+            self._searches.discard(key)
 
     # ------------------------------------------------------------------ #
     # Search dedup

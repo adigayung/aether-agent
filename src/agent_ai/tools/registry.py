@@ -27,6 +27,14 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: Dict[str, BaseTool] = {}
+        #: Cache retrieval (ToolReadCache) yang dipakai tool read/search registry
+        #: ini, bila ada. Dibiarkan `None` secara default sehingga registry
+        #: generik/uji tetap berperilaku sama. `build_registry()` mengisinya agar
+        #: runtime dapat MENYELARASKAN tanda "tersedia" dengan konteks yang
+        #: benar-benar dikirim ke LLM (menghindari false positive saat context
+        #: compaction membuang detail sumber). Bukan subsystem baru: hanya
+        #: referensi ke cache yang sudah dipakai tool.
+        self.read_cache: Any = None
 
     def register(self, tool: BaseTool) -> None:
         """Daftarkan sebuah tool berdasarkan atribut `name`.
@@ -169,6 +177,10 @@ def build_registry(
     if read_cache is _AUTO_READ_CACHE:
         read_cache = ToolReadCache()
     reg = ToolRegistry()
+    # Ekspos cache ke runtime (AgentRuntime -> AgentOrchestrator) via registry
+    # agar runtime dapat menyelaraskan tanda "tersedia" dengan konteks yang
+    # benar-benar dikirim ke LLM saat compaction membuang detail sumber.
+    reg.read_cache = read_cache
     reg.register(ListFilesTool(root=resolved))
     reg.register(ReadFileTool(root=resolved, read_cache=read_cache))
     reg.register(SearchCodeTool(root=resolved, read_cache=read_cache))

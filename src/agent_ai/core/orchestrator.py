@@ -519,6 +519,13 @@ class AgentOrchestrator:
         compiled = history.compile_compacted_messages(
             budget, overhead_tokens=overhead
         )
+        # Selaraskan cache retrieval dengan ISI konteks yang benar-benar dikirim
+        # ke LLM. Tanpa ini, dedup read/search bisa mengklaim sumber "sudah
+        # tersedia" padahal detailnya baru saja dibuang oleh compaction
+        # (false positive) sehingga Agent tidak pernah menerima isi yang
+        # dibutuhkannya. Ini murni sinkronisasi state: TIDAK mengubah peran tool
+        # dedup dan TIDAK menggantikan keputusan LLM.
+        self._sync_retrieval_cache(history, compiled)
         after = history.estimate_messages_tokens(compiled)
         tool_stats = ConversationHistory.tool_compaction_stats(original, compiled)
         stats: Dict[str, Any] = {
@@ -535,6 +542,157 @@ class AgentOrchestrator:
             "context_tool_compacted_chars": int(tool_stats["tool_compacted_chars"]),
         }
         return [message.to_provider_dict() for message in compiled], stats
+
+    # ------------------------------------------------------------------ #
+    # Sinkronisasi cache retrieval <-> konteks (runtime compaction)
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _read_result_span(content: Optional[str]) -> Optional[Tuple[str, int, int]]:
+        """Ekstrak (path, start, end) dari hasil read_file yang MEMUAT isi.
+
+        Hanya hasil yang benar-benar membawa `content` (read nyata) yang
+        dihitung; stub `already_available`, hasil `mode='structure'`, dan error
+        tidak membawa isi sehingga dilewati (isinya diwakili hasil read nyata
+        yang mendahuluinya). Mengembalikan None bila bukan hasil read berisi.
+        """
+        if not content:
+            return None
+        try:
+            data = json.loads(content)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(data, dict) or "content" not in data:
+            return None
+        path = data.get("path")
+        if not path:
+            return None
+        total = data.get("total_lines")
+        start = data.get("start_line")
+        end = data.get("end_line")
+        if start is None and end is None:
+            if isinstance(total, int) and total > 0:
+                start, end = 1, total
+            else:
+                return None
+        else:
+            start = 1 if start is None else int(start)
+            if end is None:
+                if isinstance(total, int) and total > 0:
+                    end = total
+                else:
+                    return None
+            else:
+                end = int(end)
+        if start < 1 or end < start:
+            return None
+        return (str(path), start, end)
+
+    @staticmethod
+    def _search_result_key(content: Optional[str]) -> Optional[Tuple[str, str, int]]:
+        """Ekstrak (query, path, context_lines) dari hasil search_code berisi.
+
+        Stub `already_searched` (tanpa `matches`) dilewati. Mengembalikan None
+        bila bukan hasil pencarian berisi.
+        """
+        if not content:
+            return None
+        try:
+            data = json.loads(content)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(data, dict) or "matches" not in data:
+            return None
+        query = data.get("query")
+        if query is None:
+            return None
+        path = data.get("path") or "."
+        try:
+            context_lines = int(data.get("context_lines", 0) or 0)
+        except (TypeError, ValueError):
+            context_lines = 0
+        return (str(query), str(path), context_lines)
+
+    def _sync_retrieval_cache(
+        self, history: ConversationHistory, compiled: List[Any]
+    ) -> None:
+        """Selaraskan cache retrieval dengan pesan yang BENAR-BENAR dikirim.
+
+        Bila context compaction membuang detail hasil read_file/search_code dari
+        konteks yang dikirim ke LLM, cache dedup HARUS berhenti mengklaim sumber
+        itu "sudah tersedia": kalau tidak, LLM akan menerima stub
+        `already_available`/`already_searched` untuk isi yang SEBENARNYA tidak
+        lagi ada di konteksnya (false positive) dan tidak akan pernah memperoleh
+        data yang dibutuhkannya.
+
+        Sebaliknya, begitu isi dikirimkan ulang (read/search baru), tanda
+        "tersedia" kembali berlaku sehingga dedup normal bekerja lagi.
+
+        Murni sinkronisasi state cache; TIDAK mengubah peran tool, TIDAK
+        menambah bound, dan TIDAK mengambil keputusan untuk LLM.
+        """
+        registry = getattr(self.executor, "registry", None)
+        cache = getattr(registry, "read_cache", None)
+        if cache is None:
+            return
+
+        originals = {
+            message.tool_call_id: message.content
+            for message in history.messages
+            if message.role == "tool" and message.tool_call_id
+        }
+        present_ids = {
+            message.tool_call_id
+            for message in compiled
+            if getattr(message, "role", None) == "tool" and message.tool_call_id
+        }
+        compacted_ids = set()
+        for message in compiled:
+            if getattr(message, "role", None) != "tool" or not message.tool_call_id:
+                continue
+            before = originals.get(message.tool_call_id)
+            if before is None:
+                continue
+            if (message.content or "") != (before or ""):
+                compacted_ids.add(message.tool_call_id)
+
+        # read_file: rentang yang MASIH terlihat = union span hasil read yang
+        # hadir di konteks DAN belum dipadatkan.
+        available: Dict[str, List[Tuple[int, int]]] = {}
+        seen_paths = set()
+        for message in history.messages:
+            if message.role != "tool" or (message.name or "") != "read_file":
+                continue
+            span = self._read_result_span(message.content)
+            if span is None:
+                continue
+            path, start, end = span
+            seen_paths.add(path)
+            visible = (
+                message.tool_call_id in present_ids
+                and message.tool_call_id not in compacted_ids
+            )
+            if visible:
+                available.setdefault(path, []).append((start, end))
+        cache.sync_from_context(available, seen_paths)
+
+        # search_code: hasil yang sudah TIDAK terlihat harus dapat dicari ulang.
+        # Hanya keputusan "terakhir" per (query, path, ctx) yang dipakai, agar
+        # pencarian ulang yang hasilnya masih terlihat tidak ikut dilupakan.
+        latest_search_gone: Dict[Tuple[str, str, int], bool] = {}
+        for message in history.messages:
+            if message.role != "tool" or (message.name or "") != "search_code":
+                continue
+            key = self._search_result_key(message.content)
+            if key is None:
+                continue
+            visible = (
+                message.tool_call_id in present_ids
+                and message.tool_call_id not in compacted_ids
+            )
+            latest_search_gone[key] = not visible
+        for (query, path, context_lines), gone in latest_search_gone.items():
+            if gone:
+                cache.forget_search(query, path, context_lines)
 
     def _model_name(self) -> str:
         """Nama model aktif untuk logging. Tidak pernah secret.
