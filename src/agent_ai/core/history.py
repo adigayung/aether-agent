@@ -552,7 +552,10 @@ class ConversationHistory:
             5. Bila masih lebih, jendela terbaru ikut dipadatkan dari yang
                PALING LAMA; pesan TERAKHIR tidak pernah dipadatkan.
             6. Upaya terakhir: buang pesan PALING LAMA (per grup, menjaga
-               pasangan tool) sampai muat.
+               pasangan tool) sampai muat. Bila KEPALA (system + konteks
+               pengetahuan/Bible + task) saja sudah melampaui anggaran, JANGAN
+               buang jendela kerja terbaru: sisakan minimal `keep_recent` pesan
+               agar Agent TIDAK mengulang dari awal.
 
         Args:
             max_tokens: anggaran token untuk seluruh daftar pesan yang
@@ -574,8 +577,23 @@ class ConversationHistory:
             return messages
 
         head, tail = self._split_protected_head(messages)
-        tail_budget = budget - self.estimate_messages_tokens(head)
+        head_tokens = self.estimate_messages_tokens(head)
+        tail_budget = budget - head_tokens
         limit = max(tail_budget, 0)
+
+        # BUGFIX (kontinuitas state kerja antar-round): bila KEPALA (system
+        # prompt + konteks pengetahuan/Project Bible + task) SENDIRI sudah
+        # memenuhi/melampaui anggaran (mis. retrieval Bible mengisi hampir
+        # seluruh anggaran provider), `limit` menjadi 0 dan Tahap 6 akan
+        # membuang SELURUH ekor percakapan -> LLM tidak lagi melihat tool
+        # call/hasil sebelumnya lalu mengulang eksplorasi dari awal (loop
+        # puluhan round). Pada kondisi ini anggaran sudah tidak mungkin
+        # dipenuhi; lebih baik sedikit melebihi anggaran yang memang
+        # KONSERVATIF (provider menyisakan reserve di luar budget ini) daripada
+        # kehilangan kontinuitas. Karena itu kita jamin jendela kerja terbaru
+        # (`keep_recent`) tetap terkirim. Pada kondisi NORMAL (kepala muat)
+        # perilaku lama tidak berubah sama sekali.
+        head_oversized = head_tokens > budget
 
         keep_recent = max(int(keep_recent), 0)
         recent_start = max(len(tail) - keep_recent, 0)
@@ -606,9 +624,13 @@ class ConversationHistory:
             )
 
         # Tahap 6: upaya terakhir -- buang pesan PALING LAMA (per grup,
-        # menjaga pasangan tool) sampai muat; sisakan minimal satu pesan.
+        # menjaga pasangan tool) sampai muat. SAFETY KONTINUITAS: bila kepala
+        # saja sudah melampaui anggaran (lihat BUGFIX di atas), JANGAN buang
+        # jendela kerja terbaru; sisakan minimal `keep_recent` agar Agent dapat
+        # melanjutkan dari posisi terakhir, bukan mengulang dari awal.
+        min_keep = min(keep_recent if head_oversized else 1, len(compiled_tail))
         while (
-            len(compiled_tail) > 1
+            len(compiled_tail) > min_keep
             and self.estimate_messages_tokens(compiled_tail) > limit
         ):
             compiled_tail.pop(0)
