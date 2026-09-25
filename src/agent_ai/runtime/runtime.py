@@ -777,7 +777,7 @@ class AgentRuntime:
         if self.session_store is None or not self.session_id:
             return
         try:
-            from agent_ai.core.observability import sanitize_payload
+            from agent_ai.core.observability import sanitize_event_payload
             from agent_ai.session.events import EventType, make_event
 
             try:
@@ -788,7 +788,7 @@ class AgentRuntime:
                 session_id=self.session_id,
                 event_type=et,
                 task_id=getattr(self, "_current_task_id", None),
-                payload=sanitize_payload(dict(payload or {})),
+                payload=sanitize_event_payload(event_type, payload),
             )
             self.session_store.append_event(event)
         except Exception:  # noqa: BLE001 - event emission tidak boleh crash

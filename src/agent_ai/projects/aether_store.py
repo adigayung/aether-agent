@@ -223,10 +223,15 @@ class TaskLog:
         if payload:
             record["data"] = payload
         # Sanitasi (tanpa secret) memakai helper observability existing.
+        # Batas string SPESIFIK EVENT dipakai agar event yang membawa hasil tool
+        # (mis. `observation_received`) tidak kehilangan payload diagnostik,
+        # sementara payload lain tetap dibatasi seperti sebelumnya.
         try:
-            from agent_ai.core.observability import sanitize_payload
+            from agent_ai.core.observability import sanitize_event_payload
 
-            record = sanitize_payload(record)
+            event_type = str(event_type)
+            record["event"] = event_type
+            record = sanitize_event_payload(event_type, record)
         except Exception:  # noqa: BLE001 - sanitasi gagal -> tetap catat
             pass
         try:

@@ -37,6 +37,7 @@ def _build_openai_compatible_config(
     api_key: str,
     model: str,
     timeout: Optional[int],
+    context_window: Optional[int] = None,
 ) -> Any:
     """Bangun config dataclass spesifik provider (existing) dari resolved config."""
     if provider_type == "openrouter":
@@ -65,6 +66,12 @@ def _build_openai_compatible_config(
         kwargs["model"] = model
     if timeout:
         kwargs["timeout"] = int(timeout)
+    # Context window (capability provider) diteruskan bila konfigurasi
+    # menyediakannya. Bila tidak, dataclass memakai nilai dari environment
+    # (`<PROVIDER>_CONTEXT_WINDOW`), dan 0 berarti "tidak diketahui" -> AETHER
+    # memakai anggaran config global seperti sebelumnya.
+    if context_window:
+        kwargs["context_window"] = int(context_window)
     return config_cls(**kwargs)
 
 
@@ -88,6 +95,7 @@ def build_provider_from_config(config: Dict[str, Any]) -> BaseProvider:
     api_key = _clean(config.get("api_key"))
     model = _clean(config.get("model"))
     timeout = config.get("timeout")
+    context_window = config.get("context_window")
     instance_name = _clean(config.get("instance_name")) or provider_type
 
     if provider_type == "ollama":
@@ -121,7 +129,7 @@ def build_provider_from_config(config: Dict[str, Any]) -> BaseProvider:
                 f"memiliki API key. Set kredensial di .env lalu pilih ulang."
             )
         provider_config = _build_openai_compatible_config(
-            provider_type, api_url, api_key, model, timeout
+            provider_type, api_url, api_key, model, timeout, context_window
         )
         if provider_type == "openrouter":
             from agent_ai.providers.openrouter import OpenRouterProvider

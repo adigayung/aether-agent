@@ -32,6 +32,13 @@ from agent_ai.providers.retry import (
 )
 
 
+#: Token yang disisakan dari context window model untuk hal non-pesan
+#: (system prompt, definisi tool, pertanyaan user, dan output). Nilai ini
+#: menjaga anggaran pesan tetap berada DI BAWAH kemampuan provider, sehingga
+#: request tidak pernah melebihi context window model.
+_PROMPT_RESERVE_TOKENS = 4096
+
+
 class OpenAICompatibleProvider(BaseProvider):
     """Provider untuk API berformat OpenAI-compatible."""
 
@@ -55,6 +62,38 @@ class OpenAICompatibleProvider(BaseProvider):
         if self.retry_policy is None:
             self.retry_policy = InfrastructureRetryPolicy.from_settings()
         return self.retry_policy
+
+    # ------------------------------------------------------------------ #
+    # Context window (capability provider)
+    # ------------------------------------------------------------------ #
+    def knowledge_budget_tokens(self) -> Optional[int]:
+        """Anggaran token prompt dari context window model yang DIKONFIGURASI.
+
+        Provider cloud (OpenAI-compatible: OpenAI, DeepSeek, OpenRouter, dan
+        API kompatibel lain) memakai context window modelnya sendiri. Tanpa
+        laporan ini, AETHER memaksa seluruh provider cloud ke anggaran config
+        global (`settings.context.max_tokens`, default 16.000) sehingga model
+        dengan context window jauh lebih besar pun dipadatkan (compaction)
+        hampir setiap iteration.
+
+        Nilai diambil dari konfigurasi EXPLICIT milik provider
+        (`OPENAI_CONTEXT_WINDOW` / `DEEPSEEK_CONTEXT_WINDOW` /
+        `OPENROUTER_CONTEXT_WINDOW`). TIDAK ada tebakan/daftar model
+        hardcode — capability harus dinyatakan oleh konfigurasi.
+
+        Returns:
+            Anggaran token prompt (context window - reserve), atau None bila
+            context window belum dikonfigurasi / terlalu kecil. None berarti
+            AETHER memakai anggaran config global seperti sebelumnya, sehingga
+            perilaku lama TIDAK berubah.
+        """
+        window = int(getattr(self.config, "context_window", 0) or 0)
+        if window <= 0:
+            return None
+        usable = window - _PROMPT_RESERVE_TOKENS
+        if usable <= 0:
+            return None
+        return usable
 
     # ------------------------------------------------------------------ #
     # Helper internal

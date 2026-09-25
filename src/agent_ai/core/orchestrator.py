@@ -374,9 +374,14 @@ class AgentOrchestrator:
     def _knowledge_budget_chars(self) -> Optional[int]:
         """Anggaran karakter untuk konteks pengetahuan (dari provider).
 
+        Memakai anggaran PROVIDER apa adanya (`_knowledge_budget_tokens`), TANPA
+        batas tambahan: jalur ini adalah FALLBACK saat retrieval terstruktur
+        tidak tersedia, dan kontraknya adalah "kirim konteks apa adanya bila
+        provider tidak melaporkan anggaran".
+
         Returns:
-            Anggaran karakter, atau None bila provider tidak melaporkan
-            anggaran (context window tidak diketahui -> tanpa pemotongan).
+            Anggaran karakter, atau None bila anggaran tidak diketahui
+            (context window tidak diketahui -> tanpa pemotongan).
         """
         tokens = self._knowledge_budget_tokens()
         if tokens is None:
@@ -398,7 +403,9 @@ class AgentOrchestrator:
             from agent_ai.projects.retrieval import BibleRetriever
 
             retriever = BibleRetriever(self.brain)
-            result = retriever.retrieve(query, budget_tokens=self._knowledge_budget_tokens())
+            result = retriever.retrieve(
+                query, budget_tokens=self._knowledge_context_budget_tokens()
+            )
             if result is not None:
                 emit_event(self.event_sink, "bible_retrieval", result.to_metadata())
                 return result.text
@@ -447,34 +454,76 @@ class AgentOrchestrator:
     # ------------------------------------------------------------------ #
     # Runtime context compaction (hemat token tanpa kehilangan memori)
     # ------------------------------------------------------------------ #
-    def _context_budget_tokens(self) -> Optional[int]:
-        """Anggaran token untuk daftar pesan (system + task + history).
+    def _context_budget_decision(self) -> Tuple[Optional[int], str]:
+        """Anggaran token pesan + SUMBER keputusan (untuk observability).
 
         Prioritas (memakai mekanisme yang SUDAH ada, tanpa angka liar):
-            1. Override eksplisit `context_budget_tokens`.
+            1. Override eksplisit `context_budget_tokens` -> source "explicit".
             2. Anggaran yang dilaporkan provider (`knowledge_budget_tokens()`),
-               sehingga mengikuti context window provider yang terbatas.
+               sehingga mengikuti context window provider yang terbatas ->
+               source "provider".
             3. Budget konteks yang sudah ada di config
-               (`settings.context.max_tokens`).
+               (`settings.context.max_tokens`) -> source "config".
+
+        Source "none" = anggaran tidak diketahui (tanpa batas -> perilaku lama:
+        riwayat dikirim apa adanya).
 
         Returns:
-            Anggaran token pesan, atau None bila tidak diketahui (tanpa batas ->
-            perilaku lama: riwayat dikirim apa adanya).
+            (budget, source) -- budget None bila tidak diketahui.
         """
         explicit = self.context_budget_tokens
         if explicit is not None:
             value = int(explicit)
-            return value if value > 0 else None
+            return (value, "explicit") if value > 0 else (None, "none")
         provider_budget = self._knowledge_budget_tokens()
         if provider_budget is not None:
-            return provider_budget
+            return (provider_budget, "provider")
         try:
             from agent_ai.config.settings import settings
 
             value = int(getattr(settings.context, "max_tokens", 0) or 0)
         except Exception:  # noqa: BLE001 - budget opsional, jangan gagalkan task
-            return None
-        return value if value > 0 else None
+            return (None, "none")
+        return (value, "config") if value > 0 else (None, "none")
+
+    def _context_budget_tokens(self) -> Optional[int]:
+        """Anggaran token untuk daftar pesan (system + task + history).
+
+        Lihat `_context_budget_decision()` untuk prioritas + sumber anggaran.
+
+        Returns:
+            Anggaran token pesan, atau None bila tidak diketahui (tanpa batas ->
+            perilaku lama: riwayat dikirim apa adanya).
+        """
+        return self._context_budget_decision()[0]
+
+    def _knowledge_context_budget_tokens(self) -> Optional[int]:
+        """Anggaran untuk KONTEKS PENGETAHUAN (Project Bible / retrieval).
+
+        Terpisah dari anggaran PERCAKAPAN: context window provider adalah
+        anggaran untuk seluruh percakapan, sehingga konteks pengetahuan harus
+        dibatasi pada porsi kecil dari padanya (kalau tidak, Bible dapat
+        menghabiskan hampir seluruh anggaran dan jendela kerja Agent kosong).
+
+        Batas diambil dari config yang SUDAH ada
+        (`settings.context.knowledge_max_tokens`); bila 0 -> tanpa batas
+        tambahan (perilaku lama: memakai anggaran provider/config apa adanya).
+
+        Returns:
+            Anggaran token konteks pengetahuan, atau None bila tidak diketahui.
+        """
+        provider_budget = self._knowledge_budget_tokens()
+        try:
+            from agent_ai.config.settings import settings
+
+            cap = int(getattr(settings.context, "knowledge_max_tokens", 0) or 0)
+        except Exception:  # noqa: BLE001 - cap opsional, jangan gagalkan task
+            return provider_budget
+        if cap <= 0:
+            return provider_budget
+        if provider_budget is None:
+            return cap
+        return min(int(provider_budget), cap)
 
     def _tool_definitions_tokens(self, tools: List[ToolDefinition]) -> int:
         """Estimasi token definisi tool (dikirim pada request yang sama).
@@ -509,7 +558,7 @@ class AgentOrchestrator:
             (messages, stats) -- messages siap kirim; stats ringkas (untuk
             observability/verifikasi, tanpa isi konten) bila anggaran diketahui.
         """
-        budget = self._context_budget_tokens()
+        budget, budget_source = self._context_budget_decision()
         if budget is None:
             return history.to_provider_format(), {}
 
@@ -528,11 +577,15 @@ class AgentOrchestrator:
         self._sync_retrieval_cache(history, compiled)
         after = history.estimate_messages_tokens(compiled)
         tool_stats = ConversationHistory.tool_compaction_stats(original, compiled)
+        # Nama key SENGAJA tidak memuat substring kredensial (mis. "token") agar
+        # tidak terkena redaksi `sanitize_payload` (pola yang sama dipakai
+        # `projects/retrieval.py`), sehingga angka anggaran tetap terbaca di log.
         stats: Dict[str, Any] = {
-            "context_budget_tokens": int(budget),
-            "context_overhead_tokens": int(overhead),
-            "context_before_tokens": int(before),
-            "context_tokens": int(after),
+            "context_budget": int(budget),
+            "context_budget_source": str(budget_source),
+            "context_overhead": int(overhead),
+            "context_before": int(before),
+            "context_after": int(after),
             "context_compacted": after < before,
             # Ringkasan compaction hasil tool (tanpa isi konten): berapa tool
             # result yang dipadatkan struktur + karakter yang dihemat.
@@ -542,6 +595,61 @@ class AgentOrchestrator:
             "context_tool_compacted_chars": int(tool_stats["tool_compacted_chars"]),
         }
         return [message.to_provider_dict() for message in compiled], stats
+
+    # ------------------------------------------------------------------ #
+    # Identitas retrieval (observability: deteksi repeat)
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _retrieval_identity(
+        tool_name: str, arguments: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Identitas satu retrieval untuk deteksi repeat (OBSERVABILITY SAJA).
+
+        Hanya tool retrieval yang diamati (`read_file`, `search_code`); tool lain
+        mengembalikan None. Hasilnya TIDAK dipakai untuk mengubah perilaku
+        eksekusi/dedup — murni untuk mengemit event `retrieval_repeat`.
+
+        Args:
+            tool_name: nama tool yang dieksekusi.
+            arguments: argumen tool call (apa adanya dari LLM).
+
+        Returns:
+            Dict berisi `path`, `range`, `mode`, `force` — atau None bila tool
+            ini bukan tool retrieval yang diamati / argumen tidak lengkap.
+        """
+        if tool_name == "read_file":
+            path = arguments.get("path")
+            if not path:
+                return None
+            symbol = arguments.get("symbol")
+            start = arguments.get("start_line")
+            end = arguments.get("end_line")
+            if symbol:
+                rng = str(symbol)
+            elif start is None and end is None:
+                rng = "full"
+            else:
+                rng = "{}-{}".format(
+                    "start" if start is None else start,
+                    "end" if end is None else end,
+                )
+            return {
+                "path": str(path),
+                "range": rng,
+                "mode": str(arguments.get("mode") or "default"),
+                "force": bool(arguments.get("force", False)),
+            }
+        if tool_name == "search_code":
+            query = arguments.get("query")
+            if query is None:
+                return None
+            return {
+                "path": str(arguments.get("path") or "."),
+                "range": str(query),
+                "mode": "search",
+                "force": False,
+            }
+        return None
 
     # ------------------------------------------------------------------ #
     # Sinkronisasi cache retrieval <-> konteks (runtime compaction)
@@ -1543,6 +1651,11 @@ class AgentOrchestrator:
         # provider yang TERPOTONG boleh dicoba ulang. Bukan keputusan "task
         # selesai"; hanya proteksi runaway saat provider terus memotong output.
         truncation_recoveries = 0
+        # Observability-only: hitung berapa kali retrieval terhadap RESOURCE YANG
+        # SAMA diminta ulang dalam task ini (mis. read_file dengan path+range+mode
+        # identik). Nilai ini TIDAK dipakai untuk mengubah eksekusi, dedup, cache,
+        # force, maupun loop — hanya untuk mengemit event `retrieval_repeat`.
+        retrieval_seen: Dict[Tuple[str, str, str, str, str], int] = {}
 
         while not loop.is_finished:
             # Bible context lifecycle (murah & deterministik): sisipkan context
@@ -1732,6 +1845,51 @@ class AgentOrchestrator:
                         "content": payload.output,
                     },
                 )
+                # Observability-only: deteksi retrieval berulang atas resource
+                # yang sama (path + range/symbol + mode). TIDAK memblokir
+                # retrieval, TIDAK mengubah dedup/cache/force behavior, dan
+                # TIDAK mengubah loop. Dibungkus aman agar observability tidak
+                # pernah menggagalkan eksekusi tool.
+                try:
+                    identity = self._retrieval_identity(
+                        payload.tool_name, arguments
+                    )
+                    if identity is not None:
+                        key = (
+                            str(payload.tool_name),
+                            str(identity["path"]),
+                            str(identity["range"]),
+                            str(identity["mode"]),
+                            "force" if identity["force"] else "normal",
+                        )
+                        retrieval_seen[key] = retrieval_seen.get(key, 0) + 1
+                        if retrieval_seen[key] > 1:
+                            output = payload.output
+                            stub = bool(
+                                isinstance(output, dict)
+                                and (
+                                    output.get("already_available")
+                                    or output.get("already_read")
+                                    or output.get("already_searched")
+                                )
+                            )
+                            emit_event(
+                                self.event_sink,
+                                "retrieval_repeat",
+                                {
+                                    "tool": payload.tool_name,
+                                    "path": identity["path"],
+                                    "range": identity["range"],
+                                    "mode": identity["mode"],
+                                    "force": bool(identity["force"]),
+                                    "stub": stub,
+                                    "result": "stub" if stub else "full",
+                                    "repeat_count": int(retrieval_seen[key]),
+                                    "iteration": loop.iteration,
+                                },
+                            )
+                except Exception:  # noqa: BLE001 - event tidak boleh crash
+                    pass
 
             batch = self.executor.execute_tool_calls(
                 tool_calls,

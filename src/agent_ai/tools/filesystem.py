@@ -359,21 +359,19 @@ class ReadFileTool(BaseTool):
     name = "read_file"
     description = (
         "Membaca isi sebuah file. Ini cara utama membaca file (bukan cat/type). "
-        "PILIH mode paling hemat: "
+        "PILIH yang paling hemat: "
         "(1) read_file(path, symbol='nama') -> HANYA function/class/method itu "
         "(pakai hasil search_code/atlas_query); error jelas bila symbol tak ada. "
-        "(2) read_file(path, start_line, end_line) -> rentang baris 1-based, inklusif. "
-        "Tanpa start_line/end_line: membaca SELURUH file. "
+        "(2) read_file(path, start_line, end_line) -> rentang baris 1-based, "
+        "inklusif; tanpa keduanya membaca SELURUH file. "
         "(3) read_file(path, mode='structure') -> outline (class/function + line) "
         "tanpa body source, lalu pilih symbol untuk dibaca. "
-        "Opsional context_lines=N menambah N baris sebelum/sesudah symbol/range. "
-        "mode='raw' -> hanya 'content' (tanpa duplikasi 'content_numbered'); "
-        "mode='numbered' -> sertakan 'content_numbered' (prefix nomor baris). "
-        "Membaca ulang rentang yang sama (atau rentang yang sudah TERCakup) dalam "
-        "satu task diringkas menjadi penanda 'already_available'/'already_read' "
-        "(pakai force=true untuk memaksa kirim ulang). "
-        "Untuk melihat isi directory gunakan list_files; untuk mencari teks "
-        "gunakan search_code."
+        "context_lines=N menambah N baris sebelum/sesudah symbol/range. "
+        "mode='raw' -> hanya 'content'; mode='numbered' -> sertakan "
+        "'content_numbered' (prefix nomor baris). "
+        "Rentang yang sama (atau yang sudah tercakup) dalam satu task diringkas "
+        "menjadi penanda 'already_available'/'already_read'; force=true memaksa "
+        "kirim ulang. Isi directory: list_files. Mencari teks: search_code."
     )
     input_schema = {
         "type": "object",
@@ -712,12 +710,11 @@ class SearchCodeTool(BaseTool):
         "lokasi + potongan pendek, bukan source panjang). Ini cara utama "
         "mencari source code (bukan find/grep). Setiap match memuat 'file', "
         "'line', 'text' (dipotong), dan 'symbol' induk bila terdeteksi. "
-        "Alur yang disarankan: search_code -> read_file(symbol=...) -> "
-        "edit_file. Tambahkan context_lines=N bila butuh sedikit potongan "
-        "sekitar match. Query yang SAMA persis (query + path + context_lines) "
-        "pada state source yang sama diringkas menjadi penanda 'already_searched' "
-        "(hasilnya sudah ada di percakapan; jangan diulang). Untuk membaca file "
-        "gunakan read_file; untuk melihat isi directory gunakan list_files."
+        "Alur: search_code -> read_file(symbol=...) -> edit_file. "
+        "context_lines=N menambah potongan sekitar match. Query yang SAMA persis "
+        "(query + path + context_lines) pada source yang sama diringkas menjadi "
+        "penanda 'already_searched' (jangan diulang). Membaca file: read_file. "
+        "Isi directory: list_files."
     )
     input_schema = {
         "type": "object",

@@ -325,14 +325,32 @@ def _run() -> int:
     assert ".act-report-block" in styles_css, "wrapper report + tombol copy harus punya style"
     print("[6] frontend: report utuh + tombol Copy (pola .cmsg-actions/.copy-btn) OK")
 
-    # 7) REGRESI: limit activity log / tool output internal TIDAK diubah.
-    from agent_ai.core.observability import sanitize_payload
+    # 7) REGRESI: logging tetap BOUNDED.
+    #    - Batas DEFAULT tidak berubah (payload metadata tetap dipotong).
+    #    - Event `observation_received` memakai batas lebih besar karena membawa
+    #      HASIL TOOL yang dibutuhkan untuk diagnosis (S0.3) — tetapi TETAP
+    #      dipotong (bukan penghapusan limit global).
+    from agent_ai.core.observability import (
+        _MAX_STRING_LEN,
+        _OBSERVATION_MAX_STRING_LEN,
+        sanitize_event_payload,
+        sanitize_payload,
+    )
 
     long_internal = "x" * 5000
     cleaned = sanitize_payload({"content": long_internal})
     assert cleaned["content"] != long_internal, "string internal panjang harus TETAP dipotong"
     assert cleaned["content"].endswith(TRUNCATION_MARKER), cleaned["content"][-30:]
-    assert len(cleaned["content"]) == 2000 + len(TRUNCATION_MARKER), len(cleaned["content"])
+    assert len(cleaned["content"]) == _MAX_STRING_LEN + len(TRUNCATION_MARKER), len(cleaned["content"])
+
+    oversized = "x" * (_OBSERVATION_MAX_STRING_LEN + 5000)
+    obs_cleaned = sanitize_event_payload(
+        "observation_received", {"content": oversized}
+    )["content"]
+    assert obs_cleaned.endswith(TRUNCATION_MARKER), obs_cleaned[-30:]
+    assert len(obs_cleaned) == _OBSERVATION_MAX_STRING_LEN + len(TRUNCATION_MARKER), (
+        len(obs_cleaned)
+    )
 
     internal_task_id = "finalreporttask0002"
     _, store2, _ = _run_runtime(report, internal_task_id, tool_call_first="big_output")
@@ -342,12 +360,13 @@ def _run() -> int:
     ]
     assert observations, "observation_received harus tercatat"
     obs_content = observations[-1].get("content")
-    assert isinstance(obs_content, str) and obs_content.endswith(TRUNCATION_MARKER), (
-        "tool output internal panjang harus tetap dipotong di log"
+    assert isinstance(obs_content, str) and len(obs_content) >= 5000, (
+        "payload hasil tool harus tersimpan utuh di log (S0.3)"
     )
     print(
-        f"[7] REGRESI limit internal TIDAK berubah OK -> sanitize 5000 -> "
-        f"{len(cleaned['content'])}, observation log -> {len(obs_content)}"
+        f"[7] REGRESI limit internal: default {_MAX_STRING_LEN} (tetap dipotong), "
+        f"observation_received {_OBSERVATION_MAX_STRING_LEN} (tetap dipotong), "
+        f"observation log -> {len(obs_content)} (utuh)"
     )
 
     # 8) REGRESI: tombol Copy Consultant tetap ada (tidak rusak).

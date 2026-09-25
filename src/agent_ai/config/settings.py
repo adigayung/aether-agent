@@ -84,6 +84,13 @@ class DeepSeekConfig:
     base_url: str = field(default_factory=lambda: _get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"))
     model: str = field(default_factory=lambda: _get("DEEPSEEK_MODEL", "deepseek-coder"))
     timeout: int = field(default_factory=lambda: _get_int("DEEPSEEK_TIMEOUT", 120))
+    #: Context window model (token) yang BENAR-BENAR dapat dipakai provider ini.
+    #: 0 = tidak diketahui -> AETHER memakai anggaran config global (perilaku
+    #: lama). Diisi eksplisit (mis. 64_000) agar provider dengan context window
+    #: besar tidak dipaksa turun ke default global.
+    context_window: int = field(
+        default_factory=lambda: _get_int("DEEPSEEK_CONTEXT_WINDOW", 0)
+    )
 
     @property
     def is_configured(self) -> bool:
@@ -99,6 +106,10 @@ class OpenAIConfig:
     base_url: str = field(default_factory=lambda: _get("OPENAI_BASE_URL", "https://api.openai.com/v1"))
     model: str = field(default_factory=lambda: _get("OPENAI_MODEL", "gpt-4o-mini"))
     timeout: int = field(default_factory=lambda: _get_int("OPENAI_TIMEOUT", 120))
+    #: Context window model (token). 0 = tidak diketahui (perilaku lama).
+    context_window: int = field(
+        default_factory=lambda: _get_int("OPENAI_CONTEXT_WINDOW", 0)
+    )
 
     @property
     def is_configured(self) -> bool:
@@ -114,6 +125,13 @@ class OpenRouterConfig:
     base_url: str = field(default_factory=lambda: _get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"))
     model: str = field(default_factory=lambda: _get("OPENROUTER_MODEL"))
     timeout: int = field(default_factory=lambda: _get_int("OPENROUTER_TIMEOUT", 120))
+    #: Context window model (token). 0 = tidak diketahui (perilaku lama).
+    #: Perhatikan: satu provider instance dapat memuat banyak model dengan
+    #: context window berbeda; isi dengan nilai model yang PALING KECIL yang
+    #: dipakai agar request tidak pernah melebihi kemampuan model.
+    context_window: int = field(
+        default_factory=lambda: _get_int("OPENROUTER_CONTEXT_WINDOW", 0)
+    )
 
     @property
     def is_configured(self) -> bool:
@@ -141,6 +159,15 @@ class ContextConfig:
     max_files: int = field(default_factory=lambda: _get_int("CONTEXT_MAX_FILES", 8))
     max_bytes: int = field(default_factory=lambda: _get_int("CONTEXT_MAX_BYTES", 60_000))
     max_tokens: int = field(default_factory=lambda: _get_int("CONTEXT_MAX_TOKENS", 16_000))
+    #: Batas token untuk KONTEKS PENGETAHUAN (Project Bible / retrieval).
+    #: TERPISAH dari `max_tokens` (anggaran PERCAKAPAN): context window provider
+    #: adalah anggaran seluruh percakapan, sehingga konteks pengetahuan harus
+    #: dibatasi pada porsinya — kalau tidak, Bible dapat menghabiskan hampir
+    #: seluruh anggaran dan jendela kerja Agent menjadi kosong (compaction terus
+    #: menerus). 0 = tanpa batas tambahan (perilaku lama).
+    knowledge_max_tokens: int = field(
+        default_factory=lambda: _get_int("CONTEXT_KNOWLEDGE_MAX_TOKENS", 8_000)
+    )
     max_depth: int = field(default_factory=lambda: _get_int("CONTEXT_MAX_DEPTH", 1))
     max_nodes: int = field(default_factory=lambda: _get_int("CONTEXT_MAX_NODES", 30))
     relevance_threshold: float = field(
