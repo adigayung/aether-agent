@@ -168,6 +168,17 @@ class ContextConfig:
     knowledge_max_tokens: int = field(
         default_factory=lambda: _get_int("CONTEXT_KNOWLEDGE_MAX_TOKENS", 8_000)
     )
+    #: Porsi MAKSIMUM anggaran percakapan yang boleh dipakai konteks pengetahuan
+    #: (Project Bible). Ini yang mencegah blok pengetahuan STATIS menggerus
+    #: jendela kerja: dengan budget 16.000, batas absolut 8.000 token membuat
+    #: sisa jendela kerja hanya ~3.500 token sehingga compaction memadatkan
+    #: SELURUH jendela terbaru tiap round dan Agent kehilangan isi file yang
+    #: baru dibaca (gejala repeated `read_file`). Batas absolut tetap berlaku
+    #: sebagai plafon; porsi ini membuatnya menyesuaikan diri terhadap budget
+    #: provider (16K maupun 64K). 0 = nonaktif (hanya batas absolut).
+    knowledge_share: float = field(
+        default_factory=lambda: _get_float("CONTEXT_KNOWLEDGE_SHARE", 0.25)
+    )
     max_depth: int = field(default_factory=lambda: _get_int("CONTEXT_MAX_DEPTH", 1))
     max_nodes: int = field(default_factory=lambda: _get_int("CONTEXT_MAX_NODES", 30))
     relevance_threshold: float = field(

@@ -363,18 +363,35 @@ def check_context_budget_flow() -> None:
     assert ob <= 32768, "anggaran Ollama melebihi num_ctx"
     rows.append(("ollama", "m", 32768, configured, ob, osrc))
 
-    # H. Anggaran konteks pengetahuan (Bible) terpisah & dibatasi.
+    # H. Anggaran konteks pengetahuan (Bible): terpisah, dibatasi batas ABSOLUT
+    #    dan PORSI anggaran percakapan. Porsi inilah yang menjamin blok
+    #    pengetahuan STATIS tidak menggerus jendela kerja Agent (penyebab
+    #    repeated `read_file`: jendela kerja menyusut lalu seluruh isi baru
+    #    dipadatkan setiap round).
+    share = float(getattr(settings.context, "knowledge_share", 0.0) or 0.0)
+    assert share > 0, "porsi konteks pengetahuan harus aktif secara default"
+
+    def expected_knowledge(orchestrator) -> int:
+        conversation, _ = orchestrator._context_budget_decision()
+        caps = [knowledge_cap, int(int(conversation) * share)]
+        return min(caps)
+
     kb_plain = plain._knowledge_context_budget_tokens()
-    assert kb_plain == knowledge_cap, (kb_plain, knowledge_cap)
+    assert kb_plain == expected_knowledge(plain), (kb_plain, knowledge_cap, share)
     kb_reporting = reporting._knowledge_context_budget_tokens()
-    assert kb_reporting == min(64000 - 4096, knowledge_cap), kb_reporting
+    assert kb_reporting == expected_knowledge(reporting), kb_reporting
     kb_ollama = o._knowledge_context_budget_tokens()
-    assert kb_ollama == min(reported, knowledge_cap), (kb_ollama, reported)
+    assert kb_ollama == expected_knowledge(o), (kb_ollama, reported)
     for kb in (kb_plain, kb_reporting, kb_ollama):
         assert kb is not None and kb < 64000, "Bible dapat menghabiskan seluruh anggaran"
+    # Jendela kerja SELALU tersisa untuk percakapan.
+    for orchestrator in (plain, reporting, o):
+        conversation, _ = orchestrator._context_budget_decision()
+        knowledge = orchestrator._knowledge_context_budget_tokens()
+        assert conversation > knowledge, (conversation, knowledge)
     print(
-        "[H] anggaran Bible terpisah dari anggaran percakapan "
-        f"(cap={knowledge_cap} token) OK"
+        "[H] anggaran Bible terpisah + dibatasi porsi anggaran percakapan "
+        f"(cap={knowledge_cap} token, share={share}) OK"
     )
 
     print("\n  provider   model            capability  configured  effective  source")

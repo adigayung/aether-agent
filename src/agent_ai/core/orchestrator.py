@@ -517,13 +517,25 @@ class AgentOrchestrator:
             from agent_ai.config.settings import settings
 
             cap = int(getattr(settings.context, "knowledge_max_tokens", 0) or 0)
+            share = float(getattr(settings.context, "knowledge_share", 0.0) or 0.0)
         except Exception:  # noqa: BLE001 - cap opsional, jangan gagalkan task
             return provider_budget
-        if cap <= 0:
+        # Porsi anggaran percakapan: blok pengetahuan STATIS tidak boleh
+        # menggerus jendela kerja Agent. Dihitung dari anggaran percakapan yang
+        # sama dengan yang dipakai daftar pesan, sehingga menyesuaikan diri
+        # terhadap budget provider (bukan angka tetap).
+        share_cap = 0
+        if share > 0:
+            conversation = self._context_budget_tokens()
+            if conversation:
+                share_cap = int(int(conversation) * share)
+        caps = [value for value in (cap, share_cap) if value > 0]
+        if not caps:
             return provider_budget
+        effective = min(caps)
         if provider_budget is None:
-            return cap
-        return min(int(provider_budget), cap)
+            return effective
+        return min(int(provider_budget), effective)
 
     def _tool_definitions_tokens(self, tools: List[ToolDefinition]) -> int:
         """Estimasi token definisi tool (dikirim pada request yang sama).
@@ -565,8 +577,12 @@ class AgentOrchestrator:
         overhead = self._tool_definitions_tokens(tools)
         before = history.estimate_tokens()
         original = history.messages
+        # `comp_stats` = KOMPOSISI keputusan anggaran (observability):
+        # berapa token kepala yang selalu utuh vs sisa jendela kerja, dan
+        # berapa pesan jendela yang dipadatkan/dibuang.
+        comp_stats: Dict[str, int] = {}
         compiled = history.compile_compacted_messages(
-            budget, overhead_tokens=overhead
+            budget, overhead_tokens=overhead, stats=comp_stats
         )
         # Selaraskan cache retrieval dengan ISI konteks yang benar-benar dikirim
         # ke LLM. Tanpa ini, dedup read/search bisa mengklaim sumber "sudah
@@ -574,7 +590,8 @@ class AgentOrchestrator:
         # (false positive) sehingga Agent tidak pernah menerima isi yang
         # dibutuhkannya. Ini murni sinkronisasi state: TIDAK mengubah peran tool
         # dedup dan TIDAK menggantikan keputusan LLM.
-        self._sync_retrieval_cache(history, compiled)
+        span_stats: Dict[str, int] = {}
+        self._sync_retrieval_cache(history, compiled, stats=span_stats)
         after = history.estimate_messages_tokens(compiled)
         tool_stats = ConversationHistory.tool_compaction_stats(original, compiled)
         # Nama key SENGAJA tidak memuat substring kredensial (mis. "token") agar
@@ -594,6 +611,10 @@ class AgentOrchestrator:
             "context_tool_raw_chars": int(tool_stats["tool_raw_chars"]),
             "context_tool_compacted_chars": int(tool_stats["tool_compacted_chars"]),
         }
+        # Komposisi anggaran (kepala vs jendela kerja) + sinkronisasi cache
+        # retrieval. Semua angka, tanpa isi konten.
+        stats.update({key: int(val) for key, val in comp_stats.items()})
+        stats.update({key: int(val) for key, val in span_stats.items()})
         return [message.to_provider_dict() for message in compiled], stats
 
     # ------------------------------------------------------------------ #
@@ -721,7 +742,10 @@ class AgentOrchestrator:
         return (str(query), str(path), context_lines)
 
     def _sync_retrieval_cache(
-        self, history: ConversationHistory, compiled: List[Any]
+        self,
+        history: ConversationHistory,
+        compiled: List[Any],
+        stats: Optional[Dict[str, int]] = None,
     ) -> None:
         """Selaraskan cache retrieval dengan pesan yang BENAR-BENAR dikirim.
 
@@ -742,6 +766,11 @@ class AgentOrchestrator:
         cache = getattr(registry, "read_cache", None)
         if cache is None:
             return
+        if stats is not None:
+            stats["context_spans_visible"] = 0
+            stats["context_spans_hidden"] = 0
+            stats["context_paths_visible"] = 0
+            stats["context_paths_hidden"] = 0
 
         originals = {
             message.tool_call_id: message.content
@@ -781,6 +810,18 @@ class AgentOrchestrator:
             )
             if visible:
                 available.setdefault(path, []).append((start, end))
+                if stats is not None:
+                    stats["context_spans_visible"] += 1
+            elif stats is not None:
+                # Rentang yang hasilnya TIDAK lagi terlihat LLM (dipadatkan/
+                # dibuang) -> dedup untuk rentang ini dimatikan (bukan bug:
+                # isinya memang sudah tidak ada di konteks).
+                stats["context_spans_hidden"] += 1
+        if stats is not None:
+            stats["context_paths_visible"] = len(available)
+            stats["context_paths_hidden"] = len(
+                {p for p in seen_paths if p not in available}
+            )
         cache.sync_from_context(available, seen_paths)
 
         # search_code: hasil yang sudah TIDAK terlihat harus dapat dicari ulang.

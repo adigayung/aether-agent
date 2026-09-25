@@ -56,6 +56,18 @@ _COMPACT_TAIL_CHARS = 200
 #: Batas panjang satu nilai string argumen tool-call sebelum dipadatkan.
 _COMPACT_ARG_CHARS = 400
 
+#: Ukuran cuplikan LEVEL-2 untuk pesan LAMA yang sudah dipadatkan. Dipakai
+#: hanya ketika anggaran sangat sempit dan bagian lama harus "dikorbankan lebih
+#: dulu" agar ISI BARU (hasil tool yang baru diterima Agent) tetap utuh.
+_COMPACT_OLD_HEAD_CHARS = 120
+
+#: Batas karakter cuplikan AKHIR level-2 (lihat `_COMPACT_OLD_HEAD_CHARS`).
+_COMPACT_OLD_TAIL_CHARS = 60
+
+#: Ukuran cuplikan level-3 (paling ringkas) untuk pesan lama: hanya locator/
+#: penanda agar pesan tetap ada tanpa memakan anggaran jendela kerja.
+_COMPACT_MIN_HEAD_CHARS = 60
+
 #: Penanda deterministik bahwa konten telah dipadatkan (tanpa LLM).
 _COMPACT_MARKER = "[dipadatkan]"
 
@@ -530,6 +542,7 @@ class ConversationHistory:
         head_chars: int = _COMPACT_HEAD_CHARS,
         tail_chars: int = _COMPACT_TAIL_CHARS,
         arg_chars: int = _COMPACT_ARG_CHARS,
+        stats: Optional[Dict[str, int]] = None,
     ) -> List[ChatMessage]:
         """Kompilasi riwayat agar MUAT dalam anggaran token (deterministik).
 
@@ -565,6 +578,12 @@ class ConversationHistory:
             keep_recent: jumlah pesan terakhir yang selalu utuh.
             head_chars/tail_chars: ukuran cuplikan saat memadatkan.
             arg_chars: batas nilai string argumen tool-call.
+            stats: dict opsional (diisi in-place) berisi KOMPOSISI keputusan
+                anggaran: `context_head` (token kepala yang selalu utuh),
+                `context_window` (sisa anggaran untuk jendela kerja),
+                `context_tail_messages`, `context_tail_compacted`,
+                `context_recent_compacted`, `context_dropped`. Murni
+                observability: TIDAK mengubah keputusan/urutan pesan.
 
         Returns:
             List ChatMessage (kepala utuh + ekor padat/bounded), urutan terjaga.
@@ -575,12 +594,30 @@ class ConversationHistory:
         max_budget = int(max_tokens)
         overhead = max(int(overhead_tokens), 0)
         budget = max_budget - overhead
+        # Komposisi keputusan anggaran (observability; lihat `stats`).
+        comp: Dict[str, int] = {
+            "context_head": 0,
+            "context_window": 0,
+            "context_tail_messages": len(messages),
+            "context_tail_compacted": 0,
+            "context_recent_compacted": 0,
+            "context_recent_full": 0,
+            "context_older": 0,
+            "context_old_recompacted": 0,
+            "context_old_minimal": 0,
+            "context_dropped": 0,
+            "context_keep_recent": max(int(keep_recent), 0),
+        }
+        if stats is not None:
+            stats.update(comp)
         if self.estimate_messages_tokens(messages) <= budget:
             return messages
 
         head, tail = self._split_protected_head(messages)
         head_tokens = self.estimate_messages_tokens(head)
         tail_budget = budget - head_tokens
+        comp["context_head"] = int(head_tokens)
+        comp["context_tail_messages"] = len(tail)
 
         # BUGFIX (kontinuitas state kerja antar-round): bila KEPALA (system
         # prompt + konteks pengetahuan/Project Bible + task) SENDIRI sudah
@@ -614,6 +651,7 @@ class ConversationHistory:
             grace_budget = 2 * max_budget - overhead
             tail_budget = max(tail_budget, grace_budget - head_tokens)
         limit = max(tail_budget, 0)
+        comp["context_window"] = int(limit)
 
         keep_recent = max(int(keep_recent), 0)
         recent_start = max(len(tail) - keep_recent, 0)
@@ -623,6 +661,63 @@ class ConversationHistory:
             else message
             for index, message in enumerate(tail)
         ]
+        comp["context_tail_compacted"] = int(recent_start)
+        # Berapa token yang DIBUTUHKAN jendela terbaru dalam bentuk UTUH, dan
+        # berapa token yang dipakai bagian lama (sudah dipadatkan). Dipakai
+        # untuk menilai apakah anggaran cukup: bila jendela utuh > limit,
+        # Tahap 5/5b akan memadatkan SELURUH jendela (isi baru hilang).
+        comp["context_recent_full"] = int(
+            self.estimate_messages_tokens(tail[recent_start:])
+        )
+        comp["context_older"] = int(
+            self.estimate_messages_tokens(compiled_tail[:recent_start])
+        )
+
+        # Tahap 4b (PRIORITAS PENGORBANAN): bila jendela TERBARU dalam bentuk
+        # UTUH saja sudah melebihi anggaran, buang lebih dulu pesan PALING LAMA
+        # yang SUDAH dipadatkan (ringkasan pekerjaan lama) -- BUKAN memadatkan
+        # isi baru.
+        #
+        # Alasannya dari runtime evidence: hasil tool yang BARU diterima Agent
+        # jauh lebih bernilai daripada ringkasan langkah lama. Urutan lama
+        # (padatkan jendela terbaru lebih dulu) membuat SETIAP round kehilangan
+        # isi file yang baru dibaca -> Agent membaca ulang file yang sama
+        # puluhan kali (gejala repeated `read_file`). Membuang ringkasan lama
+        # hanya menghilangkan konteks langkah jauh sebelumnya, sementara
+        # memadatkan isi baru menghilangkan SUMBER yang sedang dipakai.
+        # Tahap 4b (PRIORITAS PENGORBANAN): bila total melebihi anggaran,
+        # korbankan lebih dulu bagian LAMA dengan MEMPERKECIL cuplikannya --
+        # bukan memadatkan isi baru, dan bukan membuang pesan (kontrak lama
+        # tetap: memadatkan > membuang; lihat Tahap 6 untuk pembuangan).
+        #
+        # Alasan (runtime evidence): pesan lama sudah berupa ringkasan lossy,
+        # sehingga memperkecilnya hanya menghilangkan detail ringkasan. Isi baru
+        # (hasil tool yang BARU diterima Agent) adalah SUMBER yang sedang
+        # dipakai; memadatkannya membuat Agent kehilangan isi file yang baru
+        # dibaca lalu mengulang `read_file` yang sama puluhan kali. Urutan lama
+        # memadatkan jendela terbaru LEBIH DULU sehingga setiap round kehilangan
+        # isi baru meski ringkasan lama masih memakan anggaran.
+        if recent_start > 0 and self.estimate_messages_tokens(compiled_tail) > limit:
+            for index in range(recent_start):
+                compiled_tail[index] = self._compact_message(
+                    compiled_tail[index],
+                    _COMPACT_OLD_HEAD_CHARS,
+                    _COMPACT_OLD_TAIL_CHARS,
+                    _COMPACT_OLD_HEAD_CHARS,
+                )
+            comp["context_old_recompacted"] += 1
+        # Tahap 4b-2: masih lebih -> kecilkan lagi bagian lama sampai bentuk
+        # MINIMAL (hanya locator/penanda). Bagian lama tetap ADA (protokol tool
+        # calling tetap valid), hanya isinya yang paling ringkas.
+        if recent_start > 0 and self.estimate_messages_tokens(compiled_tail) > limit:
+            for index in range(recent_start):
+                compiled_tail[index] = self._compact_message(
+                    compiled_tail[index],
+                    _COMPACT_MIN_HEAD_CHARS,
+                    0,
+                    _COMPACT_MIN_HEAD_CHARS,
+                )
+            comp["context_old_minimal"] += 1
 
         # Tahap 5: padatkan jendela terbaru (dari yang PALING LAMA),
         # sisakan pesan TERAKHIR selalu utuh selama masih muat.
@@ -634,6 +729,7 @@ class ConversationHistory:
             compiled_tail[index] = self._compact_message(
                 compiled_tail[index], head_chars, tail_chars, arg_chars
             )
+            comp["context_recent_compacted"] += 1
             index += 1
 
         # Tahap 5b: bila MASIH lebih, padatkan juga pesan TERAKHIR (pesan tetap
@@ -649,6 +745,7 @@ class ConversationHistory:
             compiled_tail[-1] = self._compact_message(
                 compiled_tail[-1], head_chars, tail_chars, arg_chars
             )
+            comp["context_recent_compacted"] += 1
 
         # Tahap 6: upaya terakhir -- buang pesan PALING LAMA (per grup,
         # menjaga pasangan tool) sampai muat. SAFETY KONTINUITAS: bila kepala
@@ -661,6 +758,9 @@ class ConversationHistory:
             and self.estimate_messages_tokens(compiled_tail) > limit
         ):
             compiled_tail.pop(0)
+            comp["context_dropped"] += 1
             compiled_tail = self._drop_orphan_leading_tools(compiled_tail)
 
+        if stats is not None:
+            stats.update(comp)
         return head + compiled_tail
