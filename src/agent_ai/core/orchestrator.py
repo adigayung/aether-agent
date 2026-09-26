@@ -1712,6 +1712,29 @@ class AgentOrchestrator:
                 loop.cancel(self._cancel_reason())
                 break
 
+            # Emergency infrastructure safety limit — BUKAN completion. Bila
+            # jumlah langkah tool yang sudah dieksekusi menyentuh `max_steps`,
+            # loop DIHENTIKAN oleh AETHER agar tidak runaway. Task TIDAK pernah
+            # "selesai" di sini: status selalu FAILED (bukan DONE/SUCCESS), agar
+            # safety limit tidak disalahartikan sebagai keputusan LLM. Normal
+            # completion (LLM tanpa tool_calls) tetap satu-satunya jalur DONE.
+            if loop.iteration >= max_steps:
+                loop.fail(
+                    f"Emergency safety limit tercapai: {int(loop.iteration)} "
+                    f"langkah tool dieksekusi (max_steps={max_steps}). Loop "
+                    f"dihentikan oleh AETHER (infrastructure), bukan keputusan "
+                    f"LLM; task TIDAK selesai. Periksa kemungkinan loop runaway."
+                )
+                emit_event(
+                    self.event_sink,
+                    "loop_safety_abort",
+                    {
+                        "max_steps": int(max_steps),
+                        "iteration": int(loop.iteration),
+                    },
+                )
+                break
+
             # Runtime context compaction: kirim konteks yang BOUNDED, bukan
             # seluruh riwayat mentah. Task pendek dikembalikan apa adanya.
             messages, context_stats = self._compile_context_messages(history, tools)
@@ -1951,8 +1974,12 @@ class AgentOrchestrator:
                 history.append_tool_result(
                     payload.tool_call_id, payload.tool_name, payload.to_content()
                 )
-                # Catat step untuk observability (bukan keputusan completion).
-                # Tidak ada hard limit step: agent berjalan selama diperlukan.
+                # Catat step untuk observability/penghitungan max_steps.
+                # Ini bukan keputusan completion: agent tidak pernah dianggap
+                # selesai berdasarkan jumlah step. Satu-satunya guard jumlah
+                # step adalah emergency safety limit di atas while loop (FAILED,
+                # bukan DONE) terhadap runaway infra; normal completion tetap
+                # murni dari response LLM tanpa tool_calls.
                 loop.record_action(self.executor.to_agent_action(action))
                 loop.record_observation(self._tool_payload_to_observation(payload))
             if batch.cancelled:

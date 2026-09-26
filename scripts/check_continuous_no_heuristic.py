@@ -245,7 +245,13 @@ def scenario_forced_heuristic_ignored(executor: ToolExecutor) -> None:
 
 
 def scenario_no_step_cap(executor: ToolExecutor) -> None:
-    """Tidak ada cap step: melewati `max_steps` tetap lanjut sampai LLM final."""
+    """Tidak ada cap step BEHAVIOR: banyak turn tetap lanjut sampai LLM final.
+
+    `max_steps` HANYA emergency abort (status FAILED), bukan completion cap —
+    jadi dengan default max_steps TINGGI loop berhenti karena keputusan LLM
+    (DONE), bukan karena jumlah step. Emergency abort-nya sendiri dibuktikan
+    di `check_continuous_loop.py` (scenario_e_safety_limit_abort).
+    """
     (FIXTURE / "a.txt").write_text("hi", encoding="utf-8")
     script = [
         _tool_turn(f"baca {i}", [_tool_call(f"r{i}", "read_file", {"path": "a.txt"})])
@@ -253,12 +259,13 @@ def scenario_no_step_cap(executor: ToolExecutor) -> None:
     ]
     provider = ScriptedProvider(script)
     orch = _make_orch(provider, executor)
-    result = orch.run_continuous_loop("Baca terus tanpa henti", max_steps=3)
+    # Default max_steps (sangat tinggi): loop tidak boleh berhenti karena cap behavior.
+    result = orch.run_continuous_loop("Baca terus tanpa henti")
     print(f"[F] status={result.status.value} calls={provider.calls} iterations={result.iterations}")
     assert result.status == AgentStatus.DONE, result.error
     assert provider.calls == 7, provider.calls
     assert result.iterations == 6, result.iterations
-    print("OK: tidak ada cap step; loop berhenti karena LLM final (bukan FAILED)")
+    print("OK: tidak ada cap step behavior; loop berhenti karena LLM final (bukan FAILED)")
 
 
 def main() -> int:

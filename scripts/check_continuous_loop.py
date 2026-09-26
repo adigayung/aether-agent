@@ -34,6 +34,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from agent_ai.core.cancel import CancellationToken  # noqa: E402
 from agent_ai.core.executor import ToolExecutor  # noqa: E402
 from agent_ai.core.models import AgentStatus  # noqa: E402
 from agent_ai.core.orchestrator import AgentOrchestrator  # noqa: E402
@@ -249,8 +250,89 @@ def scenario_d_default_is_continuous(executor_maker) -> None:
     )
     assert legacy.use_continuous_loop is False
     lres = legacy.run("hai")
+    
     assert lres.status == AgentStatus.DONE and lres.result == "legacy halo", lres
     print("OK: legacy loop tetap tersedia via eksplisit use_continuous_loop=False")
+
+
+def scenario_e_safety_limit_abort(executor_maker) -> None:
+
+    turns = 5
+    script = [
+        _tool_turn(
+            f"baca ke-{i}", [_tool_call(f"s{i}", "read_file", {"path": "a.txt"})]
+        )
+        for i in range(turns)
+    ]
+    script.append(_final_turn("selesai"))
+    provider = ScriptedProvider(script)
+    orch = AgentOrchestrator(
+        provider=provider,
+        executor=executor_maker(),
+        options=GenerateOptions(model="scripted-model"),
+        use_continuous_loop=True,
+    )
+    result = orch.run_continuous_loop("baca a.txt berulang", max_steps=2)
+
+    print(f"E.status     -> {result.status.value}")
+    print(f"E.iterations -> {result.iterations}")
+    print(f"E.calls      -> {provider.calls}")
+    assert result.status == AgentStatus.FAILED, result.status
+    assert not result.success, "safety limit harus FAILED, bukan success"
+    assert "safety limit" in (result.error or "").lower(), result.error
+    assert provider.calls == 2, f"LLM dipanggil {provider.calls}x, harus berhenti di 2"
+    assert result.iterations == 2, result.iterations
+    print("OK: mencapai max_steps -> FAILED (emergency safety), loop berhenti, bukan DONE")
+
+
+def scenario_f_tool_failure_back_to_llm(executor_maker) -> None:
+
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                "Baca file yang tak ada.",
+                [_tool_call("f1", "read_file", {"path": "tidak_ada.txt"})],
+            ),
+            _final_turn("File tidak ditemukan; saya berhenti."),
+        ]
+    )
+    orch = AgentOrchestrator(
+        provider=provider,
+        executor=executor_maker(),
+        options=GenerateOptions(model="scripted-model"),
+        use_continuous_loop=True,
+    )
+    result = orch.run("baca file tak ada")
+
+    print(f"F.status     -> {result.status.value}")
+    print(f"F.calls      -> {provider.calls}")
+    assert result.status == AgentStatus.DONE, result
+    assert provider.calls == 2, "LLM dipanggil (tool) + (final) = 2x"
+    second = provider.requests[1]
+    tool_msgs = [m.get("content") for m in second if m.get("role") == "tool"]
+    assert tool_msgs, "harus ada hasil tool role 'tool' pada request berikutnya"
+    assert any(str(c).strip() for c in tool_msgs), "konten tool gagal tidak boleh kosong"
+    print("OK: tool failure -> error dikirim kembali ke LLM (role 'tool'), LLM lanjut ke final")
+
+
+def scenario_g_user_cancel(executor_maker) -> None:
+
+    provider = ScriptedProvider([_final_turn("halo")])
+    token = CancellationToken()
+    token.request("user menekan stop")
+    orch = AgentOrchestrator(
+        provider=provider,
+        executor=executor_maker(),
+        options=GenerateOptions(model="scripted-model"),
+        use_continuous_loop=True,
+        cancel_token=token,
+    )
+    result = orch.run("hai")
+    print(f"G.status     -> {result.status.value}")
+    assert result.status == AgentStatus.CANCELLED, result.status
+    assert "stop" in (result.error or "").lower(), result.error
+    assert provider.calls == 0, "LLM tidak boleh dipanggil setelah cancel"
+    print("OK: user cancel -> CANCELLED, LLM tidak dipanggil")
 
 
 def main() -> int:
@@ -268,6 +350,9 @@ def main() -> int:
         scenario_b_no_small_limit(executor_maker)
         scenario_c_provider_error(executor_maker)
         scenario_d_default_is_continuous(executor_maker)
+        scenario_e_safety_limit_abort(executor_maker)
+        scenario_f_tool_failure_back_to_llm(executor_maker)
+        scenario_g_user_cancel(executor_maker)
     finally:
         shutil.rmtree(FIXTURE, ignore_errors=True)
         # Bersihkan root dummy_test hanya bila sudah kosong.
