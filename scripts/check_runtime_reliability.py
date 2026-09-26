@@ -139,7 +139,7 @@ def _run() -> int:
         final("selesai"),
     ])
     tool = EchoTool()
-    orch = AgentOrchestrator(provider=provider, executor=ToolExecutor(registry=_registry(tool)), max_iterations=5)
+    orch = AgentOrchestrator(use_continuous_loop=False, provider=provider, executor=ToolExecutor(registry=_registry(tool)), max_iterations=5)
     result = orch.run("echo hi lalu final")
     assert result.status == AgentStatus.DONE and result.result == "selesai"
     assert tool.calls == 1
@@ -149,7 +149,7 @@ def _run() -> int:
     mgr = ReliabilityManager(detector=Detector(iteration_limit=10))
     provider2 = ScriptedProvider([tool_call("echo", {"value": "a"}), final("ok")])
     tool2 = EchoTool()
-    orch2 = AgentOrchestrator(
+    orch2 = AgentOrchestrator(use_continuous_loop=False, 
         provider=provider2, executor=ToolExecutor(registry=_registry(tool2)),
         max_iterations=5, reliability=mgr,
     )
@@ -171,7 +171,7 @@ def _run() -> int:
         responses=[final("pulih")],
         errors=[RuntimeError("provider down")],
     )
-    orch4 = AgentOrchestrator(
+    orch4 = AgentOrchestrator(use_continuous_loop=False, 
         provider=provider4, executor=ToolExecutor(registry=_registry(EchoTool())),
         max_iterations=5, reliability=mgr4,
     )
@@ -189,7 +189,7 @@ def _run() -> int:
         responses=[final("tidak tercapai")],
         errors=[RuntimeError("down")] * 5,  # selalu error
     )
-    orch5 = AgentOrchestrator(
+    orch5 = AgentOrchestrator(use_continuous_loop=False, 
         provider=provider5, executor=ToolExecutor(registry=_registry(EchoTool())),
         max_iterations=5, reliability=mgr5,
     )
@@ -215,7 +215,7 @@ def _run() -> int:
         final("selesai setelah recovery"),
     ])
     tool7 = EchoTool()
-    orch7 = AgentOrchestrator(
+    orch7 = AgentOrchestrator(use_continuous_loop=False, 
         provider=provider7, executor=ToolExecutor(registry=_registry(tool7)),
         max_iterations=10, reliability=mgr7,
     )
@@ -248,7 +248,7 @@ def _run() -> int:
         tool_call("counter", {"value": "x"}),
         final("selesai"),
     ])
-    orch8 = AgentOrchestrator(
+    orch8 = AgentOrchestrator(use_continuous_loop=False, 
         provider=provider8, executor=ToolExecutor(registry=_registry(CounterTool())),
         max_iterations=10, reliability=mgr8,
     )
@@ -267,7 +267,7 @@ def _run() -> int:
         tool_call("echo", {"value": "x"}),
         final("menyerah; jawaban final setelah gagal berulang"),
     ])
-    orch9 = AgentOrchestrator(
+    orch9 = AgentOrchestrator(use_continuous_loop=False, 
         provider=provider9, executor=ToolExecutor(registry=_registry(EchoTool(fail=True))),
         max_iterations=10, reliability=mgr9,
     )
@@ -284,7 +284,7 @@ def _run() -> int:
         responses=[final("pulih")],
         errors=[TimeoutError("request timed out")],
     )
-    orch10 = AgentOrchestrator(
+    orch10 = AgentOrchestrator(use_continuous_loop=False, 
         provider=provider10, executor=ToolExecutor(registry=_registry(EchoTool())),
         max_iterations=5, reliability=mgr10,
     )
@@ -302,7 +302,7 @@ def _run() -> int:
         responses=[final("pulih")],
         errors=[RuntimeError("boom")],
     )
-    orch11 = AgentOrchestrator(
+    orch11 = AgentOrchestrator(use_continuous_loop=False, 
         provider=provider11, executor=ToolExecutor(registry=_registry(EchoTool())),
         max_iterations=5, reliability=mgr11,
     )
@@ -320,7 +320,7 @@ def _run() -> int:
         responses=[final("pulih")],
         errors=[ValueError("malformed tool response json")],
     )
-    orch12 = AgentOrchestrator(
+    orch12 = AgentOrchestrator(use_continuous_loop=False, 
         provider=provider12, executor=ToolExecutor(registry=_registry(EchoTool())),
         max_iterations=5, reliability=mgr12,
     )
@@ -338,7 +338,7 @@ def _run() -> int:
         tool_call("echo", {"value": "x"}),
         final("selesai melewati iteration limit lama"),
     ])
-    orch13 = AgentOrchestrator(
+    orch13 = AgentOrchestrator(use_continuous_loop=False, 
         provider=provider13, executor=ToolExecutor(registry=_registry(EchoTool())),
         max_iterations=3, reliability=mgr13,
     )
@@ -356,7 +356,7 @@ def _run() -> int:
     # 15) final response tidak menjalankan tool.
     tool15 = EchoTool()
     provider15 = ScriptedProvider([final("langsung final")])
-    orch15 = AgentOrchestrator(
+    orch15 = AgentOrchestrator(use_continuous_loop=False, 
         provider=provider15, executor=ToolExecutor(registry=_registry(tool15)),
         max_iterations=5, reliability=ReliabilityManager(),
     )

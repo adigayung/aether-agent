@@ -184,7 +184,7 @@ def check_fitting() -> None:
 
     # (a) Provider TANPA anggaran -> konteks apa adanya (perilaku lama).
     plain = RecordingProvider(budget_tokens=None)
-    AgentOrchestrator(provider=plain, brain=FakeBrain(long_text)).run("tanya")
+    AgentOrchestrator(use_continuous_loop=False, provider=plain, brain=FakeBrain(long_text)).run("tanya")
     sent_plain = "\n".join(m.content for m in plain.calls[0]["messages"])
     assert long_text in sent_plain, "konteks tanpa anggaran harus dikirim apa adanya"
     print("[5a] provider tanpa anggaran -> konteks apa adanya OK")
@@ -192,7 +192,7 @@ def check_fitting() -> None:
     # (b) Provider DENGAN anggaran -> dipotong pada batas baris + penanda.
     budget_tokens = 500
     bounded = RecordingProvider(budget_tokens=budget_tokens)
-    AgentOrchestrator(provider=bounded, brain=FakeBrain(long_text)).run("tanya")
+    AgentOrchestrator(use_continuous_loop=False, provider=bounded, brain=FakeBrain(long_text)).run("tanya")
     fitted = [
         m.content
         for m in bounded.calls[0]["messages"]

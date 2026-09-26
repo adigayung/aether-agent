@@ -72,7 +72,7 @@ def main() -> int:
         tool_call("read_file", {"path": "src/agent_ai/tools/base.py", "end_line": 2}),
         final("File berhasil dibaca."),
     ])
-    orch = AgentOrchestrator(provider=provider, max_iterations=5)
+    orch = AgentOrchestrator(use_continuous_loop=False, provider=provider, max_iterations=5)
     result = orch.run("Baca file base.py lalu simpulkan.")
     print(f"status      = {result.status.value}")
     print(f"result      = {result.result!r}")
@@ -94,7 +94,7 @@ def main() -> int:
         tool_call("list_files", {"path": "src"}),
         final("Selesai."),
     ])
-    orch2 = AgentOrchestrator(provider=provider2, max_iterations=3)
+    orch2 = AgentOrchestrator(use_continuous_loop=False, provider=provider2, max_iterations=3)
     result2 = orch2.run("Loop terus.")
     print(f"tanpa hard limit status = {result2.status.value}, iterations = {result2.iterations}")
     assert result2.status == AgentStatus.DONE
@@ -106,7 +106,7 @@ def main() -> int:
         tool_call("read_file", {"path": "tidak/ada.py"}),
         final("File tidak ditemukan, saya berhenti."),
     ])
-    orch3 = AgentOrchestrator(provider=provider3, max_iterations=5)
+    orch3 = AgentOrchestrator(use_continuous_loop=False, provider=provider3, max_iterations=5)
     result3 = orch3.run("Baca file yang tidak ada.")
     print(f"tool error status = {result3.status.value}, result = {result3.result!r}")
     assert result3.status == AgentStatus.DONE

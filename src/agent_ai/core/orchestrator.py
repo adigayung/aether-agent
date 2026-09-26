@@ -122,7 +122,9 @@ class AgentOrchestrator:
             tidak dijalankan di akhir run (dikelola pemanggil, mis. Runtime).
         use_continuous_loop: bila True, `run()` memakai continuous loop Native
             Tool Calling (satu percakapan kontinu) menggantikan loop lama.
-            Default False (perilaku lama tetap dipertahankan).
+            Default True: continuous loop adalah jalur eksekusi NORMAL; loop
+            lama hanya dipakai bila pemanggil memberi eksplisit `False`
+            (kompatibilitas/uji).
         environment_context: Environment Context project-local (markdown dari
             `.aether/ENVIRONMENT.md`). Bila diisi, disisipkan sebagai system
             message pada awal session continuous loop. Disiapkan pemanggil.
@@ -146,7 +148,7 @@ class AgentOrchestrator:
         tool_choice: Optional[ToolChoice] = None,
         reliability: Optional[ReliabilityManager] = None,
         event_sink: Optional[EventSink] = None,
-        use_continuous_loop: bool = False,
+        use_continuous_loop: bool = True,
         environment_context: Optional[str] = None,
         cancel_token: Optional[CancellationToken] = None,
         context_budget_tokens: Optional[int] = None,
@@ -1383,9 +1385,10 @@ class AgentOrchestrator:
     def run(self, task: str) -> OrchestratorResult:
         """Jalankan iterative agent loop untuk sebuah task.
 
-        Bila `use_continuous_loop` aktif, delegasikan ke `run_continuous_loop()`
-        (Native Tool Calling, satu percakapan kontinu). Default memakai loop
-        lama agar perilaku existing tidak berubah.
+        Bila `use_continuous_loop` aktif (default), delegasikan ke
+        `run_continuous_loop()` (Native Tool Calling, satu percakapan kontinu).
+        Loop lama hanya dipakai bila pemanggil memberi eksplisit
+        `use_continuous_loop=False` (kompatibilitas/uji).
 
         Returns:
             OrchestratorResult (status DONE/FAILED, result, steps).

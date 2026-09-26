@@ -109,7 +109,7 @@ def main() -> int:
 
         # 1) Tanpa brain: perilaku lama tetap bekerja.
         p1 = ScriptedProvider(["FINAL: hasil tanpa brain"])
-        r1 = AgentOrchestrator(provider=p1).run("task biasa")
+        r1 = AgentOrchestrator(use_continuous_loop=False, provider=p1).run("task biasa")
         print(f"tanpa brain : status={r1.status.value} result={r1.result!r} learning={r1.learning}")
         assert r1.status == AgentStatus.DONE and r1.result == "FINAL: hasil tanpa brain"
         assert r1.learning is None
@@ -118,7 +118,7 @@ def main() -> int:
         # 2) Dengan brain: context diambil sebelum LLM dipanggil.
         brain = FakeBrain()
         p2 = ScriptedProvider(["FINAL: hasil dengan brain"])
-        r2 = AgentOrchestrator(provider=p2, brain=brain).run("task dengan brain")
+        r2 = AgentOrchestrator(use_continuous_loop=False, provider=p2, brain=brain).run("task dengan brain")
         print(f"brain context_calls : {brain.context_calls}")
         assert brain.context_calls == 1
         print()
@@ -137,7 +137,7 @@ def main() -> int:
         # 4) Tool loop tetap bekerja (tool call -> observation -> FINAL).
         tool_call = {"tool": "read_file", "arguments": {"path": "main.py"}}
         p3 = ScriptedProvider([tool_call, "FINAL: selesai setelah tool"])
-        r3 = AgentOrchestrator(provider=p3, brain=FakeBrain()).run("baca file")
+        r3 = AgentOrchestrator(use_continuous_loop=False, provider=p3, brain=FakeBrain()).run("baca file")
         print(f"tool loop : status={r3.status.value} iterations={r3.iterations} steps={len(r3.steps)}")
         assert r3.status == AgentStatus.DONE
         assert r3.iterations >= 1 and len(r3.steps) >= 1
@@ -146,7 +146,7 @@ def main() -> int:
         # 5) Setelah task selesai brain menerima learning input.
         brain4 = FakeBrain()
         p4 = ScriptedProvider(["FINAL: selesai"])
-        r4 = AgentOrchestrator(provider=p4, brain=brain4).run("task learning")
+        r4 = AgentOrchestrator(use_continuous_loop=False, provider=p4, brain=brain4).run("task learning")
         print(f"learn_calls : {len(brain4.learn_calls)}")
         assert len(brain4.learn_calls) == 1
         assert any("task learning" in o for o in brain4.learn_calls[0])
@@ -156,7 +156,7 @@ def main() -> int:
         # 6) Learning failure tidak menggagalkan task utama.
         brain5 = FakeBrain(fail_learn=True)
         p5 = ScriptedProvider(["FINAL: tetap sukses"])
-        r5 = AgentOrchestrator(provider=p5, brain=brain5).run("task dengan learning gagal")
+        r5 = AgentOrchestrator(use_continuous_loop=False, provider=p5, brain=brain5).run("task dengan learning gagal")
         print(f"learning gagal : status={r5.status.value} result={r5.result!r} learning={r5.learning}")
         assert r5.status == AgentStatus.DONE and r5.result == "FINAL: tetap sukses"
         assert r5.learning is None

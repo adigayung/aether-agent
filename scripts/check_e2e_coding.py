@@ -195,7 +195,7 @@ def main() -> int:
 
 def _run() -> int:
     provider = CodingProvider()
-    orchestrator = AgentOrchestrator(provider=provider, max_iterations=12)
+    orchestrator = AgentOrchestrator(use_continuous_loop=False, provider=provider, max_iterations=12)
 
     result = orchestrator.run("Perbaiki bug pada calculator dan pastikan test berhasil.")
 

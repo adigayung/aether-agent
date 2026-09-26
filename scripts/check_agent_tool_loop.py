@@ -168,7 +168,7 @@ def _run() -> int:
             _final_response("File berisi fungsi add."),
         ]
     )
-    orch = AgentOrchestrator(
+    orch = AgentOrchestrator(use_continuous_loop=False, 
         provider=provider,
         executor=executor,
         max_iterations=5,
@@ -225,7 +225,7 @@ def _run() -> int:
             _final_response("Command gagal dengan exit code 3."),
         ]
     )
-    orch2 = AgentOrchestrator(provider=provider2, executor=executor, max_iterations=5)
+    orch2 = AgentOrchestrator(use_continuous_loop=False, provider=provider2, executor=executor, max_iterations=5)
     result2 = orch2.run("Jalankan command yang gagal.")
 
     obs2 = result2.steps[0]["observation"]
@@ -244,7 +244,7 @@ def _run() -> int:
             _final_response("Path ditolak."),
         ]
     )
-    orch3 = AgentOrchestrator(provider=provider3, executor=executor, max_iterations=5)
+    orch3 = AgentOrchestrator(use_continuous_loop=False, provider=provider3, executor=executor, max_iterations=5)
     result3 = orch3.run("Baca file di luar workspace.")
     obs3 = result3.steps[0]["observation"]
     assert obs3["success"] is False, "path di luar workspace harus ditolak"
@@ -257,7 +257,7 @@ def _run() -> int:
 
     # --- Skenario 5: FINAL langsung (tanpa tool) ---------------------------
     provider5 = ScriptedProvider([_final_response("Tidak perlu tool.")])
-    orch5 = AgentOrchestrator(provider=provider5, executor=executor, max_iterations=5)
+    orch5 = AgentOrchestrator(use_continuous_loop=False, provider=provider5, executor=executor, max_iterations=5)
     result5 = orch5.run("Jawab tanpa tool.")
     assert result5.success and result5.result == "Tidak perlu tool."
     assert len(result5.steps) == 0, "tidak boleh ada tool execution"
@@ -289,7 +289,7 @@ def _smoke_test_deepseek(ds: DeepSeekProvider, executor: ToolExecutor) -> None:
     print(f"model    : {ds.config.model}")
     print(f"base_url : {ds.config.base_url}")
 
-    orch = AgentOrchestrator(
+    orch = AgentOrchestrator(use_continuous_loop=False, 
         provider=ds,
         executor=executor,
         max_iterations=4,

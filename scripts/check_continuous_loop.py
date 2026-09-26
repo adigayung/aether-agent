@@ -10,7 +10,8 @@ palsu (scripted). Yang diverifikasi:
     - Loop berhenti saat LLM memberi response TANPA tool call (final) -> DONE.
     - Tidak ada limit kecil (5/10): >10 turn tool tetap berjalan kontinu.
     - Provider error -> FAILED dengan pesan jelas (provider_error=True).
-    - Default (`use_continuous_loop=False`) tetap memakai loop lama.
+    - Default (`use_continuous_loop=True`) -> run() delegasikan ke continuous
+          loop, jalur eksekusi NORMAL; loop lama hanya via eksplisit `False`.
 
 Fixture workspace berada di `J:\\Agent_Ai\\dummy_test` (workspace uji terisolasi,
 BUKAN bagian dari AETHER) dan dibersihkan setelah verifikasi selesai.
@@ -225,18 +226,31 @@ def scenario_c_provider_error(executor_maker) -> None:
     print("OK: provider error -> FAILED dengan pesan jelas (provider_error=True)")
 
 
-def scenario_d_default_backward_compatible(executor_maker) -> None:
-    """Default (use_continuous_loop=False) tetap memakai loop lama."""
+def scenario_d_default_is_continuous(executor_maker) -> None:
+    """Default = continuous loop (jalur NORMAL); legacy HANYA via eksplisit False."""
     provider = ScriptedProvider([_final_turn("halo")])
     orch = AgentOrchestrator(
         provider=provider,
         executor=executor_maker(),
         options=GenerateOptions(model="scripted-model"),
     )
-    assert orch.use_continuous_loop is False
+    assert orch.use_continuous_loop is True, "production default harus continuous"
     result = orch.run("hai")
     assert result.status == AgentStatus.DONE and result.result == "halo", result
-    print("OK: default use_continuous_loop=False -> loop lama tetap dipakai")
+    print("OK: default use_continuous_loop=True -> run() delegasikan ke continuous loop")
+
+    # Legacy tetap tersedia HANYA bila pemanggil memberi eksplisit False
+    # (kompatibilitas/uji), sesuai P0-01.
+    legacy = AgentOrchestrator(
+        provider=ScriptedProvider([_final_turn("legacy halo")]),
+        executor=executor_maker(),
+        options=GenerateOptions(model="scripted-model"),
+        use_continuous_loop=False,
+    )
+    assert legacy.use_continuous_loop is False
+    lres = legacy.run("hai")
+    assert lres.status == AgentStatus.DONE and lres.result == "legacy halo", lres
+    print("OK: legacy loop tetap tersedia via eksplisit use_continuous_loop=False")
 
 
 def main() -> int:
@@ -253,7 +267,7 @@ def main() -> int:
         scenario_a_continuous_multi_tool(executor_maker())
         scenario_b_no_small_limit(executor_maker)
         scenario_c_provider_error(executor_maker)
-        scenario_d_default_backward_compatible(executor_maker)
+        scenario_d_default_is_continuous(executor_maker)
     finally:
         shutil.rmtree(FIXTURE, ignore_errors=True)
         # Bersihkan root dummy_test hanya bila sudah kosong.
