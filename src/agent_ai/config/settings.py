@@ -10,6 +10,7 @@ provider cloud). Belum ada Agent Core, UI, tools, atau database.
 from __future__ import annotations
 
 import os
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -53,6 +54,28 @@ def _get_float(key: str, default: float) -> float:
         return float(raw)
     except ValueError:
         return default
+
+
+# ---------------------------------------------------------------------------
+# Global conversation compaction switch (`data/settings.json`)
+# ---------------------------------------------------------------------------
+SETTINGS_PATH = PROJECT_ROOT / "data" / "settings.json"
+
+
+def compression_enabled() -> bool:
+    """Baca `compression.enabled` dari `data/settings.json`.
+
+    Global switch ON/OFF untuk conversation compaction existing (runtime
+    context compaction sebelum dikirim ke LLM). Default True (backward
+    compatible): bila file/objek/field tidak ada, atau ada error baca, return
+    True sehingga behavior existing tidak berubah. Hanya nilai eksplisit
+    `false` pada `data/settings.json` -> `compression.enabled` yang menonaktifkan.
+    """
+    try:
+        text = SETTINGS_PATH.read_text(encoding="utf-8")
+        return bool(json.loads(text).get("compression", {}).get("enabled", True))
+    except Exception:  # noqa: BLE001 - default aman (ON) bila file korup/absent
+        return True
 
 
 # ---------------------------------------------------------------------------

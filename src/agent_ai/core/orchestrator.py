@@ -572,6 +572,15 @@ class AgentOrchestrator:
             (messages, stats) -- messages siap kirim; stats ringkas (untuk
             observability/verifikasi, tanpa isi konten) bila anggaran diketahui.
         """
+        # Global conversation compaction switch (`data/settings.json` ->
+        # compression.enabled). Default ON (backward compatible). Saat OFF,
+        # kirim riwayat PENUH (dalam bentuk normal yang tersedia sebelum
+        # compaction) ke provider: SELURUH jalur compaction/pemangkasan
+        # conversation di-bypass. Ini konsisten dengan jalur budget=None.
+        from agent_ai.config.settings import compression_enabled
+        if not compression_enabled():
+            return history.to_provider_format(), {}
+
         budget, budget_source = self._context_budget_decision()
         if budget is None:
             return history.to_provider_format(), {}
