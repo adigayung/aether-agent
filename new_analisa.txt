@@ -1,0 +1,84 @@
+ANALISA — TASK: Agent Activity Copy UI
+=======================================
+
+STATUS: SELESAI + TERVERIFIKASI (frontend-only)
+
+1. RUANG LINGKUP
+   Fitur "Copy Agent Activity" pada card `AETHER — Agent Activity` di Workbench.
+   Tombol `[icon Copy] Copy` di sisi paling kanan header card; snapshot lengkap
+   activity (metadata Agent + aktivitas kronologis + repeated activity) disalin
+   ke clipboard dengan batas keras 45.000 karakter.
+
+2. FILE YANG DIUBAH
+   - web/frontend/src/activityCopy.js        (BARU) formatter murni frontend:
+     buildAgentActivityCopy / formatActivityLines / countRepeatedActivity +
+     konstanta AGENT_ACTIVITY_COPY_MAX_CHARS = 45000.
+   - web/frontend/src/activityCopy.test.mjs  (BARU) regression test unit
+     (Node built-in assert, mengikuti pola taskView.test.mjs, tanpa framework).
+   - web/frontend/src/App.vue                tombol Copy di header card
+     (.term-head) + handler copyAgentActivity() + feedback "Copied" sementara
+     + cleanup timer di onBeforeUnmount.
+   - web/frontend/src/styles.css             CSS minimal .act-copy-btn
+     (menyatu dengan style Workbench / pola .copy-btn yang sudah ada,
+     hover halus, class .copied hijau konsisten).
+
+3. FITUR YANG DITAMBAHKAN
+   - Tombol copy icon di kanan header card (icon SVG inline yang sama dengan
+     icon copy proyek; TANPA dependency/icon library baru).
+   - Klik -> snapshot teks ke clipboard dengan format:
+       AETHER AGENT ACTIVITY
+       [AGENT]   Task ID / Status / Provider / Model / Duration / LLM Rounds / Tool Calls
+       [ACTIVITY]
+       [REPEATED ACTIVITY]
+   - Feedback "Copied" selama ~1,4 detik lalu kembali "Copy".
+
+4. SUMBER DATA (tidak ada sumber data baru)
+   - Metadata Agent diambil dari nilai yang SUDAH dihitung App.vue dan
+     ditampilkan di Agent Card: task.id, task.status, taskProvider,
+     taskModel, taskDurationLabel, taskLlmRounds, taskToolCalls.
+   - Activity diambil dari activityEvents (live SSE / persistent log via
+     Activity API) yang sama dengan yang dirender AgentActivity.vue.
+   - Repeated activity dihitung frontend atas events yang sama, logika sama
+     dengan baris "Repeated activity" di UI (hitung observation read_file
+     dengan path sama > 1x). TIDAK ada backend baru.
+
+5. CARA LIMIT 45.000 DITERAPKAN
+   - Konstanta tunggal AGENT_ACTIVITY_COPY_MAX_CHARS = 45000 di
+     activityCopy.js (TIDAK hardcode 45000 di banyak tempat).
+   - buildAgentActivityCopy: assemble header + activity + repeated, lalu bila
+     panjang > MAX buang baris activity PALING LAMA berulang sampai muat.
+   - Jaminan absolut kedua: bila bahkan tanpa activity tetap > MAX (skenario
+     ekstrem repeated activity), string dipotong dengan penanda
+     "[... output truncated for length ...]" -> hasil AKHIR TIDAK PERNAH > 45000.
+
+6. CARA AKTIVITAS LAMA DIPOTONG
+   - Baris activity tersusun KRONOLOGIS (urutan events UI, termuda di akhir).
+   - Saat over limit: baris PALING ATAS (paling lama) dibuang lebih dulu
+     (kept.shift()), aktivitas TERBARU/paling bawah tetap dipertahankan.
+   - Penanda "[... earlier activity truncated ...]" disisipkan di awal bagian
+     ACTIVITY bila ada baris yang dibuang, agar LLM tahu sebagian lama hilang.
+   - [REPEATED ACTIVITY] selalu berada PALING BAWAH dan ikut dalam batas.
+
+7. HASIL VALIDASI
+   - node web/frontend/src/activityCopy.test.mjs -> [OK] (semua assertion:
+     format/urutan section, metadata benar, kronologis, repeated paling bawah,
+     truncation dari OLDEST, total <= 45000, activity sedikit & kosong tetap
+     bekerja, countRepeatedActivity, formatActivityLines).
+   - Skenario ekstrem manual (10.000 file unik): <= 45.000, metadata tetap
+     ada, aktivitas TERBARU (history_9999) ikut, PALING LAMA (history_0000)
+     dibuang, penanda truncation muncul.
+   - node web/frontend/src/taskView.test.mjs -> masih [OK] (tidak regresi).
+   - node node_modules/vite/bin/vite.js build (web/frontend) -> sukses, 0 error
+     (warning chunk size pre-existing, bukan dari perubahan ini).
+   - python scripts/check_workbench.py -> [OK] semua 12 step, termasuk
+     [12] Explorer scroll owner contract tetap aman.
+   - css tidak mengubah .term/.term-body layout; hanya menambah tombol kanan
+     header (.term-head tetap flex, tombol margin-left:auto).
+
+8. TIDAK ADA PERUBAHAN ARSITEKTUR/BACKEND/RUNTIME
+   - Tidak menyentuh Python/backend/API/AgentRuntime/AgentOrchestrator/
+     logging/event system/task execution/queue/provider/SSE.
+   - Tidak membuat database/log/endpoint baru.
+   - Tidak menambah dependency (Node test memakai assert bawaan).
+   - AgentActivity.vue TIDAK diubah; activity card tetap tampil seperti
+     sebelumnya (hanya penambahan tombol di header milik App.vue).

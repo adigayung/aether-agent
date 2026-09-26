@@ -50,6 +50,8 @@ import {
 } from "./api.js";
 import { playStatusSound, resetAudioTracker } from "./audioRegistry.js";
 import { createDurationTicker, eventTimeMs, formatDuration } from "./timeUtils.js";
+// Copy snapshot Agent Activity (frontend-only formatter, batas 45.000 char).
+import { buildAgentActivityCopy } from "./activityCopy.js";
 // Pemisahan "task yang dipantau (viewed/running)" dari "task yang baru dibuat
 // (bisa masih pending)". Logika murni ini mencegah submit Task B saat Task A
 // RUNNING meng-overwrite tampilan/stream Task A (lihat taskView.js).
@@ -312,6 +314,40 @@ const showTaskMeta = computed(() =>
       showTaskTelemetry.value
   )
 );
+
+// --- Copy Agent Activity (button di header card) ----------------------------
+// Snapshot teks dibangun frontend-only dari data activity yang SUDAH ditampilkan
+// (activityEvents) + metadata Agent Card yang sudah dihitung. Bukan sumber data
+// baru, bukan panggilan backend.
+const activityCopied = ref(false);
+let activityCopyTimer = null;
+
+async function copyAgentActivity() {
+  const text = buildAgentActivityCopy({
+    events: activityEvents.value || [],
+    meta: {
+      taskId: task.id,
+      status: task.status,
+      provider: taskProvider.value,
+      model: taskModel.value,
+      duration: taskDurationLabel.value,
+      llmRounds: taskLlmRounds.value,
+      toolCalls: taskToolCalls.value,
+    },
+  });
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (e) {
+    return; // clipboard tidak tersedia (http non-secure) -> abaikan diam-diam
+  }
+  activityCopied.value = true;
+  if (activityCopyTimer) clearTimeout(activityCopyTimer);
+  activityCopyTimer = setTimeout(() => {
+    activityCopied.value = false;
+    activityCopyTimer = null;
+  }, 1400);
+}
 
 // Event hanya boleh mengubah timing task yang SEDANG ditampilkan (stream bisa
 // saja membawa event task lain).
@@ -1313,6 +1349,9 @@ onBeforeUnmount(() => {
   if (source) source.close();
   // Bersihkan interval durasi Task Card agar tidak ada timer nyangkut.
   stopDurationTimer();
+  // Bersihkan timer feedback tombol Copy Agent Activity.
+  if (activityCopyTimer) clearTimeout(activityCopyTimer);
+  activityCopyTimer = null;
 });
 </script>
 
@@ -1570,6 +1609,36 @@ onBeforeUnmount(() => {
                 <div class="term-head">
                   <span class="tl r"></span><span class="tl y"></span><span class="tl g"></span>
                   <span class="tt">aether — agent activity</span>
+                  <button
+                    type="button"
+                    class="act-copy-btn"
+                    :class="{ copied: activityCopied }"
+                    :title="activityCopied ? 'Copied' : 'Copy agent activity'"
+                    :aria-label="activityCopied ? 'Copied' : 'Copy agent activity'"
+                    @click="copyAgentActivity"
+                  >
+                    <svg
+                      class="act-copy-ico"
+                      width="12"
+                      height="12"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.9"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      aria-hidden="true"
+                    >
+                      <template v-if="activityCopied">
+                        <path d="M20 6L9 17l-5-5"></path>
+                      </template>
+                      <template v-else>
+                        <rect x="9" y="9" width="12" height="12" rx="2"></rect>
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                      </template>
+                    </svg>
+                    <span class="act-copy-label">{{ activityCopied ? "Copied" : "Copy" }}</span>
+                  </button>
                 </div>
                 <AgentActivity :events="activityEvents" :status="task.status" :is-reasoning="showReasoning" />
               </div>
