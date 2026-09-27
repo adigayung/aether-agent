@@ -132,6 +132,13 @@ class AgentRuntime:
         # continuous loop). None pada jalur legacy / non-continuous.
         self._current_environment_context: Optional[str] = None
 
+        # Activity Phase (UI-facing): aktivitas NYATA Agent yang sekarang
+        # berjalan (planning/inspecting/editing/running/validating). Ini
+        # TERPISAH dari `TaskPhase` internal runtime; nilainya dikirim ke
+        # frontend lewat event `phase_changed`. Di-reset per task di `run()`.
+        # `None` = belum ada aktivitas yang diklasifikasi untuk task ini.
+        self._activity_phase: Optional[str] = None
+
         # Validation <-> Runtime Integration (#42), semuanya OPSIONAL.
         # Bila validation_runner/validation_request tidak diberikan, runtime
         # berperilaku persis seperti sebelumnya (backward compatible).
@@ -227,6 +234,12 @@ class AgentRuntime:
 
         # Observability (#55): catat task dimulai (bila session store tersedia).
         self._emit_event("task_started", {"task": prepared.task})
+
+        # Activity Phase (UI): task baru mulai -> `planning` (sebelum aktivitas
+        # inspection/editing/running). Di-reset per task agar task pada instance
+        # runtime yang sama tidak mewarisi phase task sebelumnya.
+        self._activity_phase = None
+        self._set_activity_phase("planning")
 
         # Lifecycle (opsional): tandai eksekusi dimulai.
         if lifecycle is not None:
@@ -485,6 +498,9 @@ class AgentRuntime:
             # Masuk phase VALIDATING (lifecycle + event).
             self._lifecycle_to_validating(lifecycle)
             self._emit_event("validation_started", {"cycle": cycles})
+            # Activity Phase (UI): validation existing => `validating`.
+            # Memakai mekanisme validation yang SUDAH ADA (bukan deteksi baru).
+            self._set_activity_phase("validating")
 
             last_validation = self._run_validation()
             cycles += 1
@@ -799,8 +815,42 @@ class AgentRuntime:
 
         Meneruskan event dari orchestrator (tool/provider) ke SessionStore
         existing lewat `_emit_event`. Bila session store tidak ada, no-op.
+
+        Titik TERPUSAT activity phase: setiap tool call Agent (event
+        `tool_called`, dari orchestrator) diklasifikasi di sini menjadi
+        activity phase dan memancarkan `phase_changed` SEBELUM tool
+        dieksekusi. Dengan begitu tidak perlu menambahkan logic yang sama di
+        tiap tempat pemanggilan tool.
         """
+        if event_type == "tool_called":
+            self._emit_activity_phase_for_tool(payload)
         self._emit_event(event_type, payload)
+
+    def _emit_activity_phase_for_tool(self, payload: Dict[str, Any]) -> None:
+        """Klasifikasi payload `tool_called` -> activity phase (terpusat)."""
+        try:
+            from agent_ai.runtime.activity import classify_tool_activity
+
+            phase = classify_tool_activity(
+                payload.get("tool"), payload.get("arguments")
+            )
+        except Exception:  # noqa: BLE001 - klasifikasi tidak boleh menggagalkan task
+            return
+        if phase is None:
+            return
+        self._set_activity_phase(phase.value)
+
+    def _set_activity_phase(self, phase: str) -> None:
+        """Set + emit activity phase (dedup: hanya bila phase berubah).
+
+        Tidak mengubah `TaskPhase` internal maupun status task; hanya
+        memancarkan event `phase_changed` (model event yang sudah ada) agar
+        frontend dapat mengikuti aktivitas Agent.
+        """
+        if phase == self._activity_phase:
+            return
+        self._activity_phase = phase
+        self._emit_event("phase_changed", {"phase": phase})
 
     def _lifecycle_finalize(self, lifecycle: Optional["TaskLifecycle"], result: RuntimeResult) -> None:
         """Sinkronkan status akhir runtime ke lifecycle + emit event terminal.

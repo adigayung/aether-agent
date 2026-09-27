@@ -60,6 +60,18 @@ import {
   shouldAdoptSubmittedTask,
   shouldFollowStartedTask,
 } from "./taskView.js";
+// Lifecycle UI: 6 step (Planning..Completed) diturunkan dari activity phase
+// NYATA agent (event `phase_changed`, Task 1) + status task. Milestone yang
+// sudah dicapai tetap `done` walau current phase kembali ke step sebelumnya.
+// Nilai internal runtime lama (`replan`/`provider_fallback`) TIDAK dipakai lagi
+// sebagai sumber step lifecycle (lihat lifecycle.js).
+import {
+  VALIDATING_STEP,
+  activityPhaseIndex,
+  addMilestone,
+  buildLifecycleStates,
+  lifecycleFromEvents,
+} from "./lifecycle.js";
 
 // Navigasi berorientasi user (bukan subsystem internal AETHER).
 // `icon` = path SVG (stroke) inline — tanpa dependency icon baru.
@@ -135,6 +147,14 @@ const reportStatus = ref("");
 const changes = ref([]);
 const validation = reactive({ state: "pending" });
 const runtime = reactive({ phase: "", activity: "", provider: "", model: "", tool: "" });
+
+// Activity Phase (UI) — aktivitas NYATA Agent dari event `phase_changed` (Task 1).
+// Hanya nilai planning/inspecting/editing/running/validating yang masuk ke sini;
+// nilai internal runtime (replan/provider_fallback) TIDAK dipakai untuk lifecycle.
+const activityPhase = ref("");
+// Milestone lifecycle yang SUDAH pernah dicapai (index step 0..5). Tetap `done`
+// walau current phase kembali ke step sebelumnya (Agent boleh mundur aktivitas).
+const lifecycleMilestones = ref([]);
 
 // --- Task Card: execution timing (Provider/Model/Duration) -----------------
 // Sumber waktu = timestamp event lifecycle AETHER yang SUDAH ADA:
@@ -631,37 +651,30 @@ const taskTag = computed(() => {
   return { label: "idle", cls: "idle" };
 });
 
-// Lifecycle: presentasi status task AETHER (tidak mengarang progres backend).
+// Lifecycle: presentasi AKTIVITAS NYATA Agent (bukan status generik).
+// Sumber: status task + activity phase terakhir (`phase_changed`) + milestone
+// yang sudah dicapai. TIDAK memakai `runtime.phase` internal (replan/
+// provider_fallback), TIDAK memakai timer/round count/jumlah tool call.
 const LIFECYCLE_STEPS = ["Planning", "Inspecting", "Editing", "Running", "Validating", "Completed"];
-const lifecycleIndex = computed(() => {
-  const s = (task.status || "idle").toLowerCase();
-  const phase = (runtime.phase || "").toLowerCase();
-  if (!task.id || s === "idle") return -1;
-  if (s === "completed") return LIFECYCLE_STEPS.length - 1;
-  if (s === "validating") return 4;
-  if (s === "cancelled" || s === "failed") return 3;
-  if (s === "prepared" || s === "planning" || s === "queued") return 0;
-  if (phase.includes("plan")) return 0;
-  if (phase.includes("inspect") || phase.includes("analyz") || phase.includes("read")) return 1;
-  if (phase.includes("edit") || phase.includes("writ") || phase.includes("patch")) return 2;
-  if (phase.includes("valid") || phase.includes("test")) return 4;
-  return 3;
-});
-const lifecycleSteps = computed(() =>
-  LIFECYCLE_STEPS.map((label, i) => {
-    const idx = lifecycleIndex.value;
-    let state = "";
-    if (idx >= 0) {
-      if (i < idx) state = "done";
-      else if (i === idx) state = "active";
-    }
-    return { label, state };
+const lifecycleStates = computed(() =>
+  buildLifecycleStates({
+    hasTask: Boolean(task.id),
+    status: task.status,
+    currentPhase: activityPhase.value,
+    milestones: lifecycleMilestones.value,
+    count: LIFECYCLE_STEPS.length,
   })
 );
+const lifecycleSteps = computed(() =>
+  LIFECYCLE_STEPS.map((label, i) => ({ label, state: lifecycleStates.value[i] || "" }))
+);
 const lifecyclePct = computed(() => {
-  const idx = lifecycleIndex.value;
-  if (idx <= 0) return 0;
-  return Math.round((idx / (LIFECYCLE_STEPS.length - 1)) * 100);
+  let max = -1;
+  lifecycleStates.value.forEach((state, i) => {
+    if (state === "done" || state === "active") max = i;
+  });
+  if (max <= 0) return 0;
+  return Math.round((max / (LIFECYCLE_STEPS.length - 1)) * 100);
 });
 
 // Page header (tasks/projects/settings).
@@ -779,17 +792,31 @@ function handleEvent(evt) {
       if (isCurrentTaskEvent(evt) && taskStartedAt.value == null) {
         taskStartedAt.value = eventTimeMs(evt);
       }
+      // task_started -> lifecycle step pertama aktif (Planning). Activity phase
+      // dari `phase_changed` akan menggantikannya begitu aktivitas nyata terjadi.
+      activityPhase.value = "planning";
+      lifecycleMilestones.value = addMilestone(lifecycleMilestones.value, 0);
       // Audio feedback HANYA saat task BENAR-BENAR mulai berjalan (transisi
       // status nyata), bukan saat user klik Run Task/Send. Dedup di
       // audioRegistry mencegah dobel-putar bila event running diterima ulang.
       playStatusSound("running");
       break;
-    case "phase_changed":
+    case "phase_changed": {
+      // Activity phase (Task 1) menggerakkan lifecycle. Nilai internal runtime
+      // (replan/provider_fallback) DIABAIKAN di sini: hanya phase yang dikenal
+      // yang mengubah current step + mencatat milestone.
+      const phaseIdx = activityPhaseIndex(p.phase);
+      if (phaseIdx >= 0) {
+        activityPhase.value = String(p.phase).trim().toLowerCase();
+        lifecycleMilestones.value = addMilestone(lifecycleMilestones.value, phaseIdx);
+      }
       if (p.phase) {
+        // Dipertahankan untuk fitur UI lain yang masih memakai runtime.phase.
         runtime.phase = p.phase;
         runtime.activity = p.phase;
       }
       break;
+    }
     case "provider_request":
       if (p.provider) runtime.provider = p.provider;
       if (p.model) runtime.model = p.model;
@@ -819,6 +846,10 @@ function handleEvent(evt) {
     case "validation_started":
       validation.state = "running";
       task.status = "validating";
+      // Mekanisme validation EXISTING (backend) -> Validating. Bukan tebakan
+      // dari terminal command: event ini memang menandakan validasi berjalan.
+      activityPhase.value = "validating";
+      lifecycleMilestones.value = addMilestone(lifecycleMilestones.value, VALIDATING_STEP);
       break;
     case "validation_completed":
       validation.state = p.success === false ? "err" : "ok";
@@ -937,6 +968,9 @@ function resetWorkspace() {
   runtime.provider = "";
   runtime.model = "";
   runtime.tool = "";
+  // Task baru/workspace kosong -> lifecycle kembali ke awal (belum ada aktivitas).
+  activityPhase.value = "";
+  lifecycleMilestones.value = [];
   // Workspace direset untuk task baru -> tidak ada reasoning status tersisa.
   isReasoning.value = false;
   liveFsChange.value = null;
@@ -1085,6 +1119,12 @@ async function openHistoryTask(taskId) {
     // Activity (chronological) dari persistent log.
     const activity = await getTaskActivity(taskId, projectId);
     historyEvents.value = activity.events || [];
+    // Lifecycle task lama: rekonstruksi activity phase + milestone dari event
+    // yang tersimpan (phase_changed/task_started). Status terminal tetap dari
+    // info.status sehingga Completed/Failed/Cancelled benar.
+    const histLifecycle = lifecycleFromEvents(historyEvents.value);
+    activityPhase.value = histLifecycle.currentPhase;
+    lifecycleMilestones.value = histLifecycle.milestones;
     // Timing Task Card dari event lifecycle log (start eksekusi -> terminal).
     // Fallback aman bila task lama tidak punya event start/terminal.
     applyHistoryTiming(info, historyEvents.value);
@@ -1596,7 +1636,7 @@ onBeforeUnmount(() => {
                 <div class="progress-a"><div class="bar" :style="{ width: lifecyclePct + '%' }"></div></div>
                 <div class="progress-meta">
                   <span>{{ lifecyclePct }}% complete</span>
-                  <span>{{ runtime.phase || task.status || "idle" }}</span>
+                  <span>{{ activityPhase || task.status || "idle" }}</span>
                 </div>
               </div>
             </section>
