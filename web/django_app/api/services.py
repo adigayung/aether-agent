@@ -529,6 +529,13 @@ class GatewayService:
         lalu menyimpan metadata launcher (last_opened_at) di SQLite. Project
         baru langsung dijadikan active project.
 
+        Bila path belum ada, directory dibuat secara recursive (termasuk
+        parent yang belum ada). Project yang dibuat adalah PURE EMPTY project:
+        TIDAK ada template aplikasi/source yang dibuat di sini (hanya metadata
+        & infrastructure AETHER yang diwajibkan oleh mekanisme registration).
+        Bila path menunjuk ke FILE, operasi DITOLAK tanpa menghapus/memindahkan/
+        mengubah file tersebut.
+
         Raises:
             ValidationError: bila name/path kosong atau path tidak valid.
         """
@@ -537,12 +544,25 @@ class GatewayService:
         if not path or not isinstance(path, str) or not path.strip():
             raise ValidationError("Field 'path' wajib diisi dan tidak boleh kosong.")
 
-        # Validasi path (tanpa mengubah filesystem).
+        # Validasi + normalisasi path (Windows-aware via pathlib, path API
+        # yang sudah dipakai project).
         from pathlib import Path as _Path
 
         root = _Path(path.strip())
-        if not root.exists() or not root.is_dir():
-            raise ValidationError(f"Project path tidak ditemukan: {path}")
+        if root.exists() and not root.is_dir():
+            raise ValidationError(
+                f"Project path menunjuk ke file, bukan directory: {root}"
+            )
+        if not root.exists():
+            # Kanonikkan dulu (hilangkan drive/folder relatif yang ambigu)
+            # agar mkdir recursive berjalan pada path yang benar.
+            root = root.expanduser().resolve()
+            try:
+                root.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise ValidationError(
+                    f"Gagal membuat directory project '{root}': {exc}"
+                ) from exc
 
         # Daftarkan ke ProjectRegistry AETHER (Core) -> struktur project.
         try:

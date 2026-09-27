@@ -5,6 +5,7 @@
 .aether/
 upload_repo.bat
 update_repo.bat
+save_ui.bat
 
 # Python
 __pycache__/
