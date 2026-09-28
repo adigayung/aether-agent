@@ -710,6 +710,56 @@ function formatTs(raw) {
   return Number.isNaN(d.getTime()) ? String(raw) : d.toLocaleString();
 }
 
+// Feedback copy prompt untuk History table
+const historyCopyFeedback = ref("");
+
+async function copyHistoryPrompt(t) {
+  const text = t.task || "";
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (e) {
+    return;
+  }
+  historyCopyFeedback.value = t.task_id;
+  setTimeout(() => {
+    if (historyCopyFeedback.value === t.task_id) historyCopyFeedback.value = "";
+  }, 1200);
+}
+
+// Grouping task history by time (TODAY, YESTERDAY, OLDER) berdasarkan last_timestamp.
+const HISTORY_GROUPS = ["TODAY", "YESTERDAY", "OLDER"];
+
+function taskTimeGroup(raw) {
+  if (!raw || !raw.last_timestamp) return "OLDER";
+  const d = new Date(raw.last_timestamp);
+  if (Number.isNaN(d.getTime())) return "OLDER";
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yesterdayStart = new Date(todayStart);
+  yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+  if (d >= todayStart) return "TODAY";
+  if (d >= yesterdayStart && d < todayStart) return "YESTERDAY";
+  return "OLDER";
+}
+
+const groupedTaskHistory = computed(() => {
+  const groups = {};
+  for (const t of taskHistory.value) {
+    const g = taskTimeGroup(t);
+    if (!groups[g]) groups[g] = [];
+    groups[g].push(t);
+  }
+  // Urutkan grup: TODAY, YESTERDAY, OLDER
+  const result = [];
+  for (const key of HISTORY_GROUPS) {
+    if (groups[key] && groups[key].length) {
+      result.push({ label: key, items: groups[key] });
+    }
+  }
+  return result;
+});
+
 // --- Event handling (#51) --------------------------------------------------
 // Filter tampilan Changes: file di dalam `.aether/**` adalah metadata internal
 // AETHER (Bible, log, dsb.), BUKAN perubahan project. Ini murni layer
@@ -1814,34 +1864,50 @@ onBeforeUnmount(() => {
             <!-- MODE 2: HISTORY (arsip read-only). -->
             <div v-show="taskPageMode === 'history'">
               <div v-if="!taskHistory.length" class="panel-body"><div class="wb-empty">No task history yet.</div></div>
-              <table v-else class="aether-table">
-                <thead>
-                  <tr>
-                    <th style="width: 52%">Task</th>
-                    <th style="width: 18%">Status</th>
-                    <th style="width: 18%">Updated</th>
-                    <th style="width: 12%"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="t in taskHistory" :key="t.task_id" class="clickable" @click="openHistoryTask(t.task_id)">
-                    <td>
-                      <div class="cell-name">
-                        <span class="avatar">T</span>
-                        <div>
-                          <div class="name">{{ t.task || "(no prompt)" }}</div>
-                          <div class="meta">{{ t.task_id }}</div>
-                        </div>
-                      </div>
-                    </td>
-                    <td><span class="status-tag" :class="statusTagClass(t.status)">{{ t.status }}</span></td>
-                    <td><span class="mono meta">{{ formatTs(t.last_timestamp) }}</span></td>
-                    <td class="row-actions">
-                      <button class="report-btn" type="button" title="View Agent Report" @click.stop="openReport(t.task_id)">Report</button>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+              <div v-else class="history-groups">
+                <div v-for="grp in groupedTaskHistory" :key="grp.label" class="hist-group">
+                  <div class="hist-group-head">{{ grp.label }} <span class="hist-group-count">({{ grp.items.length }})</span></div>
+                  <table class="aether-table hist-table">
+                    <thead>
+                      <tr>
+                        <th style="width: 52%">Task</th>
+                        <th style="width: 16%">Status</th>
+                        <th style="width: 20%">Updated</th>
+                        <th style="width: 12%"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="t in grp.items" :key="t.task_id" class="clickable" @click="openHistoryTask(t.task_id)">
+                        <td>
+                          <div class="cell-name">
+                            <span class="avatar">T</span>
+                            <div>
+                              <div class="name name-clamp">{{ t.task || "(no prompt)" }}</div>
+                              <div class="meta meta-clamp">{{ t.task_id }}</div>
+                            </div>
+                          </div>
+                        </td>
+                        <td><span class="status-tag" :class="statusTagClass(t.status)">{{ t.status }}</span></td>
+                        <td><span class="mono meta">{{ formatTs(t.last_timestamp) }}</span></td>
+                        <td class="row-actions hist-actions">
+                          <button
+                            type="button"
+                            class="q-copy-btn hist-copy"
+                            :class="{ copied: historyCopyFeedback === t.task_id }"
+                            :title="historyCopyFeedback === t.task_id ? 'Copied' : 'Copy prompt'"
+                            aria-label="Copy prompt"
+                            @click.stop="copyHistoryPrompt(t)"
+                          >
+                            <svg v-if="historyCopyFeedback === t.task_id" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+                            <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                          </button>
+                          <button class="report-btn" type="button" title="View Agent Report" @click.stop="openReport(t.task_id)">Report</button>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </div>
           </section>
 

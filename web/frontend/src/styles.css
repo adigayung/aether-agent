@@ -2410,6 +2410,83 @@ select.input-a {
   font-size: 11.5px;
   font-family: var(--mono);
 }
+.cell-name .name-clamp {
+  max-height: 2.8em;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+  overflow: hidden;
+  word-break: break-word;
+}
+.cell-name .meta-clamp {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+/* History grouping */
+.history-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.hist-group {
+  display: flex;
+  flex-direction: column;
+}
+.hist-group-head {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  padding: 10px 20px 4px;
+}
+.hist-group-count {
+  font-weight: 400;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+.hist-table.aether-table thead th {
+  padding: 6px 20px;
+}
+.hist-table.aether-table tbody td {
+  padding: 10px 20px;
+}
+.hist-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: flex-end;
+}
+.q-copy-btn.hist-copy {
+  opacity: 0.4;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 0;
+  transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+tr:hover .q-copy-btn.hist-copy {
+  opacity: 1;
+}
+.q-copy-btn.hist-copy:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+}
+.q-copy-btn.hist-copy.copied {
+  opacity: 1;
+  color: var(--accent);
+}
 .mono {
   font-family: var(--mono);
   font-size: 12.5px;
@@ -3421,9 +3498,9 @@ select.input-a {
 }
 .q-item {
   display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 7px 9px;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 9px;
   border-radius: 8px;
   border: 1px solid transparent;
   cursor: default;
@@ -3441,46 +3518,97 @@ select.input-a {
   opacity: 0.5;
 }
 .q-ico {
-  font-size: 12px;
+  font-size: 11px;
   flex: 0 0 auto;
+  margin-top: 2px;
+  line-height: 1;
 }
 .q-ico.running { color: var(--accent-2); }
 .q-ico.pending { color: var(--accent); }
 .q-ico.disabled { color: var(--text-faint); }
-.q-state {
-  font-size: 9.5px;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  flex: 0 0 auto;
-  min-width: 54px;
+
+/* Compact text wrapper — replaces old q-state + q-text + q-id trio */
+.q-text-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
 }
-.q-state.running { color: var(--accent-2); }
-.q-state.pending { color: var(--accent); }
-.q-state.disabled { color: var(--text-faint); }
+.q-text {
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.4;
+  max-height: 2.8em;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+}
+.q-item.disabled .q-text {
+  text-decoration: line-through;
+  color: var(--text-dim);
+}
+.q-meta-line {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: var(--text-faint);
+  line-height: 1;
+}
+.q-state-sm {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.q-state-sm.running { color: var(--accent-2); }
+.q-state-sm.pending { color: var(--accent); }
+.q-state-sm.disabled { color: var(--text-dim); }
 .q-pos {
   font-family: var(--mono);
   font-size: 10px;
   color: var(--text-faint);
   flex: 0 0 auto;
 }
-.q-text {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-size: 12px;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.q-item.disabled .q-text {
-  text-decoration: line-through;
-  color: var(--text-dim);
-}
-.q-id {
-  font-family: var(--mono);
-  font-size: 10px;
-  color: var(--text-faint);
+
+/* Copy button — subtle, appears on row hover */
+.q-copy-btn {
   flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 0;
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease;
+  margin-top: 1px;
+}
+.q-item:hover .q-copy-btn {
+  opacity: 1;
+}
+.q-copy-btn:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+}
+.q-copy-btn.copied {
+  opacity: 1;
+  color: var(--accent);
+}
+/* Hide old unused selectors */
+.q-state,
+.q-id {
+  display: none;
 }
 .q-err {
   padding: 8px 10px;

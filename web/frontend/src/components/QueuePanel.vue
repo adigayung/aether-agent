@@ -68,14 +68,27 @@ function queuePosition(t) {
   return null;
 }
 
-function shortId(id) {
-  return (id || "").slice(0, 8);
-}
-
 function shortText(t) {
   const s = (t.task || "").replace(/\s+/g, " ").trim();
   if (!s) return "(no prompt)";
-  return s.length > 60 ? s.slice(0, 60) + "…" : s;
+  return s.length > 80 ? s.slice(0, 80) + "…" : s;
+}
+
+// Feedback copy prompt
+const copyFeedback = ref("");
+
+async function copyPrompt(taskItem) {
+  const text = taskItem.task || "";
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (e) {
+    return;
+  }
+  copyFeedback.value = taskItem.task_id;
+  setTimeout(() => {
+    if (copyFeedback.value === taskItem.task_id) copyFeedback.value = "";
+  }, 1200);
 }
 
 async function load() {
@@ -174,6 +187,17 @@ async function ctxRemove() {
   }
 }
 
+function ctxCopyPrompt() {
+  const t = ctxTask.value;
+  closeContextMenu();
+  if (!t || !t.task) return;
+  try {
+    navigator.clipboard.writeText(t.task);
+  } catch (e) {
+    // clipboard tidak tersedia
+  }
+}
+
 function ctxStop() {
   const t = ctxTask.value;
   closeContextMenu();
@@ -231,10 +255,25 @@ watch(
           @contextmenu="openContext($event, t)"
         >
           <span class="q-ico" :class="t.queue_state">{{ stateIcon(t) }}</span>
-          <span class="q-state" :class="t.queue_state">{{ runLabel(t) }}</span>
-          <span v-if="t.queue_state === 'pending'" class="q-pos">{{ queuePosition(t) }}</span>
-          <span class="q-text">{{ shortText(t) }}</span>
-          <span class="q-id">{{ shortId(t.task_id) }}</span>
+          <div class="q-text-wrap">
+            <span class="q-text">{{ shortText(t) }}</span>
+            <span class="q-meta-line">
+              <span class="q-state-sm" :class="t.queue_state">{{ runLabel(t) }}</span>
+              <span v-if="t.queue_state === 'pending' && queuePosition(t)" class="q-pos">&middot; #{{ queuePosition(t) }}</span>
+              <span v-if="t.queue_state === 'disabled'" class="q-pos">disabled</span>
+            </span>
+          </div>
+          <button
+            type="button"
+            class="q-copy-btn"
+            :class="{ copied: copyFeedback === t.task_id }"
+            :title="copyFeedback === t.task_id ? 'Copied' : 'Copy prompt'"
+            :aria-label="copyFeedback === t.task_id ? 'Copied' : 'Copy prompt'"
+            @click.stop="copyPrompt(t)"
+          >
+            <svg v-if="copyFeedback === t.task_id" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+            <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          </button>
         </li>
       </ul>
       <div v-if="error" class="q-err">{{ error }}</div>
@@ -248,6 +287,8 @@ watch(
       @click.stop
       @contextmenu.prevent
     >
+      <div class="ctx-item" @click="ctxCopyPrompt()">Copy Prompt</div>
+      <div class="ctx-sep"></div>
       <template v-if="ctxTask.queue_state === 'running'">
         <div class="ctx-item" @click="ctxStop()">Stop</div>
         <div class="ctx-sep"></div>
