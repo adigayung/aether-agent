@@ -112,6 +112,8 @@ const taskHistory = ref([]);
 const selectedProjectId = ref("");
 // Target konfirmasi hapus project (page Projects, registry-only).
 const projectToDelete = ref(null);
+// Konfirmasi Close Project (dialog sebelum benar-benar menutup project).
+const closeProjectConfirm = ref(false);
 const submitting = ref(false);
 const error = ref("");
 const notice = ref("");
@@ -1265,6 +1267,21 @@ async function confirmProjectDelete() {
   }
 }
 
+// Close Project: minta konfirmasi dulu sebelum benar-benar menutup project.
+// Tombol Close Project (sidebar) memanggil ini, bukan langsung menutup.
+function askCloseProject() {
+  closeProjectConfirm.value = true;
+}
+
+function cancelCloseProject() {
+  closeProjectConfirm.value = false;
+}
+
+async function confirmCloseProject() {
+  closeProjectConfirm.value = false;
+  await closeProject();
+}
+
 // Close Project: clear active project -> kembali ke Project Launcher.
 // TIDAK menghapus folder filesystem.
 async function closeProject() {
@@ -1464,7 +1481,7 @@ onBeforeUnmount(() => {
           </svg>
           <span>{{ settingsItem.label }}</span>
         </div>
-        <div class="nav-item" @click="closeProject">
+        <div class="nav-item" @click="askCloseProject">
           <svg
             class="ico"
             viewBox="0 0 24 24"
@@ -1994,6 +2011,20 @@ onBeforeUnmount(() => {
           <button type="button" class="btn-danger" :disabled="launcherBusy" @click="confirmProjectDelete">
             Hapus
           </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ CLOSE PROJECT (konfirmasi) ========================= -->
+    <div v-if="closeProjectConfirm" class="modal-backdrop" @click.self="cancelCloseProject">
+      <div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-title">Apakah Anda yakin ingin menutup project?</div>
+        <div class="modal-body">
+          Project akan ditutup dan Anda kembali ke Project Launcher. File/folder di disk TIDAK dihapus.
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn-ghost" @click="cancelCloseProject">Cancel</button>
+          <button type="button" class="btn-primary" @click="confirmCloseProject">Close</button>
         </div>
       </div>
     </div>
