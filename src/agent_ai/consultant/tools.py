@@ -5,26 +5,33 @@ Project Bible. Karena itu registry Consultant DIKURASI dan bergantung MODE:
 
     mode "quick"       -> atlas_query, rig_query, project_map_status
                           (Project Map READ-ONLY: paham struktur project lewat
-                          peta) + update_project_bible.
+                          peta) + update_project_bible
+                          + Skill System (skill_catalog, load_skill,
+                            load_skill_reference) — procedural guidance.
                           Bible read lewat konteks; TANPA tool source/runtime
                           (tidak ada read_file/search_code/list_files/
                           run_command).
     mode "investigate" -> atlas_query, rig_query, project_map_status,
                           list_files, read_file, search_code, run_command
                           (READ-ONLY terhadap source/project) +
-                          update_project_bible.
+                          update_project_bible + Skill System.
+
+Skill System memakai SATU mekanisme yang sama (SkillStore) dengan Agent:
+catalog ringan + progressive loading via SkillStore existing. Tidak ada
+storage/loader baru, tidak ada heuristic/selector otomatis.
 
 Tool tulis/hapus/pindah (`write_file`, `edit_file`, `delete_file`,
 `move_file`) SENGAJA tidak pernah didaftarkan, sehingga Consultant tidak dapat
 memodifikasi source lewat mekanisme tool. Demikian pula
 `refresh_project_map` (regenerate/menulis file map) TIDAK pernah didaftarkan:
 Consultant tetap read-only terhadap Project Map (boleh query map, tidak boleh
-mengubah/meregenerasi map).
+mengubah/meregenerasi map). Skill tools bersifat READ-ONLY (hanya procedural
+knowledge, bukan permission grant).
 
 Perbedaan utama Quick vs Investigate:
-    Quick       -> Bible + Map (atlas_query/rig_query/project_map_status).
+    Quick       -> Bible + Map (atlas_query/rig_query/project_map_status) + Skill.
                    TIDAK membaca source/runtime.
-    Investigate -> Bible + Map + Source + Runtime (read-only).
+    Investigate -> Bible + Map + Source + Runtime (read-only) + Skill.
 
 Modul ini TIDAK membuat subsystem baru:
     - read/search tools  : memakai tools filesystem existing.
@@ -32,6 +39,8 @@ Modul ini TIDAK membuat subsystem baru:
                            hanya versi READ-ONLY (tanpa refresh).
     - run_command        : memakai RunCommandTool existing (Windows-aware).
     - Bible              : memakai BibleStore / IntelligenceLearner existing.
+    - Skill              : memakai SkillStore existing via tools/skills.py
+                           (thin adapter).
 """
 
 from __future__ import annotations
@@ -353,14 +362,17 @@ def build_consultant_registry(
             dipertahankan agar signature stabil.
         mode: "quick" | "investigate" (nilai tak dikenal -> default quick).
             - quick       : capability Project Map READ-ONLY (atlas_query,
-                            rig_query, project_map_status) + update_project_bible
+                            rig_query, project_map_status) + Skill System
+                            (skill_catalog, load_skill, load_skill_reference)
+                            + update_project_bible
                             (Bible read via konteks + Bible update via tool).
                             TANPA tool source/runtime (read_file/search_code/
                             list_files/run_command) dan TANPA refresh_project_map.
             - investigate : tool Consultant existing (list_files, read_file,
                             search_code, run_command) + capability Project Map
                             READ-ONLY (atlas_query, rig_query,
-                            project_map_status) + update_project_bible.
+                            project_map_status) + Skill System +
+                            update_project_bible.
                             TANPA refresh_project_map.
         guard: bound retrieval opsional (ConsultantRetrievalGuard). Bila diisi,
             tool PENCARIAN map (atlas_query/rig_query) DAN tool investigasi
@@ -397,6 +409,14 @@ def build_consultant_registry(
         else:
             registry.register(tool)
 
+    # Skill System (Consultant): SATU mekanisme Skill yang sama dengan Agent
+    # (catalog ringan + progressive loading di atas SkillStore existing).
+    # Tersedia di SEMUA mode (quick & investigate). Thin adapter, tidak ada
+    # heuristic/selector, tidak menambah write capability Consultant.
+    from agent_ai.tools.skills import build_skill_tools as _build_skill_tools
+
+    for tool in _build_skill_tools(root=resolved):
+        registry.register(tool)
 
     if normalized == MODE_INVESTIGATE:
         from agent_ai.tools.filesystem import (

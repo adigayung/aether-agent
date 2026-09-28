@@ -349,10 +349,13 @@ def check_registries() -> None:
             name not in quick,
             "mode quick TIDAK boleh memuat '{}'".format(name),
         )
+    # Task 04 ADDITIVE: Skill System (skill_catalog, load_skill, load_skill_reference) now present
     _expect(
-        quick == set(CONSULTANT_MAP_TOOLS) | {"update_project_bible"},
+        set(CONSULTANT_MAP_TOOLS) | {"update_project_bible"} <= quick,
         quick,
     )
+    for _skill in ("skill_catalog", "load_skill", "load_skill_reference"):
+        _expect(_skill in quick, "Consultant quick harus memuat Skill '{}'".format(_skill))
     print(
         "[2b] registry Consultant (quick) = Bible + Map read-only "
         "(tanpa source/refresh) : OK -> {}".format(sorted(quick))

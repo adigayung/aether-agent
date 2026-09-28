@@ -232,49 +232,68 @@ def test_e_tool_protocol_still_valid() -> None:
 # --------------------------------------------------------------------------- #
 # F. Agent dapat MELANJUTKAN task setelah beberapa compaction (end-to-end)
 # --------------------------------------------------------------------------- #
-def test_f_agent_continues_after_compaction() -> None:
-    turns = 25
-    script = [
-        _tool_turn(f"baca {i}", [_tool_call(f"c{i}", "read_file", {"path": f"f{i}.txt"})])
-        for i in range(turns)
-    ]
-    script.append(_final_turn("Selesai setelah banyak turn."))
+def test_f_agent_continues_after_compaction(monkeypatch=None) -> None:
+    # Task 04: compression.enabled=false -> compaction OFF. Patch to ON for this test
+    # so the compaction logic itself is still verified without changing data/settings.json.
+    try:
+        import agent_ai.config.settings as _settings
+        if monkeypatch is not None:
+            monkeypatch.setattr(_settings, "compression_enabled", lambda: True)
+        else:
+            _orig = _settings.compression_enabled
+            _settings.compression_enabled = lambda: True  # type: ignore[assignment]
+    except Exception:
+        _orig = None  # type: ignore[assignment]
+    try:
+        turns = 25
+        script = [
+            _tool_turn(f"baca {i}", [_tool_call(f"c{i}", "read_file", {"path": f"f{i}.txt"})])
+            for i in range(turns)
+        ]
+        script.append(_final_turn("Selesai setelah banyak turn."))
 
-    provider = ScriptedProvider(script)
-    registry = ToolRegistry()
-    tool = BigResultTool("read_file")
-    registry.register(tool)
-    events: List[Dict[str, Any]] = []
+        provider = ScriptedProvider(script)
+        registry = ToolRegistry()
+        tool = BigResultTool("read_file")
+        registry.register(tool)
+        events: List[Dict[str, Any]] = []
 
-    orchestrator = AgentOrchestrator(
-        provider=provider,
-        executor=ToolExecutor(registry=registry),
-        options=GenerateOptions(model="scripted-model"),
-        system_prompt=SYSTEM_PROMPT,
-        use_continuous_loop=True,
-        context_budget_tokens=800,
-        event_sink=lambda et, payload: events.append({"type": et, **payload}),
-    )
-    result = orchestrator.run(HEAD_TASK)
+        orchestrator = AgentOrchestrator(
+            provider=provider,
+            executor=ToolExecutor(registry=registry),
+            options=GenerateOptions(model="scripted-model"),
+            system_prompt=SYSTEM_PROMPT,
+            use_continuous_loop=True,
+            context_budget_tokens=800,
+            event_sink=lambda et, payload: events.append({"type": et, **payload}),
+        )
+        result = orchestrator.run(HEAD_TASK)
 
-    assert result.status == AgentStatus.DONE, result.error
-    assert result.result == "Selesai setelah banyak turn."
-    # SEMUA tool call tetap dieksekusi (loop tidak rusak karena compaction).
-    assert tool.calls == turns, tool.calls
-    assert provider.calls == turns + 1, provider.calls
+        assert result.status == AgentStatus.DONE, result.error
+        assert result.result == "Selesai setelah banyak turn."
+        # SEMUA tool call tetap dieksekusi (loop tidak rusak karena compaction).
+        assert tool.calls == turns, tool.calls
+        assert provider.calls == turns + 1, provider.calls
 
-    # Compaction benar-benar aktif pada turn-turn akhir.
-    reqs = [e for e in events if e["type"] == "provider_request"]
-    assert reqs, "provider_request harus diemit"
-    assert any(e.get("context_compacted") for e in reqs)
-    assert reqs[-1].get("context_compacted") is True
+        # Compaction benar-benar aktif pada turn-turn akhir.
+        reqs = [e for e in events if e["type"] == "provider_request"]
+        assert reqs, "provider_request harus diemit"
+        assert any(e.get("context_compacted") for e in reqs)
+        assert reqs[-1].get("context_compacted") is True
 
-    # Request terakhir BOUNDED (jauh lebih kecil dari riwayat mentah penuh).
-    last_request = provider.requests[-1]
-    last_chars = sum(len(str(m.get("content") or "")) for m in last_request)
-    raw_chars = turns * len(BIG)
-    assert last_chars < raw_chars, (last_chars, raw_chars)
-    assert last_chars < 30_000, last_chars
+        # Request terakhir BOUNDED (jauh lebih kecil dari riwayat mentah penuh).
+        last_request = provider.requests[-1]
+        last_chars = sum(len(str(m.get("content") or "")) for m in last_request)
+        raw_chars = turns * len(BIG)
+        assert last_chars < raw_chars, (last_chars, raw_chars)
+        assert last_chars < 30_000, last_chars
+    finally:
+        try:
+            if monkeypatch is None and _orig is not None:
+                import agent_ai.config.settings as _settings2
+                _settings2.compression_enabled = _orig  # type: ignore[assignment]
+        except Exception:
+            pass
 
 
 # --------------------------------------------------------------------------- #

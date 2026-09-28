@@ -269,46 +269,64 @@ def test_dedup_preserved_when_context_intact(tmp_path: Path) -> None:
     assert "content" not in second
 
 
-def test_compaction_recovers_read_content(tmp_path: Path) -> None:
-    _write_lines(tmp_path / "big.py", 200)
-    registry, _, reader = _read_registry(tmp_path)
-    provider = ScriptedProvider(
-        [
-            _tool_turn(
-                "baca",
-                [_tool_call("r1", "read_file", {"path": "big.py", "start_line": 1, "end_line": 200})],
+def test_compaction_recovers_read_content(tmp_path: Path, monkeypatch=None) -> None:
+    # Task 04: compression.enabled=false -> compaction OFF. Enable for this test.
+    try:
+        import agent_ai.config.settings as _settings
+        if monkeypatch is not None and hasattr(monkeypatch, "setattr"):
+            monkeypatch.setattr(_settings, "compression_enabled", lambda: True)
+        else:
+            _orig = _settings.compression_enabled
+            _settings.compression_enabled = lambda: True  # type: ignore[assignment]
+    except Exception:
+        _orig = None  # type: ignore[assignment]
+    try:
+        _write_lines(tmp_path / "big.py", 200)
+        registry, _, reader = _read_registry(tmp_path)
+        provider = ScriptedProvider(
+            [
+                _tool_turn(
+                    "baca",
+                    [_tool_call("r1", "read_file", {"path": "big.py", "start_line": 1, "end_line": 200})],
+                ),
+                _tool_turn(
+                    "baca lagi",
+                    [_tool_call("r2", "read_file", {"path": "big.py", "start_line": 1, "end_line": 200})],
+                ),
+                _final_turn("selesai"),
+            ]
+        )
+        events: List[Dict[str, Any]] = []
+        orchestrator = AgentOrchestrator(
+            provider=provider,
+            executor=ToolExecutor(registry=registry),
+            options=GenerateOptions(model="scripted-model"),
+            system_prompt="agent",
+            use_continuous_loop=True,
+            context_budget_tokens=1_200,  # kecil -> compaction aktif
+            event_sink=lambda event_type, payload: events.append(
+                {"type": event_type, **payload}
             ),
-            _tool_turn(
-                "baca lagi",
-                [_tool_call("r2", "read_file", {"path": "big.py", "start_line": 1, "end_line": 200})],
-            ),
-            _final_turn("selesai"),
-        ]
-    )
-    events: List[Dict[str, Any]] = []
-    orchestrator = AgentOrchestrator(
-        provider=provider,
-        executor=ToolExecutor(registry=registry),
-        options=GenerateOptions(model="scripted-model"),
-        system_prompt="agent",
-        use_continuous_loop=True,
-        context_budget_tokens=1_200,  # kecil -> compaction aktif
-        event_sink=lambda event_type, payload: events.append(
-            {"type": event_type, **payload}
-        ),
-    )
-    result = orchestrator.run("baca big.py")
-    assert result.status == AgentStatus.DONE
-    assert any(
-        event.get("context_compacted")
-        for event in events
-        if event.get("type") == "provider_request"
-    )
+        )
+        result = orchestrator.run("baca big.py")
+        assert result.status == AgentStatus.DONE
+        assert any(
+            event.get("context_compacted")
+            for event in events
+            if event.get("type") == "provider_request"
+        )
 
-    second = reader.results[1]
-    # Detail read pertama sudah DIBUANG compaction -> isi DIKIRIM LAGI.
-    assert "content" in second
-    assert second.get("already_available") is not True
+        second = reader.results[1]
+        # Detail read pertama sudah DIBUANG compaction -> isi DIKIRIM LAGI.
+        assert "content" in second
+        assert second.get("already_available") is not True
+    finally:
+        try:
+            if (monkeypatch is None or not hasattr(monkeypatch, "setattr")) and _orig is not None:
+                import agent_ai.config.settings as _settings2
+                _settings2.compression_enabled = _orig  # type: ignore[assignment]
+        except Exception:
+            pass
 
 
 def test_sync_forgets_search_when_not_visible(tmp_path: Path) -> None:

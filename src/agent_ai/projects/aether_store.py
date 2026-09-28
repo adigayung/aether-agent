@@ -15,6 +15,10 @@ Struktur yang dikelola (di ROOT project target):
                 problems.md
             log/
                 <task_id>.log     # log task (JSON Lines)
+            skills/
+                <skill_id>/
+                    skill.md
+                    references/   # referensi tambahan Skill
             ENVIRONMENT.md        # Environment Context (deteksi OS/shell/runtime)
 
 Prinsip:
@@ -58,6 +62,12 @@ BIBLE_DIR_NAME = "bible"
 BIBLE_INDEX_NAME = "index.md"
 #: Nama file Environment Context (didokumentasikan di environment.py).
 ENVIRONMENT_FILE_NAME = "ENVIRONMENT.md"
+#: Subfolder Skill di dalam bible (generic, project-local) — reuse pola Bible.
+BIBLE_SKILLS_DIR_NAME = "skills"
+#: Nama file skill utama.
+SKILL_FILE_NAME = "skill.md"
+#: Subfolder references untuk tiap skill.
+SKILL_REFERENCES_DIR_NAME = "references"
 #: Versi format file Bible (marker kompatibilitas).
 BIBLE_FORMAT = "entry-v1"
 #: Marker awal satu entri di file kategori Bible.
@@ -171,6 +181,19 @@ class AetherProjectStore:
     def environment_path(self) -> Path:
         """Path file Environment Context (`<root>/.aether/ENVIRONMENT.md`)."""
         return self.aether_dir / ENVIRONMENT_FILE_NAME
+
+    def skills_dir(self) -> Path:
+        """Directory `<root>/.aether/bible/skills` (project-local Skill store)."""
+        return self.bible_dir / BIBLE_SKILLS_DIR_NAME
+
+    def skill_dir(self, skill_id: str) -> Path:
+        """Directory skill `<root>/.aether/bible/skills/<skill_id>`."""
+        from agent_ai.projects.skills import validate_skill_id
+        return self.skills_dir() / validate_skill_id(skill_id)
+
+    def skill_path(self, skill_id: str) -> Path:
+        """Path file `skill.md` untuk sebuah Skill."""
+        return self.skill_dir(skill_id) / SKILL_FILE_NAME
 
     def __repr__(self) -> str:  # pragma: no cover - bantuan debug
         return f"<AetherProjectStore root={self.root}>"

@@ -14,7 +14,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 def _now_iso() -> str:
@@ -58,6 +58,11 @@ BIBLE_CATEGORIES = (
 CATEGORY_ALIASES = {
     "rules": "conventions",
 }
+
+# Skill scope yang dikenal. Task 01 hanya memakai project-level, namun
+# desain tetap generic untuk ekstensi masa depan.
+SKILL_SCOPE_PROJECT = "project"
+SKILL_SCOPES = (SKILL_SCOPE_PROJECT,)
 
 
 @dataclass
@@ -141,4 +146,100 @@ class IntelligenceEntry:
             confidence=data.get("confidence", 1.0),
             created_at=data.get("created_at", _now_iso()),
             updated_at=data.get("updated_at", _now_iso()),
+        )
+
+
+@dataclass
+class Skill:
+    """Model generik untuk sebuah Skill AETHER.
+
+    Skill bersifat dynamic — Core hanya memahami konsep generic
+    skill_id / name / description / scope / location. Nama directory
+    Skill tidak di-hardcode di Core.
+
+    Attributes:
+        skill_id: identifier directory Skill (mis. "vue-ui").
+        name: nama tampilan Skill.
+        description: deskripsi singkat.
+        scope: cakupan Skill (saat ini "project").
+        content: isi markdown Skill (body di luar frontmatter).
+        location: path absolut file skill.md (string).
+        created_at: timestamp pembuatan.
+        updated_at: timestamp update terakhir.
+    """
+
+    skill_id: str
+    name: str
+    description: str = ""
+    scope: str = SKILL_SCOPE_PROJECT
+    content: str = ""
+    location: str = ""
+    created_at: str = field(default_factory=_now_iso)
+    updated_at: str = field(default_factory=_now_iso)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "skill_id": self.skill_id,
+            "name": self.name,
+            "description": self.description,
+            "scope": self.scope,
+            "content": self.content,
+            "location": self.location,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Skill":
+        return cls(
+            skill_id=data.get("skill_id", ""),
+            name=data.get("name", ""),
+            description=data.get("description", ""),
+            scope=data.get("scope", SKILL_SCOPE_PROJECT),
+            content=data.get("content", ""),
+            location=data.get("location", ""),
+            created_at=data.get("created_at", _now_iso()),
+            updated_at=data.get("updated_at", _now_iso()),
+        )
+
+
+@dataclass
+class SkillCatalogEntry:
+    """Metadata ringan untuk Skill Catalog / Discovery (tanpa content).
+
+    Catalog hanya berisi field yang dibutuhkan LLM untuk mengenali Skill:
+    skill_id, name, description, scope, location. Tidak memuat isi
+    ``skill.md`` (body), references, atau Project Bible.
+
+    Attributes:
+        skill_id: identifier directory Skill.
+        name: nama tampilan Skill.
+        description: deskripsi singkat.
+        scope: cakupan Skill (saat ini \"project\").
+        location: path absolut file skill.md.
+    """
+
+    skill_id: str
+    name: str
+    description: str = ""
+    scope: str = SKILL_SCOPE_PROJECT
+    location: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "skill_id": self.skill_id,
+            "name": self.name,
+            "description": self.description,
+            "scope": self.scope,
+            "location": self.location,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "SkillCatalogEntry":
+        return cls(
+            skill_id=data.get("skill_id", ""),
+            name=data.get("name", ""),
+            description=data.get("description", ""),
+            scope=data.get("scope", SKILL_SCOPE_PROJECT),
+            location=data.get("location", ""),
         )

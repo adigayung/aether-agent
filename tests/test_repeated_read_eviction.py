@@ -273,49 +273,84 @@ def test_c2_force_bypasses_dedup(tmp_path: Path) -> None:
     assert not _is_stub(reads[1]["content"]), "force=true harus mengirim isi ulang"
 
 
-def test_c3_evicted_content_can_be_read_again(tmp_path: Path) -> None:
+def test_c3_evicted_content_can_be_read_again(tmp_path: Path, monkeypatch=None) -> None:
     """Isi yang benar-benar hilang dari konteks TIDAK boleh di-stub.
 
     Ini yang membuat Agent tidak terjebak: bila compaction benar-benar membuang
     isi dari konteks, permintaan berikutnya HARUS mengirim isi penuh (bukan
     stub palsu yang membuat Agent tidak pernah memperoleh datanya).
     """
-    _write_source(tmp_path / "big.py", lines=400)
-    calls = [
-        _tool_call("c1", "read_file", {"path": "big.py"}),
-        _tool_call("c2", "read_file", {"path": "big.py"}),
-    ]
-    # Anggaran kecil (tetapi kepala masih MUAT, sehingga Tahap 5/5b aktif) ->
-    # hasil read pertama tidak muat jendela -> dipadatkan -> isinya hilang dari
-    # konteks. Jalur `head_oversized` TIDAK dipakai di sini karena jalur itu
-    # justru melindungi pesan terakhir (perilaku lama yang sudah benar).
-    events, _ = _run_reads(tmp_path, budget=4000, calls=calls)
-    reads = _reads(events)
-    assert len(reads) == 2, reads
-    second = reads[1]["content"]
-    assert not _is_stub(second), "isi yang sudah tidak terlihat tidak boleh di-stub"
-    assert isinstance(second, dict) and second.get("content"), (
-        "isi penuh harus dikirim ulang agar Agent dapat melanjutkan"
-    )
+    # Task 04: compression.enabled=false -> force ON for this compaction test
+    try:
+        import agent_ai.config.settings as _settings
+        if monkeypatch is not None and hasattr(monkeypatch, "setattr"):
+            monkeypatch.setattr(_settings, "compression_enabled", lambda: True)
+        else:
+            _orig_c3 = _settings.compression_enabled
+            _settings.compression_enabled = lambda: True  # type: ignore[assignment]
+    except Exception:
+        _orig_c3 = None  # type: ignore[assignment]
+    try:
+        _write_source(tmp_path / "big.py", lines=400)
+        calls = [
+            _tool_call("c1", "read_file", {"path": "big.py"}),
+            _tool_call("c2", "read_file", {"path": "big.py"}),
+        ]
+        # Anggaran kecil (tetapi kepala masih MUAT, sehingga Tahap 5/5b aktif) ->
+        # hasil read pertama tidak muat jendela -> dipadatkan -> isinya hilang dari
+        # konteks. Jalur `head_oversized` TIDAK dipakai di sini karena jalur itu
+        # justru melindungi pesan terakhir (perilaku lama yang sudah benar).
+        events, _ = _run_reads(tmp_path, budget=4000, calls=calls)
+        reads = _reads(events)
+        assert len(reads) == 2, reads
+        second = reads[1]["content"]
+        assert not _is_stub(second), "isi yang sudah tidak terlihat tidak boleh di-stub"
+        assert isinstance(second, dict) and second.get("content"), (
+            "isi penuh harus dikirim ulang agar Agent dapat melanjutkan"
+        )
+    finally:
+        try:
+            if (monkeypatch is None or not hasattr(monkeypatch, "setattr")) and _orig_c3 is not None:
+                import agent_ai.config.settings as _settings2
+                _settings2.compression_enabled = _orig_c3  # type: ignore[assignment]
+        except Exception:
+            pass
 
 
-def test_c4_eviction_is_observable(tmp_path: Path) -> None:
+def test_c4_eviction_is_observable(tmp_path: Path, monkeypatch=None) -> None:
     """Eviction terlihat di telemetry: span terlihat vs tersembunyi."""
-    _write_source(tmp_path / "big.py", lines=400)
-    calls = [
-        _tool_call("c1", "read_file", {"path": "big.py"}),
-        _tool_call("c2", "read_file", {"path": "big.py"}),
-    ]
-    events, _ = _run_reads(tmp_path, budget=4000, calls=calls)
-    requests = [e for e in events if e["type"] == "provider_request"]
-    assert requests, "provider_request harus tercatat"
-    last = requests[-1]
-    for key in (
-        "context_head",
-        "context_window",
-        "context_recent_compacted",
-        "context_spans_visible",
-        "context_spans_hidden",
-    ):
-        assert key in last, f"telemetry {key} hilang"
-    assert last["context_head"] >= 0
+    try:
+        import agent_ai.config.settings as _settings
+        if monkeypatch is not None and hasattr(monkeypatch, "setattr"):
+            monkeypatch.setattr(_settings, "compression_enabled", lambda: True)
+        else:
+            _orig_c4 = _settings.compression_enabled
+            _settings.compression_enabled = lambda: True  # type: ignore[assignment]
+    except Exception:
+        _orig_c4 = None  # type: ignore[assignment]
+    try:
+        _write_source(tmp_path / "big.py", lines=400)
+        calls = [
+            _tool_call("c1", "read_file", {"path": "big.py"}),
+            _tool_call("c2", "read_file", {"path": "big.py"}),
+        ]
+        events, _ = _run_reads(tmp_path, budget=4000, calls=calls)
+        requests = [e for e in events if e["type"] == "provider_request"]
+        assert requests, "provider_request harus tercatat"
+        last = requests[-1]
+        for key in (
+            "context_head",
+            "context_window",
+            "context_recent_compacted",
+            "context_spans_visible",
+            "context_spans_hidden",
+        ):
+            assert key in last, f"telemetry {key} hilang"
+        assert last["context_head"] >= 0
+    finally:
+        try:
+            if (monkeypatch is None or not hasattr(monkeypatch, "setattr")) and _orig_c4 is not None:
+                import agent_ai.config.settings as _settings2
+                _settings2.compression_enabled = _orig_c4  # type: ignore[assignment]
+        except Exception:
+            pass

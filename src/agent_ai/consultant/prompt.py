@@ -12,6 +12,11 @@ Prompt dibangun per-MODE:
                    (list_files, read_file, search_code, run_command) bila
                    memang perlu verifikasi/investigasi.
 
+Skill System (Task 04): tersedia di SEMUA mode (quick & investigate) sebagai
+capability READ-ONLY yang sama dengan Agent (skill_catalog, load_skill,
+load_skill_reference). Thin adapter di atas SkillStore existing, LLM yang
+memilih.
+
 Catatan: pembatasan tool pada mode quick TIDAK hanya bersandar pada prompt.
 Registry tool (tools.py) benar-benar tidak mendaftarkan tool source/runtime
 (read_file/search_code/list_files/run_command) maupun refresh_project_map pada
@@ -60,6 +65,19 @@ def _base_lines() -> List[str]:
     ]
 
 
+def _skill_lines() -> List[str]:
+    """Bagian Skill System (berlaku SEMUA mode Consultant — sama seperti Agent)."""
+    return [
+        "",
+        "## Skill System (progressive, LLM memilih — sama seperti Agent)",
+        "Skill adalah procedural guidance/context project (SKILL = pengetahuan, BUKAN permission):",
+        "  skill_catalog -> LLM memilih 0, 1, atau beberapa skill_id -> load_skill(skill_id) -> skill.md",
+        "  -> load_skill_reference(skill_id, reference) bila perlu reference spesifik.",
+        "Jangan otomatis memuat semua skill; hanya yang kamu pilih. Jangan otomatis membaca semua reference.",
+        "Skill tidak memberi kemampuan write/edit/execute baru — boundary Consultant tetap read-only.",
+    ]
+
+
 def _mode_lines(mode: str) -> List[str]:
     """Bagian prompt yang SPESIFIK per mode (tool + cara kerja)."""
     if mode == MODE_QUICK:
@@ -86,6 +104,7 @@ def _mode_lines(mode: str) -> List[str]:
             "  katakan apa yang belum diketahui dan sarankan user memakai mode",
             "  Investigate.",
             "- Tool yang tersedia: atlas_query, rig_query, project_map_status,",
+            "  skill_catalog, load_skill, load_skill_reference,",
             "  update_project_bible (menyimpan knowledge project yang sudah",
             "  terverifikasi ke Project Bible).",
             "",
@@ -138,6 +157,7 @@ def _mode_lines(mode: str) -> List[str]:
         "- update_project_bible: menyimpan knowledge project yang sudah terverifikasi",
         "  ke Project Bible (architecture, conventions, decisions, facts, learnings,",
         "  problems, known_bugs, known_gaps).",
+        "- Skill System (READ-ONLY): skill_catalog, load_skill, load_skill_reference.",
         "",
         "## Cara kerja (Investigate): INVESTIGATION -> ANALYSIS -> FINAL",
         "1. FASE INVESTIGATION (terarah & secukupnya): mulai dari pertanyaan user",
@@ -275,6 +295,7 @@ def build_consultant_system_prompt(mode: str = DEFAULT_CONSULTANT_MODE) -> str:
     lines: List[str] = []
     lines.extend(_base_lines())
     lines.extend(_mode_lines(normalized))
+    lines.extend(_skill_lines())
     lines.extend(_tool_discipline_lines())
     # State read/search (`already_available`/`already_searched`/force=true)
     # HANYA untuk mode yang benar-benar memiliki tool read/search. Mode quick

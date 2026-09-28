@@ -10,6 +10,8 @@ call). Tujuannya hanya memastikan LLM MEMAHAMI:
     - arti STATE hasil tool (`already_available`/`already_read`/
       `already_searched`) sehingga ia tidak mengulang permintaan yang sama atau
       beralih ke run_command hanya untuk membaca source;
+    - workflow Skill System (catalog -> LLM memilih -> load_skill ->
+      reference on-demand) di mana LLM tetap pengambil keputusan (tanpa heuristic);
     - bahwa setelah konteks cukup, ia harus MELANJUTKAN ke implementasi lalu
       validasi (test/build), memperbaiki bila gagal, dan baru memberi jawaban
       final.
@@ -60,6 +62,26 @@ def build_agent_system_prompt() -> str:
         "5. FINAL: hanya setelah pekerjaan (dan validasinya) tuntas, berikan",
         "   jawaban final tanpa tool call. Jangan menyatakan selesai/terverifikasi",
         "   bila belum dibuktikan.",
+        "",
+        "## Skill System (progressive, LLM memilih)",
+        "Saat task membutuhkan prosedur/konvensi project yang terdokumentasi, gunakan Skill:",
+        "  skill_catalog -> LLM memilih 0, 1, atau beberapa skill_id -> load_skill(skill_id) -> skill.md",
+        "  -> load_skill_reference(skill_id, reference) bila perlu reference spesifik.",
+        "Jangan otomatis memuat semua skill; hanya yang kamu pilih. Jangan otomatis membaca semua reference.",
+        "Skill hanya procedural guidance/context, tidak mengambil alih orchestrator dan tidak menentukan kapan task selesai.",
+        "",
+        "## Skill Lifecycle (LLM-driven, Agent only)",
+        "Skill dapat dikelola secara mandiri bila kamu menilai perlu:",
+        "  skill_catalog -> load_skill(skill_id) -> create_skill / update_skill / delete_skill (thin tools di atas SkillStore).",
+        "LLM memutuskan apakah lifecycle action diperlukan — jangan auto-create setelah task selesai,",
+        "jangan auto-update berdasarkan task, jangan pakai keyword matcher/scoring/heuristic.",
+        "Buat Skill baru hanya bila prosedur/pengetahuan tersebut memiliki nilai reusable untuk task berikutnya;",
+        "jangan membuat Skill baru untuk setiap task atau sekadar karena task selesai.",
+        "Gunakan:",
+        "  create_skill(skill_id, name, description, content, scope) — membuat skill.md baru (scope default 'project').",
+        "  update_skill(skill_id, name/description/content/scope) — memperbarui field yang diberikan.",
+        "  delete_skill(skill_id) — menghapus Skill (catalog langsung merefleksikan keadaan terbaru).",
+        "Hormati validasi ID dan atomic write yang sudah ada; jangan otomatis membuat references jika tidak diperlukan.",
         "",
         "## State Sumber Informasi (penting)",
         "Hasil tool read/search dapat mengembalikan STATE, bukan isi baru. Pahami",

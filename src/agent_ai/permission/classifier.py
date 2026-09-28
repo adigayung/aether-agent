@@ -58,6 +58,29 @@ _PROJECT_MAP_WRITE_TOOLS = frozenset({
     "refresh_project_map",
 })
 
+#: Tool Skill System (Task 04): catalog + progressive loading — READ-ONLY,
+#: dipakai Agent & Consultant via SATU SkillStore yang sama (thin adapter
+#: di `tools/skills.py`). Tidak ada heuristic / auto-selector.
+_SKILL_READ_TOOLS = frozenset({
+    "skill_catalog",
+    "load_skill",
+    "load_skill_reference",
+    "load_reference",
+})
+
+#: Tool Skill lifecycle (Task 05): mutasi persistent via SkillStore existing.
+#: Hanya tersedia pada Agent; Consultant tetap read-only.
+#: create_skill / update_skill -> WORKSPACE_WRITE, delete_skill -> DELETE_MOVE
+#: (sejajar dengan write_file/edit_file vs delete_file).
+_SKILL_LIFECYCLE_WRITE_TOOLS = frozenset({
+    "create_skill",
+    "update_skill",
+})
+
+_SKILL_LIFECYCLE_DELETE_TOOLS = frozenset({
+    "delete_skill",
+})
+
 #: Kata kunci nama action untuk heuristik tool kustom.
 _DELETE_MOVE_KEYWORDS = ("delete", "remove", "move", "rename", "unlink", "rmdir")
 _WRITE_KEYWORDS = ("write", "edit", "create", "append", "patch", "save")
@@ -100,6 +123,12 @@ class ActionClassifier:
             return ActionClass.READ_ONLY
         if name in _PROJECT_MAP_WRITE_TOOLS:
             return ActionClass.WORKSPACE_WRITE
+        if name in _SKILL_READ_TOOLS:
+            return ActionClass.READ_ONLY
+        if name in _SKILL_LIFECYCLE_WRITE_TOOLS:
+            return ActionClass.WORKSPACE_WRITE
+        if name in _SKILL_LIFECYCLE_DELETE_TOOLS:
+            return ActionClass.DELETE_MOVE
 
         # 2) Heuristik nama action (untuk tool kustom).
         #    Urutan penting: delete/move diperiksa sebelum write/read.

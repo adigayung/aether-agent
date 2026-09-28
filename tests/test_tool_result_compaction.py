@@ -514,60 +514,78 @@ def _build_growing_registry() -> Dict[str, FakeTool]:
     return tools
 
 
-def test_h_multiple_rounds_growing_results() -> None:
-    rounds = 16
-    tools = _build_growing_registry()
-    order = ["read_file", "search_code", "run_command", "edit_file"]
-    script = [
-        _tool_turn(f"round {i}", [_tool_call_dict(f"c{i}", order[i % 4], {"path": "src/r.py", "query": "q"})])
-        for i in range(rounds)
-    ]
-    script.append(_final_turn("Selesai setelah banyak round."))
+def test_h_multiple_rounds_growing_results(monkeypatch=None) -> None:
+    # Task 04: compression.enabled=false -> force ON for compaction test
+    try:
+        import agent_ai.config.settings as _settings
+        if monkeypatch is not None and hasattr(monkeypatch, "setattr"):
+            monkeypatch.setattr(_settings, "compression_enabled", lambda: True)
+        else:
+            _orig_h = _settings.compression_enabled
+            _settings.compression_enabled = lambda: True  # type: ignore[assignment]
+    except Exception:
+        _orig_h = None  # type: ignore[assignment]
+    try:
+        rounds = 16
+        tools = _build_growing_registry()
+        order = ["read_file", "search_code", "run_command", "edit_file"]
+        script = [
+            _tool_turn(f"round {i}", [_tool_call_dict(f"c{i}", order[i % 4], {"path": "src/r.py", "query": "q"})])
+            for i in range(rounds)
+        ]
+        script.append(_final_turn("Selesai setelah banyak round."))
 
-    provider = ScriptedProvider(script)
-    registry = ToolRegistry()
-    for tool in tools.values():
-        registry.register(tool)
-    events: List[Dict[str, Any]] = []
+        provider = ScriptedProvider(script)
+        registry = ToolRegistry()
+        for tool in tools.values():
+            registry.register(tool)
+        events: List[Dict[str, Any]] = []
 
-    orchestrator = AgentOrchestrator(
-        provider=provider,
-        executor=ToolExecutor(registry=registry),
-        options=GenerateOptions(model="scripted-model"),
-        system_prompt=SYSTEM_PROMPT,
-        use_continuous_loop=True,
-        context_budget_tokens=1500,
-        event_sink=lambda et, payload: events.append({"type": et, **payload}),
-    )
-    result = orchestrator.run("kerjakan task panjang dengan banyak tool")
+        orchestrator = AgentOrchestrator(
+            provider=provider,
+            executor=ToolExecutor(registry=registry),
+            options=GenerateOptions(model="scripted-model"),
+            system_prompt=SYSTEM_PROMPT,
+            use_continuous_loop=True,
+            context_budget_tokens=1500,
+            event_sink=lambda et, payload: events.append({"type": et, **payload}),
+        )
+        result = orchestrator.run("kerjakan task panjang dengan banyak tool")
 
-    assert result.status == AgentStatus.DONE, result.error
-    assert result.result == "Selesai setelah banyak round."
-    # Semua tool call tetap dieksekusi (loop tidak rusak karena compaction).
-    assert sum(t.calls for t in tools.values()) == rounds
-    assert provider.calls == rounds + 1
+        assert result.status == AgentStatus.DONE, result.error
+        assert result.result == "Selesai setelah banyak round."
+        # Semua tool call tetap dieksekusi (loop tidak rusak karena compaction).
+        assert sum(t.calls for t in tools.values()) == rounds
+        assert provider.calls == rounds + 1
 
-    reqs = [e for e in events if e["type"] == "provider_request"]
-    assert reqs
-    assert any(e.get("context_compacted") for e in reqs)
-    # Compaction hasil tool benar-benar terjadi (statistik observability).
-    assert any(e.get("context_tool_compacted", 0) > 0 for e in reqs)
-    last = reqs[-1]
-    assert last.get("context_tool_raw_chars", 0) > last.get("context_tool_compacted_chars", 0)
-    # Request terakhir BOUNDED (jauh lebih kecil dari akumulasi mentah).
-    last_request = provider.requests[-1]
-    last_chars = sum(len(str(m.get("content") or "")) for m in last_request)
-    assert last_chars < 60_000, last_chars
-    # Protokol tetap valid pada request terakhir.
-    assistant_ids = {
-        tc.get("id")
-        for m in last_request
-        if m.get("role") == "assistant"
-        for tc in (m.get("tool_calls") or [])
-    }
-    for m in last_request:
-        if m.get("role") == "tool":
-            assert m.get("tool_call_id") in assistant_ids
+        reqs = [e for e in events if e["type"] == "provider_request"]
+        assert reqs
+        assert any(e.get("context_compacted") for e in reqs)
+        # Compaction hasil tool benar-benar terjadi (statistik observability).
+        assert any(e.get("context_tool_compacted", 0) > 0 for e in reqs)
+        last = reqs[-1]
+        assert last.get("context_tool_raw_chars", 0) > last.get("context_tool_compacted_chars", 0)
+        # Request terakhir BOUNDED (jauh lebih kecil dari akumulasi mentah).
+        last_request = provider.requests[-1]
+        last_chars = sum(len(str(m.get("content") or "")) for m in last_request)
+        assert last_chars < 60_000, last_chars
+        # Protokol tetap valid pada request terakhir.
+        assistant_ids = {
+            tc.get("id")
+            for m in last_request
+            if m.get("role") == "assistant"
+            for tc in (m.get("tool_calls") or [])
+        }
+        for m in last_request:
+            if m.get("role") == "tool":
+                assert m.get("tool_call_id") in assistant_ids
+    finally:
+        try:
+            if (monkeypatch is None or not hasattr(monkeypatch, "setattr")) and _orig_h is not None:
+                import agent_ai.config.settings as _settings2
+                _settings2.compression_enabled = _orig_h  # type: ignore[assignment]
+        except Exception:
+            pass
 
 
 # --------------------------------------------------------------------------- #
@@ -642,9 +660,24 @@ def _run_module_tests(module_name: str) -> List[str]:
     return names
 
 
-def test_k_task1_context_compaction_still_passes() -> None:
-    names = _run_module_tests("tests.test_context_compaction")
-    assert "test_f_agent_continues_after_compaction" in names
+def test_k_task1_context_compaction_still_passes(monkeypatch=None) -> None:
+    # Task 04: compression.enabled=false -> compaction tests need ON; force ON
+    try:
+        import agent_ai.config.settings as _settings
+        _orig = _settings.compression_enabled
+        _settings.compression_enabled = lambda: True  # type: ignore[assignment]
+    except Exception:
+        _orig = None  # type: ignore[assignment]
+    try:
+        names = _run_module_tests("tests.test_context_compaction")
+        assert "test_f_agent_continues_after_compaction" in names
+    finally:
+        try:
+            if _orig is not None:
+                import agent_ai.config.settings as _settings2
+                _settings2.compression_enabled = _orig  # type: ignore[assignment]
+        except Exception:
+            pass
 
 
 # --------------------------------------------------------------------------- #
