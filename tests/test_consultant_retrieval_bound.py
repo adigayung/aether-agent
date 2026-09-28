@@ -608,9 +608,12 @@ def test_provider_proxy_passthrough_and_delegation() -> None:
     assert guard.reserve("atlas_query", {"query": "overflow"}) is not None
     assert guard.stopped is True
 
-    # Setelah stopped -> hanya tool map pencarian yang dilepas; non-map tetap ada.
+    # Setelah stopped -> SEMUA tool yang di-bound (map + investigasi) dilepas;
+    # hanya tool yang TIDAK di-bound (project_map_status, update_project_bible)
+    # yang tetap ada. Karena tools hanya berisi bound tools, hasil filter = [].
     proxy.generate(tools=tools, tool_choice=None)
-    assert [t.name for t in inner.seen[-1]] == ["read_file", "search_code"]
+    # effective_tools menjadi None (list filtered menjadi []).
+    assert inner.seen[-1] is None, inner.seen[-1]
 
 
 # --------------------------------------------------------------------------- #

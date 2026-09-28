@@ -363,10 +363,11 @@ def build_consultant_registry(
                             project_map_status) + update_project_bible.
                             TANPA refresh_project_map.
         guard: bound retrieval opsional (ConsultantRetrievalGuard). Bila diisi,
-            tool map PENCARIAN (atlas_query/rig_query) dibungkus
-            `ConsultantBoundedMapTool` sehingga query berulang / melewati batas
-            diblokir. Bila None, perilaku identik dengan sebelumnya (backward
-            compatible).
+            tool PENCARIAN map (atlas_query/rig_query) DAN tool investigasi
+            (read_file/search_code/list_files/run_command) dibungkus
+            `ConsultantBoundedMapTool` sehingga tool yang melewati batas jumlah
+            pemanggilan diblokir. Bila None, perilaku identik dengan sebelumnya
+            (backward compatible).
 
     Returns:
         ToolRegistry berisi tool yang AMAN untuk Consultant (tanpa tool tulis).
@@ -411,10 +412,23 @@ def build_consultant_registry(
         # Consultant membaca sumber yang sama berulang kali dalam satu giliran.
         # Arsitektur/boundary Consultant (loop/policy/guard) TIDAK berubah.
         read_cache = ToolReadCache()
-        registry.register(ListFilesTool(root=resolved))
-        registry.register(ReadFileTool(root=resolved, read_cache=read_cache))
-        registry.register(SearchCodeTool(root=resolved, read_cache=read_cache))
-        registry.register(ConsultantRunCommandTool(root=resolved))
+
+        # Daftar tool investigasi (read-only source/runtime). Setiap tool yang
+        # di-bound oleh guard dibungkus ConsultantBoundedMapTool agar setelah
+        # batas tercapai, tool tidak lagi dieksekusi (dikembalikan ToolResult
+        # "bound" yang jelas) dan bound provider melepasnya dari penawaran ke
+        # LLM -> LLM berhenti investigasi dan menyusun jawaban final.
+        _investigation_tools = [
+            ListFilesTool(root=resolved),
+            ReadFileTool(root=resolved, read_cache=read_cache),
+            SearchCodeTool(root=resolved, read_cache=read_cache),
+            ConsultantRunCommandTool(root=resolved),
+        ]
+        for tool in _investigation_tools:
+            if guard is not None and guard.is_map_query_tool(tool.name):
+                registry.register(ConsultantBoundedMapTool(tool, guard))
+            else:
+                registry.register(tool)
 
     # Project Bible update tersedia di SEMUA mode (satu-satunya jalur tulis
     # Consultant). Project Bible READ dilakukan via konteks system message.

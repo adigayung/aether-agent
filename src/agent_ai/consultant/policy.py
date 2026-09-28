@@ -46,10 +46,15 @@ from agent_ai.permission.policy import PermissionPolicy
 #: (tanpa pencarian) dan tidak memicu eksplorasi runaway.
 CONSULTANT_MAP_QUERY_TOOLS = ("atlas_query", "rig_query")
 
+#: Tool investigasi Consultant yang di-bound (read/search/list/run).
+#: List_files aman karena tidak memicu eksplorasi tak terbatas — tetap di-bound
+#: agar konsisten dengan tool investigasi lain.
+CONSULTANT_INVESTIGATION_TOOLS = ("read_file", "search_code", "run_command", "list_files")
+
 
 @dataclass(frozen=True)
 class ConsultantRetrievalBudget:
-    """Batas retrieval Project Map untuk SATU giliran konsultasi Consultant.
+    """Batas retrieval Project Map + investigasi untuk SATU giliran konsultasi.
 
     Satu sumber kebenaran untuk angka bound Consultant. Ini boundary/safety,
     BUKAN target & BUKAN budget Agent.
@@ -59,23 +64,42 @@ class ConsultantRetrievalBudget:
         max_rig_queries: maksimum query rig_query yang BENAR-BENAR dijalankan.
         max_zero_result_queries: maksimum query map beruntun yang mengembalikan 0
             hasil sebelum pencarian map dihentikan (pola zero-result runaway).
+        max_read_file: maksimum read_file yang BENAR-BENAR dijalankan (investigasi).
+        max_search_code: maksimum search_code yang BENAR-BENAR dijalankan (investigasi).
+        max_run_command: maksimum run_command yang BENAR-BENAR dijalankan (investigasi).
+        max_list_files: maksimum list_files yang BENAR-BENAR dijalankan (investigasi).
 
-    Setelah salah satu batas tersentuh, pencarian map dihentikan secara
-    graceful: query map berikutnya TIDAK dieksekusi (mengembalikan ToolResult
-    "bound" yang jelas), tool map dilepas dari penawaran ke LLM, dan LLM
-    diminta menyusun jawaban final dari evidence yang sudah ada.
+    Setelah salah satu batas tersentuh, tool terkait tidak dapat dipanggil lagi
+    dan pencarian dihentikan secara graceful: tool map/investigasi TIDAK
+    dieksekusi (mengembalikan ToolResult "bound" yang jelas), tool yang sudah
+    melewati batas dilepas dari penawaran ke LLM, dan LLM diminta menyusun
+    jawaban final dari evidence yang sudah ada.
     """
 
     max_atlas_queries: int
     max_rig_queries: int
     max_zero_result_queries: int
 
+    # Batas investigasi (mencegah runaway read_file/search_code/run_command).
+    max_read_file: int = 15
+    max_search_code: int = 10
+    max_run_command: int = 8
+    max_list_files: int = 8
+
     def max_queries_for(self, tool_name: str) -> Optional[int]:
-        """Batas query untuk sebuah tool map, atau None bila tool bukan map query."""
+        """Batas query untuk sebuah tool, atau None bila tool tidak di-bound."""
         if tool_name == "atlas_query":
             return self.max_atlas_queries
         if tool_name == "rig_query":
             return self.max_rig_queries
+        if tool_name == "read_file":
+            return self.max_read_file
+        if tool_name == "search_code":
+            return self.max_search_code
+        if tool_name == "run_command":
+            return self.max_run_command
+        if tool_name == "list_files":
+            return self.max_list_files
         return None
 
 

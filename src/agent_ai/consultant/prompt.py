@@ -186,13 +186,20 @@ def _tool_discipline_lines() -> List[str]:
 
 
 def _source_state_lines() -> List[str]:
-    """State hasil tool read/search + cara meresponsnya (berlaku semua mode).
+    """State hasil tool read/search + cara meresponsnya (mode INVESTIGATE).
 
     Tool read/search dapat mengembalikan STATE (bukan isi baru) ketika informasi
     yang sama sudah pernah diambil pada percakapan ini. Bagian ini memastikan
     LLM TAHU bahwa informasi tersebut SUDAH tersedia, sehingga ia berhenti
     meminta ulang dan lanjut ke analisis/jawaban — bukan mengulang read/search
     (atau beralih ke run_command) sampai menyentuh max_steps.
+
+    Juga menjelaskan bound investigasi (batas jumlah tool call) sebagai safety
+    structural — bukan sekadar saran.
+
+    HANYA disuntikkan ke prompt INVESTIGATE: mode quick TIDAK memiliki tool
+    read_file/search_code/run_command (registry quick tidak mendaftarkannya),
+    sehingga prompt quick tidak boleh menyebut tool-tool itu (boundary quick).
 
     Ini murni penjelasan state: TIDAK memaksa LLM berhenti dan TIDAK menambah
     bound/heuristic baru.
@@ -210,9 +217,11 @@ def _source_state_lines() -> List[str]:
         "- `already_searched` (search_code): hasil pencarian dengan query yang sama",
         "  sudah ada di percakapan. JANGAN mengulang query itu; pakai hasil",
         "  sebelumnya.",
-        "- `consultant_retrieval_bound` (atlas_query/rig_query): batas pencarian",
-        "  Project Map tercapai. JANGAN memanggil tool map lagi; susun jawaban dari",
-        "  evidence yang sudah ada.",
+        "- `consultant_retrieval_bound`: batas jumlah pemanggilan tool tercapai.",
+        "  Tool map (atlas_query/rig_query) dan tool investigasi (read_file/",
+        "  search_code/run_command/list_files) memiliki batas struktural per",
+        "  giliran konsultasi. Bila batas tercapai, tool tidak lagi tersedia dan",
+        "  Anda harus menyusun jawaban final.",
         "- Bila Anda BENAR-BENAR butuh isi mentah dikirim ulang (mis. konteks lama",
         "  sudah diringkas sehingga isinya tidak lagi terlihat), panggil read_file",
         "  dengan `force=true`. Di luar kasus itu, perlakukan state di atas sebagai",
@@ -267,7 +276,12 @@ def build_consultant_system_prompt(mode: str = DEFAULT_CONSULTANT_MODE) -> str:
     lines.extend(_base_lines())
     lines.extend(_mode_lines(normalized))
     lines.extend(_tool_discipline_lines())
-    lines.extend(_source_state_lines())
+    # State read/search (`already_available`/`already_searched`/force=true)
+    # HANYA untuk mode yang benar-benar memiliki tool read/search. Mode quick
+    # tidak mendaftarkan read_file/search_code/run_command pada registry,
+    # sehingga prompt quick tidak boleh menyebut tool-tool itu (boundary quick).
+    if normalized != MODE_QUICK:
+        lines.extend(_source_state_lines())
     lines.extend(_task_proposal_lines())
     return "\n".join(lines)
 

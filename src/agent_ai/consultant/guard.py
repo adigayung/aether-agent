@@ -1,11 +1,13 @@
-"""Safety/control layer Consultant: bound retrieval Project Map.
+"""Safety/control layer Consultant: bound retrieval Project Map + investigasi.
 
 Tujuan modul ini SEMPIT dan hanya boundary (bukan "otak kedua"):
 
     - mencegah query Project Map berulang (identik setelah normalisasi);
     - mencegah eksplorasi map runaway (batas jumlah query per giliran);
-    - menghentikan pola zero-result beruntun;
-    - memaksa model berhenti mencari map setelah budget retrieval habis dan
+    - mencegah eksplorasi investigasi runaway (batas jumlah read_file/search_code/
+      run_command/list_files per giliran);
+    - menghentikan pola zero-result beruntun pada map;
+    - memaksa model berhenti mencari setelah budget retrieval habis dan
       menyusun jawaban final dari evidence yang sudah ada.
 
 Policy TIDAK menentukan jawaban: ia hanya membatasi & mengarahkan. Keputusan
@@ -15,13 +17,13 @@ Desain (tanpa menyentuh loop generik Agent/AgentOrchestrator):
 
     1. `ConsultantRetrievalGuard`  = state machine per giliran konsultasi
        (counter, dedup query ternormalisasi, zero-result streak, stopped).
-    2. Wrapper tool map (`consultant.tools.ConsultantBoundedMapTool`) memanggil
+    2. Wrapper tool (`ConsultantBoundedMapTool`) memanggil
        `guard.reserve()` SEBELUM eksekusi dan `guard.record()` setelahnya.
-       Query yang melewati bound TIDAK dieksekusi; ia dikembalikan sebagai
+       Tool yang melewati bound TIDAK dieksekusi; ia dikembalikan sebagai
        ToolResult "bound" yang jelas untuk LLM.
     3. `ConsultantBoundProvider` = proxy provider yang, begitu guard `stopped`,
-       MELEPAS tool map (atlas_query/rig_query) dari daftar tool sehingga LLM
-       tidak bisa lagi memanggilnya -> LLM wajib menyusun jawaban final.
+       MELEPAS tool yang di-bound dari daftar tool sehingga LLM tidak bisa
+       lagi memanggilnya -> LLM wajib menyusun jawaban final.
 
 `max_steps` (safeguard generik, mis. 40 di ConsultantService) TETAP menjadi
 ultimate safety guard; bound ini hanya menghentikan runaway jauh lebih awal dan
@@ -35,10 +37,14 @@ import threading
 from typing import Any, Dict, List, Optional, Set
 
 from agent_ai.consultant.policy import (
+    CONSULTANT_INVESTIGATION_TOOLS,
     CONSULTANT_MAP_QUERY_TOOLS,
     ConsultantRetrievalBudget,
     retrieval_budget_for_mode,
 )
+
+#: Semua tool yang di-bound Consultant = map query + investigasi.
+_BOUND_TOOLS = CONSULTANT_MAP_QUERY_TOOLS + CONSULTANT_INVESTIGATION_TOOLS
 from agent_ai.core.response import LLMResponse
 from agent_ai.providers.base import (
     BaseProvider,
@@ -86,13 +92,18 @@ def _is_zero_result(result: Any) -> bool:
 
 
 class ConsultantRetrievalGuard:
-    """State machine bound retrieval Project Map untuk SATU giliran konsultasi.
+    """State machine bound retrieval Project Map + investigasi untuk SATU giliran konsultasi.
 
     Dibuat sekali per panggilan `ConsultantService.consult()`, sehingga batas
     dihitung per pertanyaan (bukan lintas sesi). Mutasi state dijaga
     `threading.Lock`: Tool Execution Coordinator dapat menjalankan beberapa tool
     READ (mis. atlas_query + rig_query) PARALEL dalam satu batch, sehingga
     `reserve`/`record` bisa dipanggil bersamaan.
+
+    Mencakup:
+        - Tool map query (atlas_query, rig_query) — dedup + bound jumlah query.
+        - Tool investigasi (read_file, search_code, run_command, list_files) —
+          bound jumlah pemanggilan.
 
     Args:
         budget: preset budget. Bila None, diambil dari `mode`.
@@ -107,9 +118,9 @@ class ConsultantRetrievalGuard:
         mode: Optional[str] = None,
     ) -> None:
         self.budget = budget or retrieval_budget_for_mode(mode)
-        self._counts: Dict[str, int] = {name: 0 for name in CONSULTANT_MAP_QUERY_TOOLS}
+        self._counts: Dict[str, int] = {name: 0 for name in _BOUND_TOOLS}
         self._seen: Dict[str, Set[str]] = {
-            name: set() for name in CONSULTANT_MAP_QUERY_TOOLS
+            name: set() for name in _BOUND_TOOLS
         }
         self._zero_result_streak = 0
         self._stopped = False
@@ -131,13 +142,13 @@ class ConsultantRetrievalGuard:
 
     @property
     def blocked_tool_names(self) -> Set[str]:
-        """Nama tool map yang harus dilepas dari penawaran saat `stopped`."""
+        """Nama tool yang harus dilepas dari penawaran saat `stopped`."""
         if not self._stopped:
             return set()
-        return set(CONSULTANT_MAP_QUERY_TOOLS)
+        return set(_BOUND_TOOLS)
 
     def is_map_query_tool(self, name: Any) -> bool:
-        """True bila `name` adalah tool map yang di-bound."""
+        """True bila `name` adalah tool yang di-bound oleh guard Consultant."""
         return name in self._counts
 
     def counts(self) -> Dict[str, int]:
@@ -145,14 +156,22 @@ class ConsultantRetrievalGuard:
         return dict(self._counts)
 
     # ------------------------------------------------------------------ #
-    # Hook: sebelum & sesudah eksekusi tool map
+    # Hook: sebelum & sesudah eksekusi tool
     # ------------------------------------------------------------------ #
+    def _is_investigation_tool(self, tool_name: str) -> bool:
+        """True bila tool adalah investigasi (bukan map query)."""
+        return tool_name in CONSULTANT_INVESTIGATION_TOOLS
+
     def reserve(self, tool_name: str, arguments: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Putuskan apakah query map BOLEH dieksekusi (dipanggil SEBELUM eksekusi).
+        """Putuskan apakah tool boleh dieksekusi (dipanggil SEBELUM eksekusi).
+
+        Untuk map query (atlas_query/rig_query): dedup by query + count limit.
+        Untuk investigasi (read_file/search_code/run_command/list_files): count
+        limit SAJA (dedup sudah ditangani ToolReadCache/read_file sendiri).
 
         Returns:
-            None bila query boleh dieksekusi; atau dict ToolResult "bound" yang
-            jelas untuk LLM bila query harus DIBLOKIR (tidak dieksekusi).
+            None bila tool boleh dieksekusi; atau dict ToolResult "bound" yang
+            jelas untuk LLM bila tool harus DIBLOKIR (tidak dieksekusi).
         """
         if tool_name not in self._counts:
             return None
@@ -163,37 +182,42 @@ class ConsultantRetrievalGuard:
         # Lock: batch tool READ dapat dijalankan PARALEL, jadi reserve/record
         # bisa dipanggil bersamaan. Lock menjaga counter/dedup/streak konsisten.
         with self._lock:
-            # Sudah stopped: TIDAK ada query map lagi yang dieksekusi.
+            # Sudah stopped: TIDAK ada tool yang dieksekusi lagi.
             if self._stopped:
                 return self._bound_result(
                     tool_name, query, self._stop_reason or "search_stopped"
                 )
 
-            # Query identik (ternormalisasi) pada tool map yang sama -> blokir.
-            if normalized in self._seen[tool_name]:
-                return self._stop(tool_name, query, "repeated_query")
+            # Dedup query identik (ternormalisasi) HANYA untuk map query tools.
+            # Investigation tools punya dedup sendiri (ToolReadCache -
+            # already_available/already_searched) sehingga tidak perlu dedup di sini.
+            if not self._is_investigation_tool(tool_name):
+                if normalized in self._seen[tool_name]:
+                    return self._stop(tool_name, query, "repeated_query")
+                # Reservasi optimistik untuk map: tandai query sebagai 'sudah
+                # dipakai' SEBELUM eksekusi, sehingga dua query identik yang datang
+                # PARALEL pada batch yang sama tidak dieksekusi dua kali.
+                self._seen[tool_name].add(normalized)
 
-            # Batas jumlah query per tool -> blokir.
+            # Batas jumlah pemanggilan per tool -> blokir.
             limit = self.budget.max_queries_for(tool_name)
             if limit is not None and self._counts[tool_name] >= limit:
                 return self._stop(tool_name, query, "query_limit_reached")
 
-            # Reservasi optimistik: tandai query sebagai 'sudah dipakai' SEBELUM
-            # eksekusi, sehingga dua query identik yang datang PARALEL pada batch
-            # yang sama tidak dieksekusi dua kali (yang kedua -> repeated_query).
-            self._seen[tool_name].add(normalized)
             return None
 
     def record(
         self, tool_name: str, arguments: Dict[str, Any], result: Any
     ) -> None:
-        """Catat hasil query map yang BENAR-BENAR dieksekusi (setelah eksekusi)."""
+        """Catat hasil eksekusi tool yang BENAR-BENAR dijalankan (setelah eksekusi)."""
         if tool_name not in self._counts:
             return
 
         normalized = normalize_map_query((arguments or {}).get("query"))
         with self._lock:
-            self._seen[tool_name].add(normalized)
+            # Catat query HANYA untuk map query tools (investigasi tidak pakai dedup).
+            if not self._is_investigation_tool(tool_name):
+                self._seen[tool_name].add(normalized)
             self._counts[tool_name] += 1
 
             if _is_zero_result(result):
@@ -220,7 +244,16 @@ class ConsultantRetrievalGuard:
     def _bound_result(
         self, tool_name: str, query: Any, reason: str
     ) -> Dict[str, Any]:
-        """ToolResult yang jelas: batas pencarian map tercapai -> susun jawaban."""
+        """ToolResult yang jelas: batas pencarian tercapai -> susun jawaban."""
+        guidance = (
+            "BATAS PENCARIAN SUDAH TERCAPAI "
+            f"(alasan: {reason}). Tool '{tool_name}' TIDAK dijalankan. "
+            "JANGAN memanggil tool yang sudah dibatasi lagi. "
+            "Hentikan pencarian dan susun jawaban final SEKARANG "
+            "berdasarkan evidence yang sudah ada (Project Bible/konteks + "
+            "hasil pencarian sebelumnya). Sampaikan keterbatasan bila ada dan "
+            "jangan mengarang fakta."
+        )
         return {
             "consultant_retrieval_bound": True,
             "status": "retrieval_bound",
@@ -232,33 +265,29 @@ class ConsultantRetrievalGuard:
             "limits": {
                 "atlas_query": self.budget.max_atlas_queries,
                 "rig_query": self.budget.max_rig_queries,
+                "read_file": self.budget.max_read_file,
+                "search_code": self.budget.max_search_code,
+                "run_command": self.budget.max_run_command,
+                "list_files": self.budget.max_list_files,
             },
-            "message": (
-                "BATAS PENCARIAN PROJECT MAP SUDAH TERCAPAI "
-                f"(alasan: {reason}). Query ini TIDAK dijalankan. "
-                "JANGAN memanggil atlas_query / rig_query lagi. "
-                "Hentikan pencarian map dan susun jawaban final SEKARANG "
-                "berdasarkan evidence yang sudah ada (Project Bible/konteks + "
-                "hasil map sebelumnya). Sampaikan keterbatasan bila ada dan "
-                "jangan mengarang fakta."
-            ),
+            "message": guidance,
             "guidance": "susun jawaban final dari evidence yang sudah ada",
         }
 
 
 class ConsultantBoundProvider(BaseProvider):
-    """Proxy provider Consultant: melepas tool map setelah retrieval bound.
+    """Proxy provider Consultant: melepas tool setelah bound tercapai.
 
     Membungkus provider nyata (tanpa mengubahnya) dan hanya menyaring daftar
     tool pada pemanggilan `generate`. Selama bound belum tercapai, provider
     menerima SEMUA tool apa adanya (perilaku tidak berubah). Begitu guard
-    `stopped`, `atlas_query`/`rig_query` dilepas dari daftar tool untuk satu
-    (atau beberapa) pemanggilan berikutnya, sehingga LLM tidak lagi punya tool
-    map dan harus menghasilkan jawaban final -> konsultasi selesai normal
-    (bukan FAILED karena menyentuh max_steps).
+    `stopped`, tool yang di-bound (map query + investigasi) dilepas dari
+    daftar tool untuk satu (atau beberapa) pemanggilan berikutnya, sehingga
+    LLM tidak lagi punya tool tersebut dan harus menghasilkan jawaban final ->
+    konsultasi selesai normal (bukan FAILED karena menyentuh max_steps).
 
-    Tool non-map (read_file/search_code/list_files/run_command/update_project_bible/
-    project_map_status) TIDAK dilepas: bound ini khusus pencarian map.
+    Tool non-bound (`project_map_status`, `update_project_bible`) TIDAK
+    dilepas: bound ini khusus map query + tool investigasi.
     """
 
     def __init__(
