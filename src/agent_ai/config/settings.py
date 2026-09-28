@@ -166,7 +166,11 @@ class OpenRouterConfig:
 class NineRouterConfig:
     """Konfigurasi provider 9Router (OpenAI-compatible, tanpa model)."""
 
-    api_key: str = field(default_factory=lambda: _get("9ROUTER_API_KEY"))
+    #: Nama env utama = SEMBILAN_ROUTER_API_KEY (pola <PROVIDER>_API_KEY);
+    #: 9ROUTER_API_KEY tetap didukung sebagai nama lama.
+    api_key: str = field(
+        default_factory=lambda: _get("SEMBILAN_ROUTER_API_KEY") or _get("9ROUTER_API_KEY")
+    )
     base_url: str = "http://127.0.0.1:20128/v1"
     model: str = field(default="")
     timeout: int = 120

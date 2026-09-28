@@ -86,13 +86,28 @@ def main() -> int:
         assert types >= {"openrouter", "deepseek", "openai", "ollama"}, types
         assert is_api_key_env_name("OPENROUTER_API_KEY")
         assert is_api_key_env_name("OPENROUTER_API_KEY_AKUN_TEMAN")
+        # Prefix dengan underscore internal (pola <PROVIDER>_API_KEY) HARUS valid.
+        assert is_api_key_env_name("SEMBILAN_ROUTER_API_KEY")
+        assert is_api_key_env_name("9ROUTER_API_KEY")
+        assert is_api_key_env_name("FOO_API_KEY_SUFFIX")
         assert not is_api_key_env_name("OPENROUTER_MODEL")
         assert not is_api_key_env_name("OLLAMA_HOST")
         assert not is_api_key_env_name("PATH")
+        # Nama env malformed tetap ditolak.
+        assert not is_api_key_env_name("_API_KEY")
+        assert not is_api_key_env_name("API_KEY")
+        assert not is_api_key_env_name("FOO__API_KEY")
+        assert not is_api_key_env_name("FOO_API_KEY_")
+        assert not is_api_key_env_name("foo_api_key")
         assert parse_api_key_env_name("OPENROUTER_API_KEY_AKUN_TEMAN") == (
             "OPENROUTER",
             "_AKUN_TEMAN",
         )
+        assert parse_api_key_env_name("SEMBILAN_ROUTER_API_KEY") == (
+            "SEMBILAN_ROUTER",
+            "",
+        )
+        assert parse_api_key_env_name("FOO_API_KEY_SUFFIX") == ("FOO", "_SUFFIX")
         print("pola env API key    : OK (hanya provider + _API_KEY yang cocok)")
         print()
 
@@ -157,6 +172,28 @@ def main() -> int:
         assert ollama.api_key_env == ""
         # Default Base API URL Ollama (lokal, tanpa API key).
         assert ollama.api_url == "http://localhost:11434"
+
+        # Provider 9Router (requires_model=False): env API key memakai pola
+        # <PROVIDER>_API_KEY dengan underscore (SEMBILAN_ROUTER_API_KEY).
+        nine = svc.create_provider_instance(
+            name="9Router",
+            provider_type="9router",
+            api_key_env="SEMBILAN_ROUTER_API_KEY",
+        )
+        print(f"create 9router      : id={nine.id} api_url={nine.api_url!r} env={nine.api_key_env!r}")
+        assert nine.provider_type == "9router"
+        assert nine.api_key_env == "SEMBILAN_ROUTER_API_KEY"
+        # Default Base API URL 9Router (local proxy, OpenAI-compatible).
+        assert nine.api_url == "http://127.0.0.1:20128/v1"
+        # requires_model=False tampil di konfigurasi provider.
+        assert svc.get_provider_config(nine.id)["requires_model"] is False
+        # Alias lama "9ROUTER_API_KEY" tetap valid untuk provider 9Router.
+        nine_legacy = svc.create_provider_instance(
+            name="9Router Legacy",
+            provider_type="9router",
+            api_key_env="9ROUTER_API_KEY",
+        )
+        assert nine_legacy.api_key_env == "9ROUTER_API_KEY"
 
         # Update.
         primary = svc.update_provider_instance(

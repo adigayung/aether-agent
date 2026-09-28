@@ -21,13 +21,16 @@ from typing import Dict, List, Optional, Tuple
 # HANYA variabel dengan pola baku ini yang dianggap sebagai API key provider:
 #     <PREFIX>_API_KEY
 #     <PREFIX>_API_KEY_<SUFFIX>
-# Contoh valid  : OPENROUTER_API_KEY, OPENROUTER_API_KEY_AKUN_TEMAN
+# Contoh valid  : OPENROUTER_API_KEY, OPENROUTER_API_KEY_AKUN_TEMAN,
+#                 SEMBILAN_ROUTER_API_KEY, 9ROUTER_API_KEY
 # Contoh invalid: OPENROUTER_MODEL, PATH, OLLAMA_HOST, ANOTHER_SECRET
 #
-# <PREFIX> = huruf besar ATAU angka diawali huruf/angka, diikuti huruf/angka.
+# <PREFIX> = satu atau lebih segmen [A-Z0-9] dipisah '_' (mis. "SEMBILAN_ROUTER",
+#            "9ROUTER", "OPENROUTER"); TIDAK mengizinkan '_' di awal/akhir atau
+#            ganda, sehingga nama env yang malformed tetap ditolak.
 # <SUFFIX> = satu atau lebih segmen `_XXX` (huruf besar/angka/underscore).
 API_KEY_ENV_PATTERN = re.compile(
-    r"^(?P<prefix>[A-Z0-9][A-Z0-9]*)_API_KEY(?P<suffix>_[A-Z0-9_]+)?$"
+    r"^(?P<prefix>[A-Z0-9]+(?:_[A-Z0-9]+)*)_API_KEY(?P<suffix>_[A-Z0-9_]+)?$"
 )
 
 
@@ -43,6 +46,9 @@ class ProviderTypeSpec:
         requires_api_key: True bila API key wajib (cloud). False untuk lokal.
         requires_model: True bila provider membutuhkan model. False untuk provider
             seperti 9Router yang menentukan model sendiri.
+        env_prefix_aliases: prefix env TAMBAHAN (alias) yang juga dianggap milik
+            provider type ini (mis. 9Router = "SEMBILAN_ROUTER" dengan alias
+            "9ROUTER"). Kosong bila tidak ada alias.
     """
 
     key: str
@@ -51,12 +57,27 @@ class ProviderTypeSpec:
     default_api_url: str
     requires_api_key: bool
     requires_model: bool = True
+    env_prefix_aliases: Tuple[str, ...] = ()
+
+    def matches_env_prefix(self, prefix: str) -> bool:
+        """True bila `prefix` env API key milik provider type ini.
+
+        Mencakup `env_prefix` utama MAUPUN seluruh `env_prefix_aliases`
+        (case-insensitive).
+        """
+        upper = (prefix or "").strip().upper()
+        if not upper:
+            return False
+        if upper == self.env_prefix.upper():
+            return True
+        return upper in {alias.upper() for alias in self.env_prefix_aliases}
 
     def to_dict(self) -> Dict[str, object]:
         return {
             "key": self.key,
             "label": self.label,
             "env_prefix": self.env_prefix,
+            "env_prefix_aliases": list(self.env_prefix_aliases),
             "default_api_url": self.default_api_url,
             "requires_api_key": self.requires_api_key,
             "requires_model": self.requires_model,
@@ -100,7 +121,8 @@ _PROVIDER_TYPES: Dict[str, ProviderTypeSpec] = {
         ProviderTypeSpec(
             key="9router",
             label="9Router",
-            env_prefix="9ROUTER",
+            env_prefix="SEMBILAN_ROUTER",
+            env_prefix_aliases=("9ROUTER",),
             default_api_url="http://127.0.0.1:20128/v1",
             requires_api_key=True,
             requires_model=False,
@@ -137,10 +159,15 @@ def require_provider_type(key: str) -> ProviderTypeSpec:
 
 
 def provider_type_for_env_prefix(prefix: str) -> Optional[ProviderTypeSpec]:
-    """Cari provider type dari prefix env API key (mis. "OPENROUTER")."""
+    """Cari provider type dari prefix env API key (mis. "OPENROUTER").
+
+    Mencocokkan `env_prefix` utama maupun alias (mis. "9ROUTER" -> 9Router).
+    """
     upper = (prefix or "").strip().upper()
+    if not upper:
+        return None
     for spec in _PROVIDER_TYPES.values():
-        if spec.env_prefix == upper:
+        if spec.matches_env_prefix(upper):
             return spec
     return None
 

@@ -90,7 +90,7 @@ class LLMConfigService:
                     f"'{spec.env_prefix}_API_KEY' atau '{spec.env_prefix}_API_KEY_<SUFFIX>'."
                 )
             prefix = parsed[0]
-            if prefix != spec.env_prefix:
+            if not spec.matches_env_prefix(prefix):
                 raise LLMConfigValidationError(
                     f"API key '{api_key_env}' bukan untuk provider type '{spec.key}'. "
                     f"Gunakan variabel dengan prefix '{spec.env_prefix}_API_KEY'."
