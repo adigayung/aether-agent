@@ -29,6 +29,7 @@ from agent_ai.llm_config.errors import (
 from agent_ai.llm_config.models import CredentialInfo, ModelConfig, ProviderInstance
 from agent_ai.llm_config.providers import (
     ProviderTypeSpec,
+    get_provider_type,
     is_api_key_env_name,
     parse_api_key_env_name,
     provider_type_for_env_prefix,
@@ -85,12 +86,21 @@ class LLMConfigService:
         if api_key_env:
             parsed = parse_api_key_env_name(api_key_env)
             if parsed is None:
+                if spec.allow_custom_env:
+                    raise LLMConfigValidationError(
+                        f"Nama API key '{api_key_env}' tidak valid. Gunakan pola "
+                        f"'<NAMA>_API_KEY' atau '<NAMA>_API_KEY_<SUFFIX>' "
+                        f"(mis. GERRY_API_KEY, MY_ROUTER_API_KEY)."
+                    )
                 raise LLMConfigValidationError(
                     f"Nama API key '{api_key_env}' tidak valid. Harus mengikuti pola "
                     f"'{spec.env_prefix}_API_KEY' atau '{spec.env_prefix}_API_KEY_<SUFFIX>'."
                 )
             prefix = parsed[0]
-            if not spec.matches_env_prefix(prefix):
+            # Provider generik (allow_custom_env) menerima prefix BEBAS selama
+            # mengikuti pola baku `<PREFIX>_API_KEY`. Ini SATU aturan validasi
+            # generik yang sama; TIDAK ada daftar nama env yang di-hardcode.
+            if not spec.allow_custom_env and not spec.matches_env_prefix(prefix):
                 raise LLMConfigValidationError(
                     f"API key '{api_key_env}' bukan untuk provider type '{spec.key}'. "
                     f"Gunakan variabel dengan prefix '{spec.env_prefix}_API_KEY'."
@@ -495,16 +505,17 @@ class LLMConfigService:
             tambahan "api_key".
         """
         instance = self._require_instance(instance_id)
-        spec = provider_type_for_env_prefix(
-            parse_api_key_env_name(instance.api_key_env)[0]
-            if parse_api_key_env_name(instance.api_key_env)
-            else ""
-        )
+        # Sumber label/flag = provider_type TERDAFTAR pada instance (bukan prefix
+        # env API key). Ini penting untuk provider generik "custom" yang nama env
+        # API key-nya bebas (mis. GERRY_API_KEY) dan tidak punya prefix tetap.
+        spec = get_provider_type(instance.provider_type)
         data = instance.to_dict()
         data["provider_label"] = spec.label if spec is not None else instance.provider_type
         data["models"] = [m.to_dict() for m in self.store.list_models(instance.id)]
         data["api_key_present"] = self.has_api_key(instance.api_key_env)
         data["requires_model"] = spec.requires_model if spec is not None else True
+        data["needs_model_field"] = spec.needs_model_field if spec is not None else True
+        data["allow_custom_env"] = spec.allow_custom_env if spec is not None else False
         if include_api_key:
             data["api_key"] = (
                 self.get_api_key(instance.api_key_env) if instance.api_key_env else None

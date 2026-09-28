@@ -284,27 +284,55 @@ class GatewayService:
         except Exception:  # noqa: BLE001 - config read tidak boleh mematikan UI
             instances = []
 
-        # Default terpilih: instance enabled pertama yang punya model enabled.
-        default_instance_id = ""
-        default_model_id = ""
-        for inst in instances:
-            if not inst.get("enabled"):
-                continue
-            inst_models = inst.get("models") or []
-            enabled_models = [m for m in inst_models if m.get("enabled")] or inst_models
-            if enabled_models:
-                default_instance_id = inst.get("id", "")
-                default_model_id = enabled_models[0].get("id", "")
-                break
+        # Default terpilih DARI Provider Instance DB (aturan yang sama dipakai
+        # Consultant & runtime; lihat `_select_default_llm`).
+        selection = self._select_default_llm(instances)
 
         return {
             "providers": registry.list_providers(),
             "provider_instances": instances,
-            "provider_instance_id": default_instance_id,
-            "model_id": default_model_id,
+            "provider_instance_id": selection["instance_id"],
+            "model_id": selection["model_id"],
             "mode": settings.context.retrieval_profile,
             "modes": ["minimal", "balanced", "deep"],
         }
+
+    @staticmethod
+    def _select_default_llm(instances: List[Dict[str, Any]]) -> Dict[str, str]:
+        """Pilih Provider Instance + Model default dari instance tersimpan.
+
+        Aturan deterministik (SATU tempat, dipakai /api/config & Consultant):
+            1. instance enabled yang punya model enabled (Default UI New Task)
+               -> pakai model enabled pertama,
+            2. instance enabled yang TIDAK membutuhkan model konkret
+               (mis. "custom"/"9router") -> tanpa model,
+            3. fallback: instance enabled pertama.
+
+        Returns:
+            {"instance_id": str, "model_id": str} (kosong bila tak ada instance
+            enabled). Dipakai juga untuk memastikan Consultant TANPA
+            `provider_instance_id` memakai instance DB yang sama dengan Settings
+            (TIDAK fallback diam-diam ke konfigurasi .env lama).
+        """
+        enabled = [i for i in instances if i.get("enabled") is not False]
+        # 1) instance enabled dengan model enabled.
+        for inst in enabled:
+            models = [
+                m for m in (inst.get("models") or []) if m.get("enabled") is not False
+            ]
+            if models:
+                return {
+                    "instance_id": inst.get("id") or "",
+                    "model_id": models[0].get("id") or "",
+                }
+        # 2) instance yang tidak butuh model konkret (custom/9router).
+        for inst in enabled:
+            if inst.get("requires_model") is False:
+                return {"instance_id": inst.get("id") or "", "model_id": ""}
+        # 3) fallback: instance enabled pertama.
+        if enabled:
+            return {"instance_id": enabled[0].get("id") or "", "model_id": ""}
+        return {"instance_id": "", "model_id": ""}
 
     # ------------------------------------------------------------------ #
     # LLM Config (halaman Settings; LLMConfigService AETHER existing)
@@ -497,9 +525,10 @@ class GatewayService:
             raise ValidationError("Parameter 'provider_id' wajib diisi.")
 
         try:
-            resolved = self.llm_config_service.resolve_runtime_config(
-                provider_id, include_api_key=True
-            )
+            # Nilai api_key diperlukan untuk benar-benar memanggil endpoint;
+            # `include_api_key` default True sehingga jalur ini identik dengan
+            # yang dipakai Consultant & Agent Runtime (SATU resolver).
+            resolved = self.llm_config_service.resolve_runtime_config(provider_id)
             provider = build_provider_from_config(resolved)
         except Exception as exc:
             raise ValidationError(str(exc)) from exc
@@ -1992,15 +2021,15 @@ class GatewayService:
 
         instance_id = provider_instance_id
         if not instance_id:
+            # Default = Provider Instance DB yang SAMA dengan Settings
+            # (`_select_default_llm`), bukan fallback diam-diam ke .env lama.
             try:
-                for inst in self.list_llm_providers():
-                    if inst.get("enabled") is not False:
-                        instance_id = inst.get("id")
-                        break
+                instances = self.list_llm_providers()
             except Exception as exc:  # noqa: BLE001 - konfigurasi LLM gagal dibaca
                 raise ValidationError(
                     f"Tidak dapat membaca konfigurasi LLM: {exc}"
                 ) from exc
+            instance_id = self._select_default_llm(instances)["instance_id"]
         if not instance_id:
             raise ValidationError(
                 "Tidak ada Provider Instance yang dikonfigurasi untuk Consultant. "
@@ -2008,8 +2037,9 @@ class GatewayService:
             )
 
         try:
+            # `include_api_key` default True (nilai api_key dipakai runtime).
             resolved = self.llm_config_service.resolve_runtime_config(
-                instance_id, model_id=model_id, include_api_key=True
+                instance_id, model_id=model_id
             )
         except Exception as exc:  # noqa: BLE001 - konfigurasi provider error
             raise ValidationError(str(exc)) from exc

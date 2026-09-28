@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Type
 
 from agent_ai.providers.base import BaseProvider
+from agent_ai.providers.custom import CustomOpenAIProvider
 from agent_ai.providers.deepseek import DeepSeekProvider
 from agent_ai.providers.ollama import OllamaProvider
 from agent_ai.providers.openai_compatible import OpenAICompatibleProvider
@@ -61,6 +62,7 @@ registry.register(DeepSeekProvider)
 registry.register(OpenRouterProvider)
 registry.register(OpenAICompatibleProvider)
 registry.register(NineRouterProvider)
+registry.register(CustomOpenAIProvider)
 
 
 def get_provider(name: str) -> BaseProvider:

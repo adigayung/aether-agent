@@ -1,14 +1,19 @@
 """Provider factory: bangun provider konkret dari konfigurasi LLM (SQLite).
 
 Modul ini MENJEMBATANI domain konfigurasi LLM (`agent_ai.llm_config`) dengan
-provider konkret yang sudah ada (`agent_ai.providers.*`). Ia TIDAK membuat
-provider/abstraksi baru: hanya memetakan `provider_type` hasil
-`LLMConfigService.resolve_runtime_config(...)` ke class provider existing, dan
-menyuntikkan `api_url` / `api_key` / `model` dari konfigurasi ke config provider.
+provider konkret yang sudah ada (`agent_ai.providers.*`). Ia hanya memetakan
+`provider_type` hasil `LLMConfigService.resolve_runtime_config(...)` ke class
+provider existing, dan menyuntikkan `api_url` / `api_key` / `model` dari
+konfigurasi ke config provider. Untuk provider type generik "custom" dipakai
+SATU implementasi generik (`CustomOpenAIProvider`) — bukan kelas per-layanan.
 
 Ini melengkapi jalur default (`agent_ai.providers.registry.get_provider`) yang
 membaca dari `settings` (.env). Factory ini dipakai ketika task menunjuk
 provider instance dari konfigurasi tersimpan (UI konfigurasi LLM).
+
+Sumber tunggal kebutuhan (requires_api_key / needs_model_field) = katalog
+provider type (`agent_ai.llm_config.providers`), sehingga factory TIDAK
+menduplikasi daftar/hardcode per provider.
 
 Provider-agnostic: pemetaan `provider_type` -> class memakai kunci yang sama
 dengan `agent_ai/providers/registry.py` dan `agent_ai/llm_config/providers.py`.
@@ -20,8 +25,8 @@ from typing import Any, Dict, Optional
 
 from agent_ai.providers.base import BaseProvider, ProviderNotConfiguredError
 
-#: Provider type yang membutuhkan API key (cloud, OpenAI-compatible).
-_OPENAI_COMPATIBLE_TYPES = ("openrouter", "openai", "deepseek", "9router")
+#: Provider type yang memetakan ke implementasi OpenAI-compatible.
+_OPENAI_COMPATIBLE_TYPES = ("openrouter", "openai", "deepseek", "9router", "custom")
 
 
 def _clean(value: Any) -> str:
@@ -29,6 +34,25 @@ def _clean(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _spec(provider_type: str) -> Any:
+    """Ambil spec provider type dari katalog (None bila tak dikenal)."""
+    from agent_ai.llm_config.providers import get_provider_type
+
+    return get_provider_type(provider_type)
+
+
+def _requires_api_key(provider_type: str) -> bool:
+    """Apakah provider type ini mewajibkan API key (dari katalog)."""
+    spec = _spec(provider_type)
+    return spec.requires_api_key if spec is not None else True
+
+
+def _needs_model_field(provider_type: str) -> bool:
+    """Apakah AETHER menyertakan field `model` pada request (dari katalog)."""
+    spec = _spec(provider_type)
+    return spec.needs_model_field if spec is not None else True
 
 
 def _build_openai_compatible_config(
@@ -56,7 +80,9 @@ def _build_openai_compatible_config(
         from agent_ai.config.settings import NineRouterConfig
 
         config_cls = NineRouterConfig
-        # 9Router tidak membutuhkan model; jangan set model di kwargs.
+        # 9Router menentukan model sendiri; payload provider default ke
+        # "auto-test". Jangan set model kosong di kwargs agar tidak menimpa
+        # perilaku tersebut.
         model = ""
     else:  # pragma: no cover - dijaga caller
         raise ProviderNotConfiguredError(
@@ -90,11 +116,13 @@ def build_provider_from_config(config: Dict[str, Any]) -> BaseProvider:
 
     Returns:
         Instance provider existing (`OllamaProvider`, `OpenRouterProvider`,
-        `OpenAICompatibleProvider`, atau `DeepSeekProvider`).
+        `DeepSeekProvider`, `NineRouterProvider`, `OpenAICompatibleProvider`,
+        atau `CustomOpenAIProvider` untuk provider type "custom").
 
     Raises:
-        ProviderNotConfiguredError: provider type tidak dikenal, atau provider
-            cloud tidak memiliki API key (gagal lebih awal dengan pesan jelas).
+        ProviderNotConfiguredError: provider type tidak dikenal, provider cloud
+            tidak memiliki API key, atau provider "custom" belum punya Base URL
+            (gagal lebih awal dengan pesan jelas).
     """
     provider_type = _clean(config.get("provider_type")).lower()
     api_url = _clean(config.get("api_url"))
@@ -128,8 +156,35 @@ def build_provider_from_config(config: Dict[str, Any]) -> BaseProvider:
             kwargs["timeout"] = int(timeout)
         return OllamaProvider(config=OllamaConfig(**kwargs))
 
+    # Provider GENERIK: endpoint OpenAI-compatible apa pun (Gerry/Bariska/9Router/
+    # server lokal). Base URL & model bebas; API key opsional. Nilai api_key dan
+    # model SELALU di-set eksplisit (walau kosong) agar TIDAK ada fallback diam-
+    # diam ke default/env provider lain.
+    if provider_type == "custom":
+        if not api_url:
+            raise ProviderNotConfiguredError(
+                f"Provider instance '{instance_name}' (custom) belum memiliki "
+                f"Base URL. Isi Base URL endpoint OpenAI-compatible (mis. "
+                f"http://host:port/v1) di Settings."
+            )
+        from agent_ai.config.settings import OpenAIConfig
+        from agent_ai.providers.custom import CustomOpenAIProvider
+
+        custom_kwargs: Dict[str, Any] = {
+            "base_url": api_url,
+            "api_key": api_key,
+            "model": model,
+        }
+        if timeout:
+            custom_kwargs["timeout"] = int(timeout)
+        if context_window:
+            custom_kwargs["context_window"] = int(context_window)
+        provider = CustomOpenAIProvider(config=OpenAIConfig(**custom_kwargs))
+        provider.send_model_field = _needs_model_field(provider_type)
+        return provider
+
     if provider_type in _OPENAI_COMPATIBLE_TYPES:
-        if not api_key:
+        if _requires_api_key(provider_type) and not api_key:
             raise ProviderNotConfiguredError(
                 f"Provider instance '{instance_name}' ({provider_type}) belum "
                 f"memiliki API key. Set kredensial di .env lalu pilih ulang."
@@ -140,22 +195,26 @@ def build_provider_from_config(config: Dict[str, Any]) -> BaseProvider:
         if provider_type == "openrouter":
             from agent_ai.providers.openrouter import OpenRouterProvider
 
-            return OpenRouterProvider(config=provider_config)
-        if provider_type == "deepseek":
+            provider = OpenRouterProvider(config=provider_config)
+        elif provider_type == "deepseek":
             from agent_ai.providers.deepseek import DeepSeekProvider
 
-            return DeepSeekProvider(config=provider_config)
-        if provider_type == "9router":
+            provider = DeepSeekProvider(config=provider_config)
+        elif provider_type == "9router":
             from agent_ai.providers.nine_router import NineRouterProvider
 
-            return NineRouterProvider(config=provider_config)
-        from agent_ai.providers.openai_compatible import OpenAICompatibleProvider
+            provider = NineRouterProvider(config=provider_config)
+        else:
+            from agent_ai.providers.openai_compatible import OpenAICompatibleProvider
 
-        return OpenAICompatibleProvider(config=provider_config)
+            provider = OpenAICompatibleProvider(config=provider_config)
+        # Hormati katalog: apakah field `model` dikirim ke endpoint.
+        provider.send_model_field = _needs_model_field(provider_type)
+        return provider
 
     raise ProviderNotConfiguredError(
         f"Provider type '{provider_type or '(kosong)'}' tidak dikenal. "
-        f"Gunakan salah satu dari: ollama, openrouter, openai, deepseek."
+        f"Gunakan salah satu dari: ollama, openrouter, openai, deepseek, 9router, custom."
     )
 
 

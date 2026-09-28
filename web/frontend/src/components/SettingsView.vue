@@ -35,13 +35,16 @@ const credentials = ref([]);
 const providerTypes = ref([]);
 const providers = ref([]);
 
-// Form: provider instance baru.
+// Form: provider instance (mode CREATE bila id kosong, mode EDIT bila terisi).
 const providerForm = reactive({
   name: "",
   provider_type: "",
   api_key_env: "",
   api_url: "",
+  enabled: true,
 });
+// id instance yang sedang diedit ("" = tambah instance baru).
+const editingProviderId = ref("");
 // Form: credential (.env) baru.
 const credentialForm = reactive({ name: "", value: "" });
 // Draft nama model per provider instance (key = provider id).
@@ -52,11 +55,18 @@ const providerTypeSpec = computed(() => {
   for (const t of providerTypes.value) map[t.key] = t;
   return map;
 });
-// Provider type terpilih butuh API key? (Ollama lokal: tidak).
-// Dipakai untuk menyembunyikan field api_key_env HANYA pada provider lokal.
-const providerNeedsApiKey = computed(() => {
+// Field api_key_env ditampilkan untuk provider cloud ATAU provider generik
+// (custom) yang membolehkan nama env BEBAS. Disembunyikan HANYA untuk provider
+// lokal murni yang tidak punya API key (mis. Ollama).
+const showApiKeyEnv = computed(() => {
   const spec = providerTypeSpec.value[providerForm.provider_type];
-  return spec ? spec.requires_api_key !== false : true;
+  if (!spec) return true;
+  return spec.requires_api_key !== false || spec.allow_custom_env === true;
+});
+// Nama env API key boleh dikosongkan (provider generik/lokal).
+const apiKeyEnvOptional = computed(() => {
+  const spec = providerTypeSpec.value[providerForm.provider_type];
+  return spec ? spec.allow_custom_env === true || spec.requires_api_key === false : false;
 });
 const providerTypeLabel = computed(() => {
   const map = {};
@@ -121,25 +131,62 @@ function onProviderTypeChange() {
   const spec = providerTypeSpec.value[providerForm.provider_type];
   if (!spec) return;
   providerForm.api_url = spec.default_api_url || "";
-  // Provider lokal (Ollama) tidak butuh API key: kosongkan api_key_env.
-  // Provider cloud tetap memakai <PREFIX>_API_KEY seperti sebelumnya.
-  providerForm.api_key_env = spec.requires_api_key ? `${spec.env_prefix}_API_KEY` : "";
+  if (spec.allow_custom_env) {
+    // Provider generik "Custom OpenAI Compatible": TIDAK ada prefix tetap.
+    // Jangan prefill nama provider tertentu — biarkan user mengisi bebas
+    // (mis. GERRY_API_KEY). Bila sudah ada nilai, pertahankan.
+    providerForm.api_key_env = providerForm.api_key_env || "";
+  } else {
+    // Provider lokal (Ollama) tidak butuh API key: kosongkan api_key_env.
+    // Provider cloud tetap memakai <PREFIX>_API_KEY seperti sebelumnya.
+    providerForm.api_key_env = spec.requires_api_key ? `${spec.env_prefix}_API_KEY` : "";
+  }
+}
+
+function resetProviderForm() {
+  providerForm.name = "";
+  providerForm.api_key_env = "";
+  providerForm.api_url = "";
+  providerForm.enabled = true;
+  editingProviderId.value = "";
+  onProviderTypeChange();
+}
+
+// Muat instance terpilih ke form (mode edit).
+function startEditProvider(p) {
+  editingProviderId.value = p.id;
+  providerForm.name = p.name || "";
+  providerForm.provider_type = p.provider_type || "";
+  providerForm.api_key_env = p.api_key_env || "";
+  providerForm.api_url = p.api_url || "";
+  providerForm.enabled = p.enabled !== false;
+}
+
+function cancelEditProvider() {
+  resetProviderForm();
 }
 
 function submitProvider() {
   const payload = {
     name: providerForm.name,
     provider_type: providerForm.provider_type,
-    // Provider lokal (Ollama) selalu dikirim tanpa api_key_env.
-    api_key_env: providerNeedsApiKey.value ? providerForm.api_key_env : "",
+    // Provider lokal murni (Ollama) dikirim tanpa api_key_env; provider generik
+    // (custom) boleh memakai api_key_env bebas (opsional).
+    api_key_env: showApiKeyEnv.value ? providerForm.api_key_env : "",
     api_url: providerForm.api_url,
   };
-  run(async () => {
-    await createLLMProvider(payload);
-    providerForm.name = "";
-    providerForm.api_key_env = "";
-    providerForm.api_url = "";
-  }, "Provider instance dibuat.");
+  const editingId = editingProviderId.value;
+  if (editingId) {
+    run(async () => {
+      await updateLLMProvider(editingId, payload);
+      resetProviderForm();
+    }, "Provider instance diperbarui.");
+  } else {
+    run(async () => {
+      await createLLMProvider(payload);
+      resetProviderForm();
+    }, "Provider instance dibuat.");
+  }
 }
 
 function toggleProvider(p) {
@@ -158,6 +205,12 @@ function submitModel(p) {
     await createLLMModel({ provider_id: p.id, model_name: name });
     modelDrafts[p.id] = "";
   }, "Model ditambahkan.");
+}
+
+// Isi cepat nilai model "auto" (routing otomatis di sisi server) untuk provider
+// yang mendukungnya — user tidak dipaksa memilih model konkret.
+function setAutoModel(p) {
+  modelDrafts[p.id] = "auto";
 }
 
 function toggleModel(m) {
@@ -279,6 +332,9 @@ onMounted(load);
             <button class="btn-aether btn-ghost-a" :disabled="busy" @click="testProvider(p)">
               Test
             </button>
+            <button class="btn-aether btn-ghost-a" :disabled="busy" @click="startEditProvider(p)">
+              Edit
+            </button>
             <button class="btn-aether btn-danger-a" :disabled="busy" @click="removeProvider(p)">
               Delete
             </button>
@@ -306,35 +362,70 @@ onMounted(load);
             <input
               v-model="modelDrafts[p.id]"
               class="sv-input"
-              placeholder="Nama model (mis. openai/gpt-4o-mini)"
+              placeholder="Model (mis. openai/gpt-4o-mini, deepseek-v4.1-flash, auto)"
               @keyup.enter="submitModel(p)"
             />
+            <button
+              v-if="p.requires_model === false || p.allow_custom_env"
+              class="sv-mini"
+              :disabled="busy"
+              title="Set model ke 'auto' (routing otomatis)"
+              @click="setAutoModel(p)"
+            >
+              Auto
+            </button>
             <button class="btn-aether btn-primary-a" :disabled="busy" @click="submitModel(p)">
               Add model
             </button>
           </div>
+          <div v-if="p.requires_model === false" class="sv-models-empty">
+            Model opsional untuk tipe ini — boleh diisi nilai routing seperti
+            “auto”, atau dikosongkan bila server menentukan model sendiri.
+          </div>
         </div>
       </div>
 
-      <!-- Form: provider instance baru. -->
-      <div class="sv-form">
-        <div class="sv-form-title">Add provider instance</div>
+      <!-- Form: provider instance (create / edit). -->
+      <div class="sv-form" :class="{ 'sv-form-editing': !!editingProviderId }">
+        <div class="sv-form-title">
+          {{ editingProviderId ? "Edit provider instance" : "Add provider instance" }}
+        </div>
         <div class="sv-form-grid">
-          <input v-model="providerForm.name" class="sv-input" placeholder="Nama instance" />
+          <input
+            v-model="providerForm.name"
+            class="sv-input"
+            placeholder="Nama instance (bebas, mis. Gerry)"
+          />
           <select v-model="providerForm.provider_type" class="sv-input" @change="onProviderTypeChange">
             <option v-for="t in providerTypes" :key="t.key" :value="t.key">{{ t.label }}</option>
           </select>
           <input
-            v-if="providerNeedsApiKey"
+            v-model="providerForm.api_url"
+            class="sv-input"
+            placeholder="Base URL (mis. http://gerry.com/v1)"
+          />
+          <input
+            v-if="showApiKeyEnv"
             v-model="providerForm.api_key_env"
             class="sv-input"
-            placeholder="Nama variabel .env API key (mis. OPENROUTER_API_KEY)"
+            :placeholder="
+              apiKeyEnvOptional
+                ? 'API key env (opsional, mis. GERRY_API_KEY)'
+                : 'Nama variabel .env API key (mis. OPENROUTER_API_KEY)'
+            "
           />
-          <input v-model="providerForm.api_url" class="sv-input" placeholder="Base API URL" />
         </div>
         <div class="sv-form-actions">
+          <button
+            v-if="editingProviderId"
+            class="btn-aether btn-ghost-a"
+            :disabled="busy"
+            @click="cancelEditProvider"
+          >
+            Cancel
+          </button>
           <button class="btn-aether btn-primary-a" :disabled="busy" @click="submitProvider">
-            Create provider
+            {{ editingProviderId ? "Save changes" : "Create provider" }}
           </button>
         </div>
       </div>
@@ -532,6 +623,10 @@ onMounted(load);
   padding: 14px;
   display: grid;
   gap: 10px;
+}
+.sv-form-editing {
+  border-style: solid;
+  border-color: var(--accent);
 }
 .sv-form-title {
   font-size: 12.5px;

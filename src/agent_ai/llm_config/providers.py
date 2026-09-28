@@ -44,8 +44,16 @@ class ProviderTypeSpec:
         env_prefix: prefix env untuk API key (mis. "OPENROUTER").
         default_api_url: API URL default (base URL) provider.
         requires_api_key: True bila API key wajib (cloud). False untuk lokal.
-        requires_model: True bila provider membutuhkan model. False untuk provider
-            seperti 9Router yang menentukan model sendiri.
+        requires_model: True bila USER harus memilih model (model selector di UI
+            ditampilkan dan model dianggap wajib). DUA hal ini TERPISAH: provider
+            bisa tetap MENGIRIM field `model` (mis. nilai "auto"/"auto-test")
+            walau user TIDAK dipaksa memilih model konkret.
+        needs_model_field: True bila AETHER menyertakan field `model` pada request
+            ke API. False untuk endpoint yang menolak field `model`.
+        allow_custom_env: True bila nama variabel env API key boleh memakai prefix
+            BEBAS (bukan harus sama dengan `env_prefix`). Dipakai oleh provider
+            generik "Custom OpenAI Compatible" agar user bebas memilih nama env
+            (mis. GERRY_API_KEY, BARISKA_API_KEY) tanpa hardcode per layanan.
         env_prefix_aliases: prefix env TAMBAHAN (alias) yang juga dianggap milik
             provider type ini (mis. 9Router = "SEMBILAN_ROUTER" dengan alias
             "9ROUTER"). Kosong bila tidak ada alias.
@@ -57,6 +65,8 @@ class ProviderTypeSpec:
     default_api_url: str
     requires_api_key: bool
     requires_model: bool = True
+    needs_model_field: bool = True
+    allow_custom_env: bool = False
     env_prefix_aliases: Tuple[str, ...] = ()
 
     def matches_env_prefix(self, prefix: str) -> bool:
@@ -81,6 +91,8 @@ class ProviderTypeSpec:
             "default_api_url": self.default_api_url,
             "requires_api_key": self.requires_api_key,
             "requires_model": self.requires_model,
+            "needs_model_field": self.needs_model_field,
+            "allow_custom_env": self.allow_custom_env,
         }
 
 
@@ -126,6 +138,23 @@ _PROVIDER_TYPES: Dict[str, ProviderTypeSpec] = {
             default_api_url="http://127.0.0.1:20128/v1",
             requires_api_key=True,
             requires_model=False,
+        ),
+        # Provider GENERIK untuk endpoint apa pun yang kompatibel dengan skema
+        # OpenAI (/chat/completions). Ini pengganti provider per-layanan
+        # (Gerry/Bariska/9Router/lokal): user bebas menentukan nama instance,
+        # Base URL, nama env API key, dan model (termasuk "auto"/alias routing).
+        #   - requires_api_key=False: endpoint lokal boleh tanpa API key.
+        #   - requires_model=False : user TIDAK dipaksa memilih model konkret;
+        #     nilai `model` tetap dikirim bila ada (mis. "auto").
+        #   - allow_custom_env=True: nama env API key bebas (mis. GERRY_API_KEY).
+        ProviderTypeSpec(
+            key="custom",
+            label="Custom OpenAI Compatible",
+            env_prefix="",
+            default_api_url="",
+            requires_api_key=False,
+            requires_model=False,
+            allow_custom_env=True,
         ),
     )
 }

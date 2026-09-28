@@ -48,13 +48,13 @@ const providerNeedsModel = computed(() => {
 });
 
 // Model difilter: HANYA model milik Provider Instance yang dipilih.
-// Untuk provider dengan requires_model=False (seperti 9Router), model dianggap
-// tidak diperlukan — model selector disembunyikan.
+// Model SELALU ditampilkan bila instance memilikinya — termasuk provider yang
+// model-nya OPSIONAL (mis. "custom" untuk routing "auto" atau 9Router), sehingga
+// user tetap bisa memilih. Bila dikosongkan, AETHER memakai model enabled
+// pertama (atau server menentukan sendiri untuk provider routing).
 const modelOptions = computed(() => {
   const inst = providerOptions.value.find((p) => p.id === props.providerInstanceId);
   if (!inst) return [];
-  // Provider seperti 9Router tidak membutuhkan model
-  if (inst.requires_model === false) return [];
   return (inst.models || []).filter((m) => m.enabled !== false);
 });
 

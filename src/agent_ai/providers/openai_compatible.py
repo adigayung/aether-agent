@@ -49,6 +49,11 @@ class OpenAICompatibleProvider(BaseProvider):
     #: Retry terjadi di dalam generate() sehingga loop/history tidak terpengaruh.
     retry_policy: Optional[InfrastructureRetryPolicy] = None
 
+    #: True bila field `model` disertakan pada payload. Endpoint yang menolak
+    #: field `model` (routing murni di sisi server) dapat men-set False. Diisi
+    #: oleh factory dari katalog provider type (`needs_model_field`).
+    send_model_field: bool = True
+
     def __init__(
         self,
         config: Optional[OpenAIConfig] = None,
@@ -147,9 +152,16 @@ class OpenAICompatibleProvider(BaseProvider):
         chat_messages = [self._to_openai_message(m) for m in chat_messages]
 
         payload: Dict[str, Any] = {
-            "model": opts.model or self.config.model,
             "messages": chat_messages,
         }
+        # Model bersifat FLEKSIBEL: nilai bisa model konkret ("deepseek-v4.1-flash"),
+        # nilai routing ("auto"/"auto-test"), atau KOSONG (server menentukan
+        # sendiri). Field `model` hanya disertakan bila ada nilainya dan provider
+        # memang menerimanya (`send_model_field`). Untuk semua provider bawaan
+        # model selalu ada, sehingga perilaku lama TIDAK berubah.
+        model = opts.model or self.config.model
+        if model and self.send_model_field:
+            payload["model"] = model
         if opts.temperature is not None:
             payload["temperature"] = opts.temperature
         if opts.max_tokens is not None:
