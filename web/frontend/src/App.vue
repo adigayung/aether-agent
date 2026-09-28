@@ -114,6 +114,9 @@ const selectedProjectId = ref("");
 const projectToDelete = ref(null);
 // Konfirmasi Close Project (dialog sebelum benar-benar menutup project).
 const closeProjectConfirm = ref(false);
+// Konfirmasi Stop Task (confirmation layer di depan aksi Stop agent-input).
+const stopConfirmOpen = ref(false);
+const stopInProgress = ref(false);
 const submitting = ref(false);
 const error = ref("");
 const notice = ref("");
@@ -1158,6 +1161,43 @@ async function stopTask() {
   }
 }
 
+// --- Stop confirmation (confirmation layer di depan aksi Stop) --------------
+function requestStop() {
+  if (!isRunning.value) return;
+  if (stopInProgress.value) return;
+  stopConfirmOpen.value = true;
+}
+
+function cancelStopConfirm() {
+  if (stopInProgress.value) return;
+  stopConfirmOpen.value = false;
+}
+
+async function confirmStop() {
+  if (stopInProgress.value) return;
+  stopInProgress.value = true;
+  stopConfirmOpen.value = false;
+  try {
+    await stopTask();
+  } finally {
+    stopInProgress.value = false;
+  }
+}
+
+function onStopConfirmKeydown(e) {
+  if (e.key === 'Escape' && stopConfirmOpen.value) {
+    cancelStopConfirm();
+  }
+}
+
+watch(stopConfirmOpen, (open) => {
+  if (open) {
+    document.addEventListener('keydown', onStopConfirmKeydown);
+  } else {
+    document.removeEventListener('keydown', onStopConfirmKeydown);
+  }
+});
+
 // Buka task dari persistent log (History/Activity/Report API). Berfungsi untuk
 // task lama walau SessionStore sudah kosong / proses sudah restart.
 async function openHistoryTask(taskId) {
@@ -1454,6 +1494,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (source) source.close();
+  document.removeEventListener('keydown', onStopConfirmKeydown);
   // Bersihkan interval durasi Task Card agar tidak ada timer nyangkut.
   stopDurationTimer();
   // Bersihkan timer feedback tombol Copy Agent Activity.
@@ -1781,7 +1822,8 @@ onBeforeUnmount(() => {
                 class="stop-btn"
                 type="button"
                 title="Stop running task"
-                @click="stopTask"
+                :disabled="stopInProgress"
+                @click="requestStop"
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
               </button>
@@ -2014,7 +2056,7 @@ onBeforeUnmount(() => {
           :model-id="selectedModelId"
           :mode="selectedMode"
           @submit="submitTask"
-          @stop="stopTask"
+          @stop="requestStop"
           @update:provider-instance-id="selectedProviderInstanceId = $event"
           @update:model-id="selectedModelId = $event"
           @update:mode="selectedMode = $event"
@@ -2091,6 +2133,21 @@ onBeforeUnmount(() => {
         <div class="modal-actions">
           <button type="button" class="btn-ghost" @click="cancelCloseProject">Cancel</button>
           <button type="button" class="btn-primary" @click="confirmCloseProject">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ STOP TASK (konfirmasi) =============================== -->
+    <div v-if="stopConfirmOpen" class="modal-backdrop" @click.self="cancelStopConfirm">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="stop-confirm-title">
+        <div id="stop-confirm-title" class="modal-title">Stop Task?</div>
+        <div class="modal-body">
+          Task yang sedang berjalan akan dihentikan.<br />
+          Apakah Anda yakin ingin berhenti?
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn-ghost" :disabled="stopInProgress" @click="cancelStopConfirm">Cancel</button>
+          <button type="button" class="btn-danger" :disabled="stopInProgress" @click="confirmStop">Stop</button>
         </div>
       </div>
     </div>
