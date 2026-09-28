@@ -18,8 +18,15 @@ Perbedaan dari `OpenAICompatibleProvider` (dipakai OpenAI/DeepSeek/OpenRouter):
     - API key OPSIONAL: sebagian endpoint lokal tidak butuh Bearer token. Bila
       kosong, header Authorization tidak dikirim.
     - Model FLEKSIBEL: nilai bisa model konkret, alias routing ("auto"), atau
-      kosong (server yang menentukan). Provider tetap mengirim field `model`
-      selama ada nilainya (lihat `send_model_field`).
+      kosong. Provider tetap mengirim field `model` selama ada nilainya (lihat
+      `send_model_field`).
+    - Model DISCOVERY: bila instance TIDAK punya model eksplisit, AETHER
+      melakukan `GET {base_url}/models` (OpenAI-compatible) dan memakai model
+      ID pertama yang valid untuk `POST /chat/completions`. Ini meniru klien
+      OpenAI-compatible pada umumnya dan memperbaiki endpoint yang menolak
+      request tanpa model (mis. `403 no access to model`). Bila endpoint tidak
+      menyediakan `/models`, perilaku lama (field `model` di-omit -> server
+      menentukan) tetap berlaku. TIDAK ada hardcode nama layanan/model.
 """
 
 from __future__ import annotations
@@ -39,6 +46,12 @@ class CustomOpenAIProvider(OpenAICompatibleProvider):
     #: User TIDAK dipaksa memilih model konkret; nilai `model` (mis. "auto")
     #: tetap dikirim bila ada.
     requires_model = False
+
+    #: Endpoint OpenAI-compatible generik: bila instance tidak punya model
+    #: eksplisit, AETHER menemukan model ID valid lewat `GET {base_url}/models`
+    #: (lihat `_discover_first_model`). Factory juga menyetel ini dari katalog
+    #: provider type (`supports_model_discovery`).
+    supports_model_discovery = True
 
     def __init__(
         self,

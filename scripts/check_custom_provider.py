@@ -56,6 +56,9 @@ BARISKA_API_KEY={BARISKA_SECRET}
 # Fake HTTP (tanpa jaringan): menangkap URL + payload + header
 # --------------------------------------------------------------------------- #
 _CAPTURED: list = []
+#: Respons `GET {base_url}/models` (bisa diubah test). Default OpenAI-compatible.
+_MODELS_DATA: list = [{"id": "discovered-model-from-models", "object": "model"}]
+_MODELS_STATUS: int = 200
 
 
 class _FakeResponse:
@@ -72,11 +75,26 @@ class _FakeResponse:
         }
 
 
+class _FakeModelsResponse:
+    def __init__(self, status_code: int = 200, data: list | None = None) -> None:
+        self.status_code = status_code
+        self._data = data if data is not None else _MODELS_DATA
+        self.text = "{}"
+
+    def json(self):
+        return {"object": "list", "data": self._data}
+
+
 class _FakeRequests:
     @staticmethod
     def post(url, json=None, headers=None, timeout=None):  # noqa: A002 - mirror nama param
         _CAPTURED.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
         return _FakeResponse()
+
+    @staticmethod
+    def get(url, headers=None, timeout=None):  # noqa: A002 - mirror nama param
+        _CAPTURED.append({"url": url, "json": None, "headers": headers, "timeout": timeout, "method": "GET"})
+        return _FakeModelsResponse(status_code=_MODELS_STATUS, data=_MODELS_DATA)
 
 
 def _install_fake_http() -> None:
@@ -126,11 +144,14 @@ def _check_catalog() -> None:
     assert spec.requires_api_key is False, spec
     assert spec.requires_model is False, spec
     assert spec.allow_custom_env is True, spec
+    assert spec.supports_model_discovery is True, spec
     d = spec.to_dict()
     for key in ("key", "label", "env_prefix", "default_api_url", "requires_api_key",
-                "requires_model", "needs_model_field", "allow_custom_env"):
+                "requires_model", "needs_model_field", "allow_custom_env",
+                "supports_model_discovery"):
         assert key in d, (key, d)
     print("[A] katalog: provider type 'custom' (Custom OpenAI Compatible) ada")
+    print("    (supports_model_discovery=True -> GET /models bila model kosong)")
 
 
 # --------------------------------------------------------------------------- #
@@ -285,7 +306,7 @@ def _check_custom_runtime(svc) -> None:
     assert "Authorization" not in _CAPTURED[-1]["headers"], _CAPTURED[-1]["headers"]
     print("[E] custom keyless -> request tanpa header Authorization OK")
 
-    # --- model kosong (tak ada model) -> field model TIDAK dikirim ---
+    # --- model kosong (tak ada model) -> DISCOVERY dari GET /models ---
     nomodel = svc.create_provider_instance(
         name="No Model", provider_type="custom", api_key_env="",
         api_url="http://127.0.0.1:4321/v1",
@@ -293,11 +314,33 @@ def _check_custom_runtime(svc) -> None:
     resolved_nomodel = svc.resolve_runtime_config(nomodel.id)
     assert resolved_nomodel["model"] == "", resolved_nomodel
     provider_nomodel = build_provider_from_config(resolved_nomodel)
+    assert provider_nomodel.supports_model_discovery is True, provider_nomodel
     _freeze_retry(provider_nomodel)
     _install_fake_http()
     provider_nomodel.generate(prompt="ping")
+    get_calls = [c for c in _CAPTURED if c.get("method") == "GET"]
+    assert get_calls, "discovery harus GET /models"
+    assert get_calls[0]["url"] == "http://127.0.0.1:4321/v1/models", get_calls[0]["url"]
+    assert _CAPTURED[-1]["json"]["model"] == _MODELS_DATA[0]["id"], _CAPTURED[-1]["json"]
+    print("[D] custom tanpa model -> GET /models, model hasil discovery dipakai OK")
+
+    # --- model kosong + endpoint TIDAK menyediakan /models -> field omitted ---
+    global _MODELS_STATUS
+    nomodel2 = svc.create_provider_instance(
+        name="No Model No Discovery", provider_type="custom", api_key_env="",
+        api_url="http://127.0.0.1:4322/v1",
+    )
+    resolved_nomodel2 = svc.resolve_runtime_config(nomodel2.id)
+    provider_nomodel2 = build_provider_from_config(resolved_nomodel2)
+    _freeze_retry(provider_nomodel2)
+    _install_fake_http()
+    _MODELS_STATUS = 404
+    try:
+        provider_nomodel2.generate(prompt="ping")
+    finally:
+        _MODELS_STATUS = 200
     assert "model" not in _CAPTURED[-1]["json"], _CAPTURED[-1]["json"]
-    print("[D] custom tanpa model -> field 'model' di-omit (server menentukan) OK")
+    print("[D] custom tanpa model + /models 404 -> field 'model' di-omit OK")
 
     # --- Base URL wajib: custom tanpa Base URL -> error jelas (bukan fallback) ---
     from agent_ai.providers.base import ProviderNotConfiguredError

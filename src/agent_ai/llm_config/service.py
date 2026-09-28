@@ -135,6 +135,7 @@ class LLMConfigService:
         api_key_env: str = "",
         api_url: str = "",
         enabled: bool = True,
+        model: Optional[str] = None,
     ) -> ProviderInstance:
         """Buat provider instance baru.
 
@@ -145,6 +146,8 @@ class LLMConfigService:
                 cloud; boleh kosong untuk provider lokal (Ollama).
             api_url: base URL API. Kosong -> default dari provider type.
             enabled: aktif/tidak.
+            model: nama model (opsional). Bila diisi, auto-buat model record
+                sehingga provider langsung punya satu model terseleksi.
 
         Raises:
             LLMConfigValidationError: input tidak valid.
@@ -165,13 +168,22 @@ class LLMConfigService:
 
         clean_url = (api_url or "").strip() or spec.default_api_url
         try:
-            return self.store.create_provider_instance(
+            instance = self.store.create_provider_instance(
                 name=clean_name,
                 provider_type=spec.key,
                 api_url=clean_url,
                 api_key_env=clean_env,
                 enabled=bool(enabled),
             )
+            # Auto-create model record bila model_name diberikan
+            clean_model = (model or "").strip()
+            if clean_model:
+                self.store.create_model(
+                    provider_id=instance.id,
+                    model_name=clean_model,
+                    enabled=True,
+                )
+            return instance
         except sqlite3.IntegrityError as exc:  # noqa: BLE001 - race/uniqueness
             raise LLMConfigConflictError(
                 f"Provider instance dengan nama '{clean_name}' sudah ada."

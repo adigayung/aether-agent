@@ -55,6 +55,12 @@ def _needs_model_field(provider_type: str) -> bool:
     return spec.needs_model_field if spec is not None else True
 
 
+def _supports_model_discovery(provider_type: str) -> bool:
+    """Apakah provider boleh menemukan model via `GET /models` (dari katalog)."""
+    spec = _spec(provider_type)
+    return spec.supports_model_discovery if spec is not None else False
+
+
 def _build_openai_compatible_config(
     provider_type: str,
     api_url: str,
@@ -181,6 +187,9 @@ def build_provider_from_config(config: Dict[str, Any]) -> BaseProvider:
             custom_kwargs["context_window"] = int(context_window)
         provider = CustomOpenAIProvider(config=OpenAIConfig(**custom_kwargs))
         provider.send_model_field = _needs_model_field(provider_type)
+        # Bila instance tidak punya model eksplisit, provider generik boleh
+        # menemukan model ID valid lewat `GET {base_url}/models`.
+        provider.supports_model_discovery = _supports_model_discovery(provider_type)
         return provider
 
     if provider_type in _OPENAI_COMPATIBLE_TYPES:
@@ -210,6 +219,8 @@ def build_provider_from_config(config: Dict[str, Any]) -> BaseProvider:
             provider = OpenAICompatibleProvider(config=provider_config)
         # Hormati katalog: apakah field `model` dikirim ke endpoint.
         provider.send_model_field = _needs_model_field(provider_type)
+        # Discovery model hanya untuk provider yang mendukungnya (katalog).
+        provider.supports_model_discovery = _supports_model_discovery(provider_type)
         return provider
 
     raise ProviderNotConfiguredError(

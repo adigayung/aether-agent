@@ -54,6 +54,17 @@ class OpenAICompatibleProvider(BaseProvider):
     #: oleh factory dari katalog provider type (`needs_model_field`).
     send_model_field: bool = True
 
+    #: True bila provider boleh MENEMUKAN model lewat `GET {base_url}/models`
+    #: ketika instance TIDAK punya model eksplisit. Default False: provider
+    #: cloud (OpenAI/DeepSeek/OpenRouter) dan 9Router TIDAK berubah. Diisi oleh
+    #: factory dari katalog (`supports_model_discovery`); provider generik
+    #: "custom" mengaktifkannya.
+    supports_model_discovery: bool = False
+
+    #: Cache hasil discovery (per instance). Dibaca via `_discover_first_model`.
+    _discovered_model: str = ""
+    _model_discovery_done: bool = False
+
     def __init__(
         self,
         config: Optional[OpenAIConfig] = None,
@@ -138,6 +149,80 @@ class OpenAICompatibleProvider(BaseProvider):
         headers.update(self._extra_headers())
         return headers
 
+    def _discover_first_model(self) -> str:
+        """GET ``{base_url}/models`` dan ambil model ID PERTAMA yang valid.
+
+        Dipanggil HANYA bila provider mengizinkan discovery
+        (`supports_model_discovery`) dan instance TIDAK punya model eksplisit.
+        Ini meniru klien OpenAI-compatible pada umumnya: sebagian gateway
+        menolak request TANPA field `model` (mis. ``403 no access to model``),
+        jadi model ID yang valid diambil dari endpoint alih-alih dikosongkan.
+
+        Format respons yang didukung (provider-agnostic, tanpa hardcode
+        layanan/model): ``{"data": [{"id": ...}, ...]}`` (OpenAI/OpenRouter),
+        ``{"models": [...]}`` (mis. Ollama native), atau list biasa. Setiap item
+        boleh berupa string atau object dengan kunci ``id``/``name``/``model``.
+
+        Hasil di-cache per instance (satu GET per provider). Kegagalan apa pun
+        (network / HTTP non-2xx / format tak dikenal) mengembalikan ``""``
+        sehingga perilaku lama (field `model` di-omit -> server menentukan)
+        tetap berlaku tanpa menambah kegagalan baru.
+        """
+        if getattr(self, "_model_discovery_done", False):
+            return getattr(self, "_discovered_model", "")
+
+        base_url = (getattr(self.config, "base_url", "") or "").rstrip("/")
+        if not base_url:
+            return ""
+        url = f"{base_url}/models"
+        # Tandai "sudah dicoba" SEGERA setelah percobaan pertama: discovery
+        # adalah operasi opsional, cukup sekali per provider instance walau
+        # gagal (hindari GET berulang di setiap iteration task yang panjang).
+        self._model_discovery_done = True
+        try:
+            response = requests.get(
+                url,
+                headers=self._build_headers(),
+                timeout=getattr(self.config, "timeout", None),
+            )
+        except Exception:  # noqa: BLE001 - discovery opsional, TIDAK boleh crash
+            return ""
+
+        if getattr(response, "status_code", 200) >= 400:
+            return ""
+        try:
+            data = response.json()
+        except Exception:  # noqa: BLE001 - body bukan JSON -> tidak ada model
+            return ""
+
+        model_id = self._first_model_id(data)
+        self._discovered_model = model_id
+        return model_id
+
+    @staticmethod
+    def _first_model_id(data: Any) -> str:
+        """Ambil model ID pertama dari respons ``/models`` (defensif)."""
+        items: Optional[List[Any]] = None
+        if isinstance(data, dict):
+            for key in ("data", "models"):
+                value = data.get(key)
+                if isinstance(value, list):
+                    items = value
+                    break
+        elif isinstance(data, list):
+            items = data
+        if not items:
+            return ""
+        for item in items:
+            if isinstance(item, str) and item.strip():
+                return item.strip()
+            if isinstance(item, dict):
+                for key in ("id", "name", "model"):
+                    value = item.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+        return ""
+
     def _build_payload(
         self,
         prompt: Optional[str],
@@ -155,11 +240,15 @@ class OpenAICompatibleProvider(BaseProvider):
             "messages": chat_messages,
         }
         # Model bersifat FLEKSIBEL: nilai bisa model konkret ("deepseek-v4.1-flash"),
-        # nilai routing ("auto"/"auto-test"), atau KOSONG (server menentukan
-        # sendiri). Field `model` hanya disertakan bila ada nilainya dan provider
-        # memang menerimanya (`send_model_field`). Untuk semua provider bawaan
-        # model selalu ada, sehingga perilaku lama TIDAK berubah.
+        # nilai routing ("auto"/"auto-test"), KOSONG (server menentukan sendiri),
+        # atau hasil DISCOVERY dari `GET /models` bila instance tidak punya model
+        # eksplisit dan provider mengizinkannya (`supports_model_discovery`).
+        # Field `model` hanya disertakan bila ada nilainya dan provider memang
+        # menerimanya (`send_model_field`). Untuk semua provider bawaan model
+        # selalu ada, sehingga perilaku lama TIDAK berubah.
         model = opts.model or self.config.model
+        if not model and self.supports_model_discovery:
+            model = self._discover_first_model()
         if model and self.send_model_field:
             payload["model"] = model
         if opts.temperature is not None:

@@ -54,6 +54,13 @@ class ProviderTypeSpec:
             BEBAS (bukan harus sama dengan `env_prefix`). Dipakai oleh provider
             generik "Custom OpenAI Compatible" agar user bebas memilih nama env
             (mis. GERRY_API_KEY, BARISKA_API_KEY) tanpa hardcode per layanan.
+        supports_model_discovery: True bila AETHER boleh MENEMUKAN model lewat
+            endpoint OpenAI-compatible `GET {base_url}/models` BILA instance
+            tidak punya model eksplisit. Dipakai provider generik (endpoint yang
+            menyediakan `/models`, mis. banyak gateway OpenAI-compatible) agar
+            model ID yang VALID diambil dari endpoint, bukan dikosongkan
+            (sebagian endpoint menolak request tanpa model). Provider dengan
+            model wajib (cloud) TIDAK memakainya.
         env_prefix_aliases: prefix env TAMBAHAN (alias) yang juga dianggap milik
             provider type ini (mis. 9Router = "SEMBILAN_ROUTER" dengan alias
             "9ROUTER"). Kosong bila tidak ada alias.
@@ -67,6 +74,7 @@ class ProviderTypeSpec:
     requires_model: bool = True
     needs_model_field: bool = True
     allow_custom_env: bool = False
+    supports_model_discovery: bool = False
     env_prefix_aliases: Tuple[str, ...] = ()
 
     def matches_env_prefix(self, prefix: str) -> bool:
@@ -93,6 +101,7 @@ class ProviderTypeSpec:
             "requires_model": self.requires_model,
             "needs_model_field": self.needs_model_field,
             "allow_custom_env": self.allow_custom_env,
+            "supports_model_discovery": self.supports_model_discovery,
         }
 
 
@@ -147,6 +156,9 @@ _PROVIDER_TYPES: Dict[str, ProviderTypeSpec] = {
         #   - requires_model=False : user TIDAK dipaksa memilih model konkret;
         #     nilai `model` tetap dikirim bila ada (mis. "auto").
         #   - allow_custom_env=True: nama env API key bebas (mis. GERRY_API_KEY).
+        #   - supports_model_discovery=True: bila model kosong, AETHER GET
+        #     /models untuk mengambil model ID valid (endpoint OpenAI-compatible
+        #     umum menyediakannya).
         ProviderTypeSpec(
             key="custom",
             label="Custom OpenAI Compatible",
@@ -155,6 +167,11 @@ _PROVIDER_TYPES: Dict[str, ProviderTypeSpec] = {
             requires_api_key=False,
             requires_model=False,
             allow_custom_env=True,
+            # Endpoint OpenAI-compatible umumnya menyediakan `GET /models`.
+            # Bila instance TIDAK punya model eksplisit, AETHER boleh menemukan
+            # model ID valid dari endpoint (bukan mengosongkan field `model`,
+            # yang ditolak sebagian gateway). Tidak mengubah 9Router/cloud.
+            supports_model_discovery=True,
         ),
     )
 }
