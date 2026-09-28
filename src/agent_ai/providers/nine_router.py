@@ -54,7 +54,7 @@ class NineRouterProvider(OpenAICompatibleProvider):
         chat_messages = [self._to_openai_message(m) for m in chat_messages]
 
         payload: Dict[str, Any] = {
-            "model": opts.model or "auto-test",
+            "model": opts.model or "auto",
             "messages": chat_messages,
             "stream": False,
         }
