@@ -146,6 +146,7 @@ watch(
 // tetap mengikuti header agar default konsisten saat provider/model memuat.
 const proposalProviderInstanceId = ref("");
 const proposalModelId = ref("");
+const proposalExecutionMode = ref("queue");
 const proposalTouched = ref(false);
 
 watch(
@@ -454,6 +455,7 @@ function runTask(proposal, index = -1) {
     text: target,
     providerInstanceId: proposalProviderInstanceId.value || "",
     modelId: proposalModelId.value || "",
+    executionMode: proposalExecutionMode.value || "queue",
   });
 }
 
@@ -656,6 +658,18 @@ onMounted(() => {
                     <option v-for="m in proposalModelOptions" :key="m.id" :value="m.id">
                       {{ m.model_name }}
                     </option>
+                  </select>
+                </label>
+                <label class="cp-select">
+                  <span class="cs-label">Execution</span>
+                  <select
+                    class="input-a"
+                    :value="proposalExecutionMode"
+                    :disabled="isProposalBusy(i)"
+                    @change="proposalExecutionMode = $event.target.value"
+                  >
+                    <option value="queue">Queue</option>
+                    <option value="parallel">Parallel</option>
                   </select>
                 </label>
               </div>

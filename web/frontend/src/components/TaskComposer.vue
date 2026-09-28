@@ -18,6 +18,8 @@ const props = defineProps({
   providerInstanceId: { type: String, default: "" },
   modelId: { type: String, default: "" },
   mode: { type: String, default: "" },
+  // Execution mode (Task 01): queue | parallel — hanya parameter task.
+  executionMode: { type: String, default: "queue" },
 });
 const emit = defineEmits([
   "submit",
@@ -25,6 +27,7 @@ const emit = defineEmits([
   "update:providerInstanceId",
   "update:modelId",
   "update:mode",
+  "update:executionMode",
 ]);
 
 const text = ref("");
@@ -140,6 +143,20 @@ function submit() {
         <span class="cs-label">Mode</span>
         <select class="input-a" :disabled="disabled" :value="mode" @change="emit('update:mode', $event.target.value)">
           <option v-for="m in modes" :key="m" :value="m">{{ MODE_LABELS[m] || m }}</option>
+        </select>
+      </label>
+
+      <!-- Execution mode: hanya parameter task (queue/parallel), belum parallel execution. -->
+      <label class="composer-select">
+        <span class="cs-label">Execution</span>
+        <select
+          class="input-a"
+          :disabled="disabled"
+          :value="executionMode"
+          @change="emit('update:executionMode', $event.target.value)"
+        >
+          <option value="queue">Queue</option>
+          <option value="parallel">Parallel</option>
         </select>
       </label>
     </div>

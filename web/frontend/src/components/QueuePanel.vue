@@ -68,6 +68,11 @@ function queuePosition(t) {
   return null;
 }
 
+function normalizeExecution(t) {
+  const v = String((t && (t.execution_mode || t.executionMode)) || "").trim().toLowerCase();
+  return v === "parallel" ? "Parallel" : "Queue";
+}
+
 function shortText(t) {
   const s = (t.task || "").replace(/\s+/g, " ").trim();
   if (!s) return "(no prompt)";
@@ -261,6 +266,7 @@ watch(
               <span class="q-state-sm" :class="t.queue_state">{{ runLabel(t) }}</span>
               <span v-if="t.queue_state === 'pending' && queuePosition(t)" class="q-pos">&middot; #{{ queuePosition(t) }}</span>
               <span v-if="t.queue_state === 'disabled'" class="q-pos">disabled</span>
+              <span class="q-exec" :class="String((t.execution_mode || '')).toLowerCase() === 'parallel' ? 'parallel' : 'queue'">&middot; {{ normalizeExecution(t) }}</span>
             </span>
           </div>
           <button

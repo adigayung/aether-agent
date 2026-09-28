@@ -138,9 +138,11 @@ const selectedMode = ref("");
 const llmProviders = ref([]);
 const selectedProviderInstanceId = ref("");
 const selectedModelId = ref("");
+// Execution mode (Task 01): queue | parallel — hanya parameter task.
+const selectedExecutionMode = ref("queue");
 
 // State task/workspace (diisi dari #50 + #51).
-const task = reactive({ id: "", text: "", status: "idle" });
+const task = reactive({ id: "", text: "", status: "idle", executionMode: "queue" });
 const events = ref([]);
 // Activity dari persistent log (Activity API). null = pakai live events (SSE).
 const historyEvents = ref(null);
@@ -233,6 +235,21 @@ const taskDurationMs = computed(() => {
   return Math.max(0, end - taskStartedAt.value);
 });
 const taskDurationLabel = computed(() => formatDuration(taskDurationMs.value));
+
+// --- Execution Mode (Task 04) — ditampilkan di Task Card / History / Queue ---
+// Normalisasi: task lama tanpa execution_mode -> "queue" (backward compat).
+function normalizeExecutionMode(raw) {
+  const v = String(raw || "").trim().toLowerCase();
+  return v === "parallel" ? "parallel" : "queue";
+}
+function executionLabel(mode) {
+  return normalizeExecutionMode(mode) === "parallel" ? "Parallel" : "Queue";
+}
+const taskExecutionMode = computed(() => normalizeExecutionMode(task.executionMode));
+const taskExecutionLabel = computed(() => executionLabel(task.executionMode));
+// Round: LLM invocation count (provider_request) — sudah dihitung sebagai
+// taskLlmRounds. Ditampilkan di Task Card sebagai "Round N" bila ada.
+const taskRoundLabel = computed(() => (taskLlmRounds.value > 0 ? `Round ${taskLlmRounds.value}` : ""));
 
 // Provider/Model yang BENAR-BENAR dipakai task. Sumber: event lifecycle
 // provider_request/provider_response (payload provider + model) dari SSE live
@@ -335,6 +352,8 @@ const showTaskMeta = computed(() =>
   Boolean(
     taskProvider.value ||
       taskModel.value ||
+      (task.id && taskExecutionLabel.value) ||
+      taskRoundLabel.value ||
       taskDurationLabel.value ||
       showTaskTelemetry.value
   )
@@ -356,6 +375,7 @@ async function copyAgentActivity() {
       provider: taskProvider.value,
       model: taskModel.value,
       duration: taskDurationLabel.value,
+      execution: taskExecutionLabel.value,
       llmRounds: taskLlmRounds.value,
       toolCalls: taskToolCalls.value,
     },
@@ -456,7 +476,11 @@ async function refreshRunningTask() {
         deferredTaskIds,
       })
     ) {
-      adoptRunningTask(running.task_id, running.task);
+      {
+        const d2 = deferredTaskIds.get(running.task_id);
+        const d2Mode = typeof d2 === "object" && d2 ? d2.executionMode : null;
+        adoptRunningTask(running.task_id, running.task, running.execution_mode || running.executionMode || d2Mode);
+      }
     }
     runningTaskId.value = running ? running.task_id : "";
   } catch {
@@ -501,11 +525,12 @@ function ensureStream() {
 // mulai running. Dipakai HANYA saat UI mengikuti task antrian berikutnya
 // setelah task sebelumnya selesai. Murni memilih task mana yang ditampilkan:
 // TIDAK menyentuh scheduler/queue backend.
-function adoptRunningTask(taskId, text = "") {
+function adoptRunningTask(taskId, text = "", executionMode = null) {
   if (!taskId || taskId === task.id) return;
   task.id = taskId;
   if (text) task.text = text;
   task.status = "running";
+  if (executionMode) task.executionMode = normalizeExecutionMode(executionMode);
   runningTaskId.value = taskId;
   // Task ini tidak lagi "tertunda" follow.
   deferredTaskIds.delete(taskId);
@@ -600,10 +625,10 @@ function closeConsultant() {
 const submittedTaskId = ref("");
 // task_id terakhir yang mencapai status terminal (completed/failed/cancelled).
 const terminalTaskId = ref("");
-// Payload bisa object { text, providerInstanceId, modelId } (bentuk baru dari
+// Payload bisa object { text, providerInstanceId, modelId, executionMode } (bentuk baru dari
 // card Task Proposal) ATAU string lama (backward compatible). Provider/model
 // dari card proposal (runner) dipakai untuk task ini; pilihan header (chat)
-// TIDAK diubah.
+// TIDAK diubah. executionMode (queue/parallel) juga diteruskan.
 async function runConsultantTask(payload) {
   const text = typeof payload === "string" ? payload : payload && payload.text;
   if (!text) return;
@@ -611,7 +636,9 @@ async function runConsultantTask(payload) {
     payload && typeof payload === "object" ? payload.providerInstanceId : null;
   const overrideModelId =
     payload && typeof payload === "object" ? payload.modelId : null;
-  const record = await submitTask(text, overrideProviderId, overrideModelId);
+  const overrideExecutionMode =
+    payload && typeof payload === "object" ? payload.executionMode : null;
+  const record = await submitTask(text, overrideProviderId, overrideModelId, overrideExecutionMode);
   // Beri tahu ConsultantChat task mana milik tombol Run Task. WAJIB memakai
   // task_id yang BARU dibuat (dari respons createTask), BUKAN task.id: task.id
   // adalah task yang sedang DIPANTAU, yang bisa jadi Task A lain yang masih
@@ -819,8 +846,12 @@ function handleEvent(evt) {
         deferredTaskIds,
       })
     ) {
-      // teks task dibaca SEBELUM adoptRunningTask menghapus entri deferred.
-      adoptRunningTask(evtTaskId, deferredTaskIds.get(evtTaskId));
+      { // teks + executionMode dibaca SEBELUM adoptRunningTask menghapus entri deferred.
+        const deferred = deferredTaskIds.get(evtTaskId);
+        const dText = typeof deferred === "string" ? deferred : (deferred && deferred.task) || "";
+        const dMode = typeof deferred === "object" && deferred ? deferred.executionMode : null;
+        adoptRunningTask(evtTaskId, dText, dMode);
+      }
       // lanjut: proses event task_started untuk task yang baru diadopsi.
     } else {
       return;
@@ -1056,7 +1087,12 @@ async function refreshTaskHistory() {
 }
 
 // --- Task submit / stop (#50) ----------------------------------------------
-async function submitTask(text, overrideProviderInstanceId = null, overrideModelId = null) {
+async function submitTask(
+  text,
+  overrideProviderInstanceId = null,
+  overrideModelId = null,
+  overrideExecutionMode = null
+) {
   error.value = "";
   submitting.value = true;
   try {
@@ -1072,10 +1108,13 @@ async function submitTask(text, overrideProviderInstanceId = null, overrideModel
     if (providerId) metadata.provider_instance_id = providerId;
     if (modelId) metadata.model_id = modelId;
     if (selectedMode.value) metadata.mode = selectedMode.value;
+    // execution_mode — Task 01: queue | parallel (hanya parameter niat).
+    const executionMode = overrideExecutionMode || selectedExecutionMode.value || "queue";
     const record = await createTask(
       text,
       selectedProjectId.value || null,
-      Object.keys(metadata).length ? metadata : null
+      Object.keys(metadata).length ? metadata : null,
+      executionMode
     );
     // Status awal = KEBENARAN backend, BUKAN optimistik. Task yang dikirim
     // (Workbench Agent Input maupun Consultant Run Task) masuk SATU Global Task
@@ -1095,6 +1134,7 @@ async function submitTask(text, overrideProviderInstanceId = null, overrideModel
     if (adopt) {
       task.id = record.task_id;
       task.text = record.task;
+      task.executionMode = normalizeExecutionMode(record.execution_mode || record.executionMode || executionMode);
       if (queueState === "pending") {
         // Menunggu execution slot Global Task Queue -> "queued" (bukan running).
         task.status = "queued";
@@ -1119,7 +1159,12 @@ async function submitTask(text, overrideProviderInstanceId = null, overrideModel
       // masuk Global Task Queue sebagai pending (terlihat di panel TASKS),
       // TIDAK diadopsi dan TIDAK me-rebind stream. Ingat B agar UI mengikuti
       // begitu scheduler benar-benar menjalankannya (setelah A selesai).
-      deferredTaskIds.set(record.task_id, record.task);
+      // Simpan juga execution_mode agar Task Card menampilkan mode yang benar
+      // saat B akhirnya diadopsi (fallback SSE tidak membawa execution_mode).
+      deferredTaskIds.set(record.task_id, {
+        task: record.task,
+        executionMode: normalizeExecutionMode(record.execution_mode || record.executionMode || executionMode),
+      });
       // Stream harus tetap terbuka agar event task_started B nanti terlihat.
       ensureStream();
     }
@@ -1208,6 +1253,9 @@ async function openHistoryTask(taskId) {
     task.id = info.task_id || taskId;
     task.text = info.task || "";
     task.status = info.status || "incomplete";
+    // Task lama: execution_mode bisa ada di info.execution_mode (dari TaskRecord
+    // to_dict) atau tidak ada sama sekali -> fallback "queue".
+    task.executionMode = normalizeExecutionMode(info.execution_mode || info.executionMode);
     // Activity (chronological) dari persistent log.
     const activity = await getTaskActivity(taskId, projectId);
     historyEvents.value = activity.events || [];
@@ -1666,10 +1714,10 @@ onBeforeUnmount(() => {
                     <div class="task-name">Process :</div>
                     <span class="prompt-pill" :title="task.text || 'No task yet'">{{ task.text || "No task yet" }}</span>
                     <div class="task-sub">{{ task.id ? task.id : "idle" }} · status: {{ task.status || "idle" }}</div>
-                    <!-- Metadata eksekusi: provider/model yang BENAR-BENAR dipakai
-                         task + durasi (live saat running, final saat selesai).
-                         Sumber = event lifecycle AETHER existing; TIDAK
-                         hardcode, TIDAK memakai default/global. -->
+                    <!-- Metadata eksekusi: provider/model + execution + round + duration.
+                         Execution (Queue/Parallel) selalu tampil agar task
+                         parallel mudah dibedakan. Sumber = execution_mode
+                         task (fallback "queue" untuk task lama). -->
                     <div v-if="showTaskMeta" class="task-meta">
                       <span v-if="taskProvider" class="tm-item" :title="`Provider: ${taskProvider}`">
                         <svg class="tm-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19a4.5 4.5 0 0 0 0-9 6 6 0 0 0-11.6 1.5A3.5 3.5 0 0 0 6.5 19z"/></svg>
@@ -1682,7 +1730,19 @@ onBeforeUnmount(() => {
                         <span class="tm-key">Model</span>
                         <span class="tm-val">{{ taskModel }}</span>
                       </span>
-                      <span v-if="(taskProvider || taskModel) && taskDurationLabel" class="tm-sep">·</span>
+                      <span v-if="task.id && taskExecutionLabel" class="tm-sep">·</span>
+                      <span v-if="task.id" class="tm-item" :title="`Execution: ${taskExecutionLabel}`">
+                        <svg class="tm-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/></svg>
+                        <span class="tm-key">Execution</span>
+                        <span class="tm-val">{{ taskExecutionLabel }}</span>
+                      </span>
+                      <span v-if="taskRoundLabel" class="tm-sep">·</span>
+                      <span v-if="taskRoundLabel" class="tm-item" :title="taskRoundLabel">
+                        <svg class="tm-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 8a6 6 0 1 0-8 5.7V21l8-4v-4.3A6 6 0 0 0 16 8z"/></svg>
+                        <span class="tm-key">Round</span>
+                        <span class="tm-val">{{ taskRoundLabel }}</span>
+                      </span>
+                      <span v-if="(taskProvider || taskModel || (task.id && taskExecutionLabel)) && taskDurationLabel" class="tm-sep">·</span>
                       <span
                         v-if="taskDurationLabel"
                         class="tm-item tm-duration"
@@ -1699,7 +1759,7 @@ onBeforeUnmount(() => {
                            (kelas .tm-item/.tm-key/.tm-val yang sama). -->
                       <template v-if="showTaskTelemetry">
                         <span
-                          v-if="taskProvider || taskModel || taskDurationLabel"
+                          v-if="taskProvider || taskModel || (task.id && taskExecutionLabel) || taskDurationLabel"
                           class="tm-sep"
                         >·</span>
                         <span class="tm-item" title="Actual LLM/provider invocations">
@@ -1925,11 +1985,11 @@ onBeforeUnmount(() => {
                             <span class="avatar">T</span>
                             <div>
                               <div class="name name-clamp">{{ t.task || "(no prompt)" }}</div>
-                              <div class="meta meta-clamp">{{ t.task_id }}</div>
+                              <div class="meta meta-clamp">{{ t.task_id }} · {{ executionLabel(t.execution_mode || t.executionMode) }}</div>
                             </div>
                           </div>
                         </td>
-                        <td><span class="status-tag" :class="statusTagClass(t.status)">{{ t.status }}</span></td>
+                        <td><span class="status-tag" :class="statusTagClass(t.status)">{{ t.status }}</span><span class="q-exec hist-exec" :class="String(t.execution_mode || t.executionMode || '').toLowerCase() === 'parallel' ? 'parallel' : 'queue'">{{ executionLabel(t.execution_mode || t.executionMode) }}</span></td>
                         <td><span class="mono meta">{{ formatTs(t.last_timestamp) }}</span></td>
                         <td class="row-actions hist-actions">
                           <button
@@ -2055,11 +2115,13 @@ onBeforeUnmount(() => {
           :provider-instance-id="selectedProviderInstanceId"
           :model-id="selectedModelId"
           :mode="selectedMode"
+          :execution-mode="selectedExecutionMode"
           @submit="submitTask"
           @stop="requestStop"
           @update:provider-instance-id="selectedProviderInstanceId = $event"
           @update:model-id="selectedModelId = $event"
           @update:mode="selectedMode = $event"
+          @update:execution-mode="selectedExecutionMode = $event"
         />
       </div>
     </div>

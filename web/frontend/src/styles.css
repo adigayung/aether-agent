@@ -3575,6 +3575,20 @@ tr:hover .q-copy-btn.hist-copy {
   color: var(--text-faint);
   flex: 0 0 auto;
 }
+.q-exec {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  flex: 0 0 auto;
+}
+.q-exec.parallel { color: #f59e0b; }
+.q-exec.queue { color: var(--text-faint); }
+.hist-exec {
+  margin-left: 6px;
+  font-size: 9px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
 
 /* Copy button — subtle, appears on row hover */
 .q-copy-btn {

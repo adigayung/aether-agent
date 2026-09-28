@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from agent_ai.tools.base import BaseTool, ToolExecutionError, ToolValidationError
+from agent_ai.tools.file_lock import get_current_owner
 from agent_ai.tools.filesystem import (
     _DEFAULT_ROOT,
     _resolve_within_root,
@@ -79,6 +80,39 @@ def _ensure_not_root(target: Path, root: Path, action: str) -> None:
         raise ToolValidationError(
             f"Tidak boleh {action} workspace root itu sendiri."
         )
+
+
+def _lock_key_from_resolved(resolved: Path, root: Path) -> str:
+    """Kunci file lock yang stabil: absolute resolved posix."""
+    try:
+        return str(resolved.resolve())
+    except Exception:
+        return str(resolved)
+
+
+def _acquire_file_lock(path: str, display_path: str) -> tuple[str, str]:
+    """Acquire file lock untuk operasi tulis. Raise ToolExecutionError bila locked.
+
+    Returns:
+        (lock_key, owner) untuk diteruskan ke release.
+    """
+    from agent_ai.tools.file_lock import get_current_owner, manager
+
+    owner = get_current_owner()
+    if not manager.acquire(path, owner):
+        existing = manager.get_owner(path) or "another agent/task"
+        raise ToolExecutionError(
+            f"File is currently being written by another agent/task: {display_path}\n"
+            f"The file is temporarily locked (owner: {existing}). "
+            f"Continue with another task/file or retry later."
+        )
+    return path, owner
+
+
+def _release_file_lock(lock_key: str, owner: str) -> None:
+    from agent_ai.tools.file_lock import manager
+
+    manager.release(lock_key, owner)
 
 
 def _atomic_write_text(target: Path, content: str) -> None:
@@ -278,34 +312,39 @@ class WriteFileTool(_WorkspaceChangeTool):
         if target.exists() and target.is_dir():
             raise ToolValidationError(f"'{rel_path}' adalah sebuah directory.")
 
-        existed = target.is_file()
-        before = _read_bytes(target) if existed else None
+        lock_key = _lock_key_from_resolved(target, self.root)
+        owner: str = ""
+        acquired = False
         try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            # Atomic: hindari file setengah isi bila penulisan terputus.
-            _atomic_write_text(target, str(arguments["content"]))
-        except OSError as exc:
-            raise ToolExecutionError(f"Gagal menulis file '{rel_path}': {exc}") from exc
+            lock_key, owner = _acquire_file_lock(lock_key, rel_path)
+            acquired = True
+            existed = target.is_file()
+            before = _read_bytes(target) if existed else None
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                _atomic_write_text(target, str(arguments["content"]))
+            except OSError as exc:
+                raise ToolExecutionError(f"Gagal menulis file '{rel_path}': {exc}") from exc
 
-        after = _read_bytes(target)
-        if after is None:
-            after = str(arguments["content"]).encode("utf-8")
-        # Live event HANYA setelah write benar-benar berhasil.
-        self._emit_change(
-            path=rel_path,
-            kind="modified" if existed else "created",
-            before=before,
-            after=after,
-        )
-        # Source berubah: baca ulang berikutnya harus mengirim konten baru.
-        self._invalidate_read_cache(rel_path)
-
-        return {
-            "path": rel_path,
-            "bytes": target.stat().st_size,
-            "written": True,
-            "changed": True,
-        }
+            after = _read_bytes(target)
+            if after is None:
+                after = str(arguments["content"]).encode("utf-8")
+            self._emit_change(
+                path=rel_path,
+                kind="modified" if existed else "created",
+                before=before,
+                after=after,
+            )
+            self._invalidate_read_cache(rel_path)
+            return {
+                "path": rel_path,
+                "bytes": target.stat().st_size,
+                "written": True,
+                "changed": True,
+            }
+        finally:
+            if acquired:
+                _release_file_lock(lock_key, owner)
 
 
 class EditFileTool(_WorkspaceChangeTool):
@@ -381,80 +420,80 @@ class EditFileTool(_WorkspaceChangeTool):
         if not target.is_file():
             raise ToolValidationError(f"'{rel_path}' bukan sebuah file.")
 
-        before = _read_bytes(target)
+        lock_key = _lock_key_from_resolved(target, self.root)
+        owner = ""
+        acquired = False
         try:
-            text = target.read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:
-            raise ToolExecutionError(f"Gagal membaca file '{rel_path}': {exc}") from exc
+            lock_key, owner = _acquire_file_lock(lock_key, rel_path)
+            acquired = True
+            before = _read_bytes(target)
+            try:
+                text = target.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                raise ToolExecutionError(f"Gagal membaca file '{rel_path}': {exc}") from exc
 
-        # Safety fence: seluruh file (default) atau range baris (1-based).
-        # `splitlines(keepends=True)` memakai pemisah baris yang SAMA dengan
-        # `read_file` (yang memakai `splitlines()`), sehingga nomor baris
-        # konsisten, dan offset karakter tetap mempertahankan line ending asli.
-        lines = text.splitlines(keepends=True)
-        total_lines = len(lines)
-        start_line, end_line = normalize_line_range(
-            arguments.get("start_line"),
-            arguments.get("end_line"),
-            total_lines,
-        )
-
-        if start_line is None:
-            search_text = text
-            region_offset = 0
-            range_note = ""
-        else:
-            region_offset = sum(len(line) for line in lines[: start_line - 1])
-            region_length = sum(len(line) for line in lines[start_line - 1 : end_line])
-            search_text = text[region_offset : region_offset + region_length]
-            range_note = f" dalam range line {start_line}-{end_line}"
-
-        count = search_text.count(old_text)
-        if count == 0:
-            raise ToolExecutionError(
-                f"Teks target tidak ditemukan{range_note} pada '{rel_path}'."
-            )
-        if count > 1:
-            raise ToolExecutionError(
-                f"Teks target ambigu{range_note} pada '{rel_path}' "
-                f"(ditemukan {count} kali)."
+            lines = text.splitlines(keepends=True)
+            total_lines = len(lines)
+            start_line, end_line = normalize_line_range(
+                arguments.get("start_line"),
+                arguments.get("end_line"),
+                total_lines,
             )
 
-        index = region_offset + search_text.index(old_text)
-        new_content = (
-            text[:index] + str(arguments["new_text"]) + text[index + len(old_text) :]
-        )
-        try:
-            target.write_text(new_content, encoding="utf-8")
-        except OSError as exc:
-            raise ToolExecutionError(f"Gagal menulis file '{rel_path}': {exc}") from exc
+            if start_line is None:
+                search_text = text
+                region_offset = 0
+                range_note = ""
+            else:
+                region_offset = sum(len(line) for line in lines[: start_line - 1])
+                region_length = sum(len(line) for line in lines[start_line - 1 : end_line])
+                search_text = text[region_offset : region_offset + region_length]
+                range_note = f" dalam range line {start_line}-{end_line}"
 
-        after = _read_bytes(target)
-        if after is None:
-            after = new_content.encode("utf-8")
-        # Live event HANYA setelah edit benar-benar berhasil.
-        self._emit_change(path=rel_path, kind="modified", before=before, after=after)
-        # Source berubah: baca ulang berikutnya harus mengirim konten baru
-        # (bukan "already_read"), sehingga Agent TIDAK dipaksa re-read.
-        self._invalidate_read_cache(rel_path)
+            count = search_text.count(old_text)
+            if count == 0:
+                raise ToolExecutionError(
+                    f"Teks target tidak ditemukan{range_note} pada '{rel_path}'."
+                )
+            if count > 1:
+                raise ToolExecutionError(
+                    f"Teks target ambigu{range_note} pada '{rel_path}' "
+                    f"(ditemukan {count} kali)."
+                )
 
-        # Hasil edit memberi cukup info (file, rentang baris yang berubah,
-        # status) agar Agent tidak perlu read_file hanya untuk tahu edit sukses.
-        changed_start = text.count("\n", 0, index) + 1
-        changed_line_count = str(arguments["new_text"]).count("\n") + 1
-        total_lines = len(new_content.splitlines())
-        result: Dict[str, Any] = {
-            "path": rel_path,
-            "replaced": 1,
-            "edited": True,
-            "changed_start_line": changed_start,
-            "changed_end_line": changed_start + changed_line_count - 1,
-            "total_lines": total_lines,
-        }
-        if start_line is not None:
-            result["start_line"] = start_line
-            result["end_line"] = end_line
-        return result
+            index = region_offset + search_text.index(old_text)
+            new_content = (
+                text[:index] + str(arguments["new_text"]) + text[index + len(old_text) :]
+            )
+            try:
+                target.write_text(new_content, encoding="utf-8")
+            except OSError as exc:
+                raise ToolExecutionError(f"Gagal menulis file '{rel_path}': {exc}") from exc
+
+            after = _read_bytes(target)
+            if after is None:
+                after = new_content.encode("utf-8")
+            self._emit_change(path=rel_path, kind="modified", before=before, after=after)
+            self._invalidate_read_cache(rel_path)
+
+            changed_start = text.count("\n", 0, index) + 1
+            changed_line_count = str(arguments["new_text"]).count("\n") + 1
+            total_lines = len(new_content.splitlines())
+            result: Dict[str, Any] = {
+                "path": rel_path,
+                "replaced": 1,
+                "edited": True,
+                "changed_start_line": changed_start,
+                "changed_end_line": changed_start + changed_line_count - 1,
+                "total_lines": total_lines,
+            }
+            if start_line is not None:
+                result["start_line"] = start_line
+                result["end_line"] = end_line
+            return result
+        finally:
+            if acquired:
+                _release_file_lock(lock_key, owner)
 
 
 class DeleteFileTool(_WorkspaceChangeTool):
@@ -489,29 +528,35 @@ class DeleteFileTool(_WorkspaceChangeTool):
         if not target.exists() and not target.is_symlink():
             raise ToolExecutionError(f"Path tidak ditemukan: {rel_path}")
 
-        is_dir = target.is_dir() and not target.is_symlink()
-        # Baca konten SEBELUM dihapus (untuk diff deleted), hanya untuk file.
-        before = None if is_dir else _read_bytes(target)
+        lock_key = _lock_key_from_resolved(target, self.root)
+        owner = ""
+        acquired = False
         try:
-            if is_dir:
-                shutil.rmtree(target)
-                kind = "dir"
-            else:
-                target.unlink()
-                kind = "file"
-        except OSError as exc:
-            raise ToolExecutionError(f"Gagal menghapus '{rel_path}': {exc}") from exc
+            lock_key, owner = _acquire_file_lock(lock_key, rel_path)
+            acquired = True
+            is_dir = target.is_dir() and not target.is_symlink()
+            before = None if is_dir else _read_bytes(target)
+            try:
+                if is_dir:
+                    shutil.rmtree(target)
+                    kind = "dir"
+                else:
+                    target.unlink()
+                    kind = "file"
+            except OSError as exc:
+                raise ToolExecutionError(f"Gagal menghapus '{rel_path}': {exc}") from exc
 
-        # Live event HANYA setelah delete benar-benar berhasil.
-        self._emit_change(
-            path=rel_path,
-            kind="deleted",
-            before=before,
-            after=None,
-        )
-        self._invalidate_read_cache(rel_path)
-
-        return {"path": rel_path, "type": kind, "deleted": True}
+            self._emit_change(
+                path=rel_path,
+                kind="deleted",
+                before=before,
+                after=None,
+            )
+            self._invalidate_read_cache(rel_path)
+            return {"path": rel_path, "type": kind, "deleted": True}
+        finally:
+            if acquired:
+                _release_file_lock(lock_key, owner)
 
 
 class MoveFileTool(_WorkspaceChangeTool):
@@ -557,20 +602,32 @@ class MoveFileTool(_WorkspaceChangeTool):
                 f"Destination sudah ada: {destination} (tidak menimpa)."
             )
 
-        try:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(src), str(dst))
-        except OSError as exc:
+        from agent_ai.tools.file_lock import manager as _lock_manager
+
+        src_key = _lock_key_from_resolved(src, self.root)
+        dst_key = _lock_key_from_resolved(dst, self.root)
+        owner = get_current_owner()
+        # Atomically acquire both paths (sorted, no partial)
+        if not _lock_manager.acquire_multiple([src_key, dst_key], owner):
             raise ToolExecutionError(
-                f"Gagal memindahkan '{source}' -> '{destination}': {exc}"
-            ) from exc
+                f"File is currently being written by another agent/task: {source} or {destination}\n"
+                f"The file is temporarily locked. Continue with another task/file or retry later."
+            )
+        try:
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+            except OSError as exc:
+                raise ToolExecutionError(
+                    f"Gagal memindahkan '{source}' -> '{destination}': {exc}"
+                ) from exc
 
-        # Live event HANYA setelah move benar-benar berhasil.
-        self._emit_change(
-            path=destination,
-            kind="moved",
-            old_path=source,
-        )
-        self._invalidate_read_cache(source, destination)
-
-        return {"source": source, "destination": destination, "moved": True}
+            self._emit_change(
+                path=destination,
+                kind="moved",
+                old_path=source,
+            )
+            self._invalidate_read_cache(source, destination)
+            return {"source": source, "destination": destination, "moved": True}
+        finally:
+            _lock_manager.release_multiple([src_key, dst_key], owner)

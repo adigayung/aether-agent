@@ -440,11 +440,16 @@ def tasks(request: HttpRequest, service: GatewayService) -> JsonResponse:
     task = body.get("task")
     project_id = body.get("project_id")
     metadata = body.get("metadata")
+    execution_mode = body.get("execution_mode")
+    if execution_mode is None and metadata and isinstance(metadata, dict):
+        execution_mode = metadata.get("execution_mode")
     if metadata is not None and not isinstance(metadata, dict):
         from api.services import ValidationError
 
         raise ValidationError("Field 'metadata' harus berupa object bila diisi.")
-    record = service.create_task(task=task, project_id=project_id, metadata=metadata)
+    record = service.create_task(
+        task=task, project_id=project_id, metadata=metadata, execution_mode=execution_mode
+    )
     return _json_response(record, status=201)
 
 

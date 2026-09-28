@@ -210,10 +210,14 @@ export function restoreGithubCheckpoint(projectId, commit, force = false) {
   });
 }
 
-export function createTask(task, projectId = null, metadata = null) {
+export function createTask(task, projectId = null, metadata = null, executionMode = null) {
   const body = { task };
   if (projectId) body.project_id = projectId;
   if (metadata) body.metadata = metadata;
+  // execution_mode — Task 01: hanya parameter task (queue/parallel), belum
+  // parallel execution. Default 'queue' di backend agar task lama kompatibel.
+  const rawMode = executionMode || (metadata && metadata.execution_mode) || null;
+  if (rawMode) body.execution_mode = String(rawMode).toLowerCase();
   return request("/tasks", { method: "POST", body: JSON.stringify(body) });
 }
 

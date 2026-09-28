@@ -195,6 +195,8 @@ function buildAgentHeader(meta) {
   add("Status", m.status);
   add("Provider", m.provider);
   add("Model", m.model);
+  add("Execution", m.execution);
+  add("Round", m.llmRounds != null && m.llmRounds !== "" ? String(m.llmRounds) : "");
   add("Duration", m.duration);
   add("LLM Rounds", m.llmRounds);
   add("Tool Calls", m.toolCalls);

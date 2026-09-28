@@ -83,6 +83,28 @@ class ConflictError(GatewayError):
     code = "conflict"
 
 
+# Execution mode (Task 01 — hanya parameter task, belum parallel execution).
+# Nilai valid: "queue" | "parallel". Default "queue" agar task lama kompatibel.
+_VALID_EXECUTION_MODES = frozenset({"queue", "parallel"})
+_DEFAULT_EXECUTION_MODE = "queue"
+
+
+def _normalize_execution_mode(value: Optional[str]) -> str:
+    """Normalisasi execution_mode -> 'queue' | 'parallel' (default queue).
+
+    Raises:
+        ValidationError: bila nilai tidak termasuk yang valid.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return _DEFAULT_EXECUTION_MODE
+    v = str(value).strip().lower()
+    if v not in _VALID_EXECUTION_MODES:
+        raise ValidationError(
+            f"execution_mode harus salah satu dari {sorted(_VALID_EXECUTION_MODES)}."
+        )
+    return v
+
+
 @dataclass
 class TaskRecord:
     """State task di gateway (in-memory, tanpa database).
@@ -119,6 +141,9 @@ class TaskRecord:
     queue_state: str = "pending"
     # Urutan posisi di antrian (FIFO by creation; Move Up/Down mengubah nilai).
     queue_order: int = 0
+    # Execution mode (Task 01 — hanya parameter/niat execution, belum parallel).
+    # Nilai valid: "queue" | "parallel". Default "queue" agar task lama kompatibel.
+    execution_mode: str = _DEFAULT_EXECUTION_MODE
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -134,6 +159,7 @@ class TaskRecord:
             "runtime": self.runtime,
             "queue_state": self.queue_state,
             "queue_order": self.queue_order,
+            "execution_mode": self.execution_mode,
         }
 
 
@@ -1070,6 +1096,7 @@ class GatewayService:
         task: str,
         project_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        execution_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Buat task: validasi + siapkan via TaskPreparation, lalu eksekusi.
 
@@ -1081,12 +1108,13 @@ class GatewayService:
             task: deskripsi task (wajib, non-kosong).
             project_id: project terkait (opsional; divalidasi bila diisi).
             metadata: metadata tambahan (opsional).
+            execution_mode: 'queue' | 'parallel' (opsional, default 'queue').
 
         Returns:
             TaskRecord sebagai dict.
 
         Raises:
-            ValidationError: bila task kosong.
+            ValidationError: bila task kosong atau execution_mode tidak valid.
             NotFoundError: bila project_id diisi tapi tidak ditemukan.
         """
         if not task or not isinstance(task, str) or not task.strip():
@@ -1101,6 +1129,14 @@ class GatewayService:
         # konfigurasi LLM tersimpan (SQLite). Ini menjamin relasi
         # Provider Instance -> Model valid SEBELUM task dieksekusi.
         self._validate_provider_selection(metadata or {})
+
+        # execution_mode — parameter task (Task 01, belum parallel execution).
+        # Diterima sebagai argumen top-level atau di dalam metadata (backward
+        # compat). Default 'queue' agar task lama kompatibel.
+        raw_mode = execution_mode
+        if raw_mode is None and metadata and isinstance(metadata, dict):
+            raw_mode = metadata.get("execution_mode")
+        execution_mode_norm = _normalize_execution_mode(raw_mode)
 
         task_id = new_task_id()
         prepared = self.preparation.prepare(task.strip(), task_id=task_id)
@@ -1125,6 +1161,7 @@ class GatewayService:
             },
             metadata=dict(metadata or {}),
             session_id=session.session_id,
+            execution_mode=execution_mode_norm,
         )
         with self._lock:
             self._queue_seq += 1
@@ -1140,32 +1177,61 @@ class GatewayService:
             payload={"task": record.task, "project_id": project_id},
         )
 
-        # Jalankan eksekusi nyata di background (non-blocking HTTP).
-        # Scheduler serial GLOBAL yang mengontrol slot: task baru SELALU masuk
-        # antrian sebagai queue_state="pending" (sudah default TaskRecord), lalu
-        # di-promosikan ke RUNNING oleh pump BILA tidak ada blocker di depannya
-        # (FIFO by queue_order, skip disabled). Ini menggantikan pemanggilan
-        # _start_execution langsung agar concurrency dibatasi 1 slot.
+        # Dispatch berdasarkan execution_mode (Task 02):
+        # - queue: lewat scheduler serial GLOBAL (1 slot, FIFO) — perilaku
+        #   existing tetap dipertahankan.
+        # - parallel: langsung running tanpa menunggu slot queue (tanpa batas).
         if self.auto_execute:
-            self._scheduler_pump()
+            if execution_mode_norm == "parallel":
+                self._start_parallel_execution(task_id)
+            else:
+                self._scheduler_pump()
 
         return record.to_dict()
 
     # ------------------------------------------------------------------ #
-    # Serial scheduler GLOBAL (1 execution slot)
+    # Parallel execution (Task 02) — bypass scheduler queue
+    # ------------------------------------------------------------------ #
+    def _start_parallel_execution(self, task_id: str) -> None:
+        """Mulai task parallel seketika tanpa menunggu slot queue.
+
+        Tidak memengaruhi slot serial queue dan tidak dibatasi jumlahnya.
+        Token cancellation dibuat sinkron agar Stop tetap menemukan token.
+        """
+        from api.execution import run_in_background
+
+        with self._lock:
+            rec = self._tasks.get(task_id)
+            if rec is None:
+                return
+            # Hanya task pending yang dapat dipromosikan; running/done diabaikan.
+            if rec.queue_state != "pending":
+                return
+            if rec.status in ("completed", "failed", "cancelled"):
+                return
+            rec.queue_state = "running"
+            token = CancellationToken()
+            self._cancel_tokens[task_id] = token
+        run_in_background(lambda: self._execute_task(task_id, token))
+
+    # ------------------------------------------------------------------ #
+    # Serial scheduler GLOBAL (1 execution slot) — HANYA untuk queue mode
     # ------------------------------------------------------------------ #
     def _scheduler_pump(self) -> None:
-        """Pilih SATU task pending eligible berikutnya dan jalankan.
+        """Pilih SATU task `queue` pending eligible berikutnya dan jalankan.
 
-        Satu queue GLOBAL, satu scheduler, satu slot. Dipanggil (idempoten):
-            - setelah create_task,
+        Hanya task dengan execution_mode == "queue" yang dijadwalkan di sini.
+        Task parallel TIDAK pernah mengisi slot serial dan TIDAK dibatasi.
+        Dipanggil (idempoten):
+            - setelah create_task (queue),
             - setelah status terminal (completed/failed/cancelled),
             - setelah disable/enable/cancel.
 
         Algoritma (seluruh keputusan di dalam self._lock):
-            1. Bila sudah ada task RUNNING -> tidak ada slot -> return.
-            2. Ambil task pending paling awal menurut queue_order (FIFO).
-               Task disabled/done/terminal otomatis dilewati.
+            1. Bila sudah ada task QUEUE RUNNING -> slot terpakai -> return.
+            2. Ambil task pending paling awal menurut queue_order (FIFO)
+               yang execution_mode == "queue". Task disabled/done/terminal
+               otomatis dilewati.
             3. Tandai slot terpakai (queue_state="running") secara atomic agar
                task lain tidak bisa mengambil slot yang sama.
             4. Keluar lock, lalu mulai eksekusi (JANGAN tahan lock saat
@@ -1180,22 +1246,24 @@ class GatewayService:
         from api.execution import run_in_background
 
         with self._lock:
-            # [1] Sudah ada eksekusi aktif? -> slot terpakai, tidak lanjut.
-            #     Slot dianggap terpakai bila ADA task yang queue_state="running"
-            #     (slot yang sudah direservasi) ATAU masih ada cancellation token
-            #     aktif (thread eksekutor masih hidup, mis. task baru saja
-            #     di-cancel tetapi belum selesai wind-down). Ini menutup race
-            #     "Stop task running + scheduler mencari task berikutnya" dan
-            #     menjamin tidak pernah ada dua eksekusi paralel.
-            if self._cancel_tokens or any(
-                r.queue_state == "running" for r in self._tasks.values()
-            ):
+            # [1] Slot serial HANYA ditempati task QUEUE. Parallel tidak
+            #     memblokir slot queue dan tidak dibatasi jumlahnya.
+            has_queue_running = any(
+                r.queue_state == "running" and r.execution_mode == "queue"
+                for r in self._tasks.values()
+            )
+            has_queue_token = any(
+                tid in self._tasks and self._tasks[tid].execution_mode == "queue"
+                for tid in self._cancel_tokens
+            )
+            if has_queue_running or has_queue_token:
                 return
-            # [2] Kandidat: pending, bukan terminal, queue_order paling awal.
+            # [2] Kandidat: pending QUEUE saja, bukan terminal, queue_order paling awal.
             candidates = [
                 r
                 for r in self._tasks.values()
                 if r.queue_state == "pending"
+                and r.execution_mode == "queue"
                 and r.status not in ("completed", "failed", "cancelled")
             ]
             if not candidates:
@@ -1508,12 +1576,21 @@ class GatewayService:
             if queue_state not in ("pending", "disabled"):
                 raise _ValidationError("queue_state harus 'pending' atau 'disabled'.")
             record.queue_state = queue_state
+            # Parallel task yang di-enable harus langsung running (bypass queue).
+            parallel_to_start = (
+                task_id
+                if record.execution_mode == "parallel" and queue_state == "pending"
+                else None
+            )
             result = record.to_dict()
         # Disable/Enable memengaruhi eligibility scheduler -> pump.
-        # Enable bisa langsung mempromosikan task ke RUNNING bila tidak ada
-        # blocker di depannya (FIFO). Pump dilakukan di luar lock.
+        # Enable queue: bisa langsung mempromosikan task ke RUNNING bila tidak ada
+        # blocker di depannya (FIFO). Enable parallel: langsung running tanpa slot.
         if self.auto_execute:
-            self._scheduler_pump()
+            if parallel_to_start is not None:
+                self._start_parallel_execution(parallel_to_start)
+            else:
+                self._scheduler_pump()
         return result
 
     def move_task(self, task_id: str, direction: str) -> List[Dict[str, Any]]:
