@@ -1,380 +1,546 @@
-# AETHER — AI Coding Agent
+# AETHER
 
-AETHER is a three-layer AI coding agent system: a pure-Python agent engine (`src/agent_ai/`), a thin Django API gateway (`web/django_app/`), and a Vue 3 + Vite single-page application frontend (`web/frontend/`). It supports local (Ollama) and cloud (DeepSeek, OpenRouter, OpenAI-compatible) LLM providers, a serial task queue, cooperative cancellation, persistent task logging, a Consultant reasoning layer, and a project knowledge base (Project Bible).
+### Autonomous AI Coding Agent
+
+**AETHER gives an LLM the tools, project intelligence, and execution environment it needs to work on real software projects autonomously.**
+
+```
+AETHER = Hands
+LLM    = Brain
+```
+
+The LLM remains the decision-maker. AETHER provides the hands: filesystem tools, terminal, project navigation, and a runtime that lets the model investigate, edit, run, and validate code over multiple rounds without human micromanagement.
 
 ---
 
-## Features
+## What is AETHER?
 
-- **Agent execution loop** — continuous reasoning loop with tool-calling: file read/write, code search, terminal execution, and project map queries.
-- **Global Task Queue** — serial execution (concurrency = 1). Tasks are submitted to a queue with states: pending, running, disabled, done. FIFO ordering with move-up/move-down, disable/enable, and remove controls.
-- **Consultant Chat** — a reasoning layer (separate from the Agent) with two modes: **Quick** (Project Bible + Project Map read-only) and **Investigate** (Bible + Map + source/runtime tools). Generates Task Proposals that can be submitted to the Agent with per-task provider/model overrides. Supports image attachments.
-- **Project Map** — code navigation via **Atlas** (Python symbol/file/method/class lookup with callers/callees/inheritance) and **RIG** (code relationship graph with edges: calls, imports, inherits, contains, depends_on, external). Queried on-demand by the LLM through tools. Only the Agent may call `refresh_project_map`.
-- **Project Bible** — persistent knowledge store in `.aether/bible/<category>.md`, maintained by the Consultant.
-- **Persistent task logging** — all task events are appended to `.aether/log/<task_id>.log` (JSONL format). Served via REST APIs: task history, per-task chronological activity, and final Agent report.
-- **Live SSE events** — real-time event streaming from backend to frontend during task execution (`/api/events`).
-- **GitHub Backup** — per-project backup to a Git remote. Configuration stored in `.aether/github/config.json`; GitHub token encrypted via Windows DPAPI.
-- **Code Editor** — Monaco editor (lazy-loaded) embedded in a modal with syntax highlighting, dirty-state tracking, and save/close confirmation.
-- **File Explorer** — tree-view file browser with recursive expansion, context menu (open, copy path, reveal in Explorer, rename, delete), and incremental live updates on filesystem changes.
-- **Changes panel** — compact single-row-per-file display of workspace changes (add/modify/delete/move) with accordion diff.
-- **Audio feedback** — sound effects on task start, success, failure, and cancellation (`assets/audio/`).
-- **Task Card** — lifecycle stepper (Planning → Inspecting → Editing → Running → Validating → Completed) plus duration, provider, and model metadata.
-- **Lifecycle: Task Queue | Task History** — QUEUE tab shows live pending/running/disabled tasks; HISTORY tab shows completed tasks with report viewing.
+AETHER is a coding agent engine plus a workbench for running it. You describe a task in natural language; AETHER prepares context, streams the agent's reasoning, executes tools, and reports results.
+
+Core idea:
+
+```
+User prompt
+  → Task Preparation (context + advisory plan)
+    → Agent Runtime (continuous loop)
+      → LLM decides → Tool calls → Observations → LLM decides → ...
+    → Validation / Result → Report
+```
+
+No heuristic "done" detector. The loop ends only when the LLM returns a final response without requesting a tool.
+
+---
+
+## How It Works
+
+```
+User
+ │
+ ├── Workbench (web UI)
+ │
+ └── Consultant (read-only advisor)
+       │
+       ↓
+     Task
+       │
+       ├── Queue      ─┐
+       └── Parallel   ─┤
+                       ↓
+                 Agent Runtime
+                       │
+                ┌──────┼─────────┐
+                ↓      ↓         ↓
+              Tools  Project    LLM
+                     Memory
+```
+
+Relationship of the memory layers:
+
+```
+Bible → WHAT   (knowledge about the project)
+Map   → WHERE  (where code lives — navigation/lookup)
+Skill → HOW    (how to do things — procedural guidance)
+Tool  → ACTION (capability the LLM can invoke)
+LLM   → DECISION
+```
+
+`Map` is a lookup mechanism (`atlas_query`, `rig_query`, `project_map_status`). It is not injected wholesale into the LLM context.
+
+---
+
+## Key Features
+
+### Autonomous Agent
+
+- Continuous Native Tool Calling loop — one conversation per task.
+- LLM-driven tool selection (no hard-coded step order).
+- Multi-round execution with retry, investigation, implementation, and validation.
+- Plan (when present) is advisory only — the LLM decides actual tool order.
+- Cooperative cancellation (`Stop` at a safe boundary).
+- Activity phase telemetry (`planning` / `inspecting` / `editing` / `running` / `validating`) derived from real tool usage.
+
+### Agent vs Consultant
+
+```
+Agent
+→ execute / modify the project
+→ read + write + run commands
+→ can create / update / delete Skills
+
+Consultant
+→ inspect / investigate / analyze / propose
+→ read-only against project source code
+→ may read and update Project Bible via a curated tool
+→ never gets write/edit/delete/move capabilities on source
+```
+
+Consultant reuses the same loop and tool infrastructure but with a curated read-only registry and a separate permission policy. It supports two workflow modes:
+
+| Mode | Purpose | Retrieval bound (Map) |
+|------|---------|-----------------------|
+| `quick` | Fast Q&A, light investigation | lower (e.g. 3 Atlas + 3 RIG) |
+| `investigate` | Deeper exploration | higher (e.g. 6 Atlas + 6 RIG) |
+
+Mode controls which tools the LLM is offered and the prompt instructions — it is not just a prompt prefix. When the bound is reached, map tools are removed from the offer and the model is asked to answer from evidence already gathered.
+
+Consultant can optionally include images (base64, bounded) — processed through the existing vision module — and can emit a Task Proposal:
+
+````markdown
+```task
+Fix the login redirect bug by updating auth middleware...
+```
+````
+
+The proposal can be sent to the Agent with one click via the existing task flow.
+
+### Project Intelligence
+
+Project-local, additive, and stored under `<project>/.aether/` — no new databases.
+
+| Layer | Location | Purpose |
+|-------|----------|---------|
+| **Bible** | `.aether/bible/` | Structured markdown knowledge (`architecture.md`, `conventions.md`, `facts.md`, `decisions.md`, `learnings.md`, `problems.md`, …) plus `index.md` manifest. Read as context; updated once per task (Agent) or explicitly via Consultant. |
+| **Map** | `.aether/map/` | `atlas.json` (CODE ATLAS) + `rig.json` (MAP_CODE_RIG) + `*.meta.json` freshness metadata. Generated via vendored engines in `vendor/`. |
+| **Environment** | `.aether/ENVIRONMENT.md` | OS / shell / runtime context — built once per session, injected on the first task. |
+| **Log** | `.aether/log/<task_id>.log` | Append-only JSON Lines — source of truth for Task History, Activity, and Report. |
+
+**Bible = WHAT, Map = WHERE, Skill = HOW, Tool = CAPABILITY.** Map provides navigation; the LLM looks up locations and then reads the actual files. Staleness is detected deterministically (SHA-256 over `.py` source), but regeneration is never automatic — the LLM/Agent decides when to call `refresh_project_map`.
+
+Relevant tools: `project_map_status`, `atlas_query`, `rig_query`, `refresh_project_map` (Agent only; Consultant gets the first three).
+
+### Skill System
+
+Dynamic, progressive, and shared by Agent and Consultant.
+
+```
+skill_catalog
+↓
+LLM chooses 0 / 1 / N skill_ids
+↓
+load_skill(skill_id)  →  .aether/bible/skills/<skill_id>/skill.md
+↓
+load_skill_reference(skill_id, reference)  →  references/<reference> (on demand)
+```
+
+- **Dynamic IDs** — any `skill_id` matching `^[A-Za-z0-9._-]+$` (1–64 chars); directory names are not hard-coded.
+- **Progressive loading** — catalog returns only lightweight metadata (`skill_id`, `name`, `description`, `scope`, `location`). Content is loaded only when the LLM asks for it.
+- **References are optional** — loaded individually by path, never all at once.
+- **Shared mechanism** — Agent and Consultant use the same `SkillStore` (`agent_ai.projects.skills` / `agent_ai.tools.skills`). No second storage, no duplicate loader.
+- **Permissions differ**:
+  - Read tools (`skill_catalog`, `load_skill`, `load_skill_reference`) — available to both.
+  - Lifecycle tools (`create_skill`, `update_skill`, `delete_skill`) — **Agent only**, LLM-driven. Consultant remains read-only.
+- **No automatic selector** — no keyword matcher, scoring, or heuristic. The LLM decides whether to create / update / delete a Skill.
+- **Scope** — currently `project` (`project` is the only supported value today; the design is generic for future scopes).
+- **Storage** — `SkillStore` with atomic writes, idempotent `ensure()`, and tolerant parsing (corrupt files are skipped, not crashed).
+
+Skills are guidance/context, not a permission grant and not an auto-loaded context compressor.
+
+### Provider & Model
+
+Provider and model are configured independently.
+
+- Provider types are registered in `agent_ai.providers.registry` (`ollama`, `deepseek`, `openrouter`, `openai`, `9router`, `custom` / OpenAI-compatible). Adding a provider means registering a class with a unique `name` — core never imports a concrete provider.
+- **Configuration is stored in SQLite** (`data/aether.db`) via `agent_ai.llm_config.LLMConfigService`. The same database is used by the gateway launcher. Tables: `llm_provider_instances` and `llm_models`.
+- Each **Provider Instance** points to an env-var name (`api_key_env`, e.g. `OPENROUTER_API_KEY`), not the secret value. The secret stays in `.env`; the DB stores only the variable name, base URL, and metadata.
+- Each instance can have multiple **Models**. Selection is `Provider Instance → Model` (one instance, many models).
+- **OpenAI-compatible / custom provider** is a first-class entry (`CustomOpenAIProvider`). Any base URL + API key + model string can be wired through it, including self-hosted OpenAI-compatible endpoints.
+- Resolution at runtime uses `agent_ai.providers.factory.build_provider_from_config` — the same path for Agent and Consultant.
+- No hard-coded "recommended" model list in the README; the architecture is provider-agnostic and the UI reads available providers/models from the service.
+
+### Queue & Parallel Agent
+
+AETHER executes tasks in two modes that coexist:
+
+```
+Execution
+├── Queue      — serial / FIFO
+└── Parallel   — immediate, concurrent
+```
+
+**Queue**
+
+- Task joins the existing queue and waits for the global serial slot (1 execution slot).
+- FIFO by `queue_order`; `Move Up / Down` reorders.
+- `Disable` (`queue_state: disabled`) keeps a task from being scheduled without cancelling it.
+- `Remove` is only for non-running tasks.
+
+**Parallel**
+
+- Task starts its own Agent immediately, without waiting for the queue slot.
+- Multiple parallel tasks can run concurrently with each other and with the one queue task occupying the serial slot.
+- Each task carries its own Provider + Model (no global override).
+- There is no artificial limit on the number of parallel agents.
+
+Queue and Parallel coexist — a parallel task never blocks the queue slot and a queue task never blocks parallel tasks.
+
+**File Write Lock**
+
+Parallel agents share an in-process lock on write tools to prevent simultaneous writes to the same file:
+
+```
+Agent A → write_file(example.py)
+           ↓
+         lock acquired
+           ↓
+         write
+           ↓
+        unlock
+
+Agent B → write_file(example.py)
+           ↓
+        locked
+           ↓
+      tool error
+           ↓
+     LLM reads error → decides next step
+```
+
+- Applies to `write_file`, `edit_file`, `delete_file`, `move_file` (both paths for `move_file` are locked atomically).
+- Read tools remain unrestricted.
+- `run_command` is not part of the File Write Lock.
+- The lock is temporary — held only for the duration of the write operation, not the whole task.
+- Errors are returned through the existing tool error path; no new error channel. The LLM decides how to proceed (retry, pick another file, etc.).
+- This is not absolute filesystem isolation — it is a cooperative in-process guard within the same runtime process.
+
+### Workbench
+
+Vue 3 + Vite frontend (`web/frontend`) and a thin Django gateway (`web/django_app`). No agent logic lives in the frontend.
+
+- **Task input** — Task Composer modal (task text + Provider Instance + Model + Execution mode + retrieval profile).
+- **Provider / Model / Execution** — separate selectors. Execution is `Queue` or `Parallel`. The UI reads choices from `GET /api/config` and `GET /api/llm/providers` — nothing is hard-coded.
+- **Agent Workbench** — Latest Task card, lifecycle progress (Planning → Completed), duration ticker, and unified Agent Activity timeline (tool calls, observations, phase changes).
+- **Consultant** — chat modal with quick/investigate mode, image attachments, and Task Proposal → Run with the same Provider/Model selectors.
+- **Task History & Queue** — History reads from `.aether/log/` (persistent); Queue reflects `GET /api/tasks/queue` (pending/running/disabled). Both are the same global queue the backend uses.
+- **Changes & Explorer** — live filesystem changes (diff, additions/deletions) and a file tree bound to the active project root. Editor is Monaco.
+- **Task status** — `prepared` / `running` / `queued` / `validating` / `completed` / `failed` / `cancelled`.
+- **Stop confirmation** — Stop does not act immediately:
+
+```
+Stop
+↓
+Confirmation dialog
+↓
+Cancel  →  dismiss, task continues
+Stop    →  cooperative cancellation at safe boundary → CANCELLED
+```
+
+Send and Stop are separate actions — Send is always available (new task becomes `pending`/`queued` if the slot is occupied).
+
+### Telemetry
+
+Available on the task card and via Activity / SSE events. All values are derived from existing lifecycle events, not estimates:
+
+```
+Provider      — from provider_request / provider_response
+Model         — from the same events
+Execution     — Queue / Parallel (from TaskRecord)
+Round         — LLM invocation count (provider_request count)
+LLM Rounds    — same as Round
+Tool Calls    — tool_called count
+Tokens        — provider-reported usage (total / prompt+completion / prompt_eval+eval); "—" if not reported
+Duration      — from task_started → task_completed/failed/cancelled timestamps
+Status        — completed / failed / cancelled / running / queued
+```
+
+No local tokenizer estimate is used for Tokens.
+
+---
+
+## Security & Permissions
+
+- **Workspace boundary** — every filesystem and terminal tool resolves paths with `_resolve_within_root` and `cwd = project root`. Traversal and symlink escape are denied. `shell=False` for commands.
+- **Permission layer** (`agent_ai.permission`) — `PermissionPolicy` classifies actions (`READ_ONLY`, `WORKSPACE_WRITE`, `DELETE_MOVE`, `COMMAND_EXECUTION`, …) and decides `ALLOW / DENY / REQUIRE_APPROVAL`. Default is `ALLOW` when disabled (backward-compatible).
+- **Agent vs Consultant boundary** — Consultant gets `read_only: ALLOW`, `workspace_write: DENY`, `delete_move: DENY`, `external_network: DENY`. Its registry is also curated (no write/move/delete tools), so the boundary is layered: policy + registry + retrieval bound.
+- **Skill read tools are not a bypass** — loading a skill does not grant write capability. Lifecycle tools are only registered on the Agent registry.
+- **Secrets** — API keys stay in `.env`. SQLite holds only `api_key_env` names. Responses mask secrets (`sk-o***…`).
+- **No absolute claims** — these are project-bound, best-effort guards within the workspace root. They are not a sandbox or cross-process isolation boundary.
 
 ---
 
 ## Architecture
 
-```
-web/frontend/  (Vue 3 + Vite SPA)     ── served statically from dist/ ──┐
-                                                                         │
-                    ┌─────────────────────────────────────────────────────┤
-                    │  HTTP /api/* + SSE /api/events                     │
-                    ▼                                                     │
-web/django_app/api/  (Django gateway)                                     │
-    services.py  — GatewayService (task queue, scheduler, CRUD)           │
-    views.py     — HTTP handlers                                          │
-    urls.py      — route definitions                                      │
-    execution.py — TaskExecutor (background daemon thread)                │
-    streaming.py — SSE event dispatcher                                   │
-    project_store.py — project registry                                   │
-    github_backup.py — GitHub backup service                              │
-                    │                                                     │
-                    ▼                                                     │
-src/agent_ai/  (pure Python core library — NO Django dependency)           │
-    core/       — AgentOrchestrator, AgentLoop, ToolExecutor,             │
-                  CancellationToken, ConversationHistory                  │
-    runtime/    — AgentRuntime (task lifecycle, event emission)           │
-    tools/      — file I/O, terminal, project-map, workspace mutation    │
-    providers/  — Ollama, DeepSeek, OpenRouter, OpenAI-compatible        │
-    consultant/ — reasoning layer (modes, tools, prompts, service)       │
-    session/    — InMemorySessionStore, event types, SSE model           │
-    projects/   — Project Bible, Project Map service, Aether Store      │
-    vision/     — image input loader, preprocessor, vision policy        │
-    git/        — GitRepositoryFacade (read-only)                        │
-    permission/ — PermissionPolicy classifier                            │
+```mermaid
+flowchart TD
+  U[User] --> W[Workbench]
+  U --> C[Consultant]
+  C --> T[Task]
+  T --> Q[Queue - serial FIFO]
+  T --> P[Parallel - concurrent]
+  Q --> R[Agent Runtime]
+  P --> R
+  R --> TL[Tools]
+  R --> PM[Project Memory\nBible / Map / Skills]
+  R --> LLM[LLM Provider]
 ```
 
-**Data flow (task execution):**
+Runtime per task:
 
 ```
-User input → create_task → queue (pending) → scheduler (promotes to running)
-  → TaskExecutor.run()
-    → AgentOrchestrator.run_continuous_loop()
-      → LLM generate() ↔ tool calls ↔ event emission
-    → AgentRuntime._lifecycle_finalize()
-  → slot released → scheduler picks next pending task
-
-Events → InMemorySessionStore → SSE → frontend
-Events → .aether/log/<task_id>.log (persistent JSONL)
+PreparedTask → AgentRuntime → AgentOrchestrator.run_continuous_loop
+               → Provider.generate → LLMResponse (tool_calls / final)
+               → ToolExecutor → ToolRegistry
+               → observation (role: tool) → Provider.generate → ...
+               → DONE / FAILED / CANCELLED
 ```
 
 ---
 
-## Repository Layout
+## Project Structure
 
 ```
-aether-agent/
-├── .aether/                  # Project-local runtime data
-│   ├── bible/                # Project Bible (knowledge base)
-│   ├── log/                  # Persistent task logs (JSONL)
-│   ├── map/                  # Atlas + RIG maps
-│   └── github/               # GitHub backup config + encrypted token
-├── assets/
-│   └── audio/                # Sound files (start, succeed, failed, stop)
-├── data/
-│   └── aether.db             # SQLite: projects, LLM provider instances, models
-├── projects/                 # Workspace project folders (gitignored)
-├── scripts/                  # Verification & utility scripts
-│   ├── install_aether.py     # Portable installer (stdlib-only)
-│   └── check_*.py            # 50+ verifiers (architecture, components, integration)
-├── src/
-│   └── agent_ai/             # Core library (Python, Django-free)
-│       ├── core/             # Orchestrator, loop, executor, models
-│       ├── runtime/          # Task lifecycle & event emission
-│       ├── tools/            # File I/O, terminal, project-map, workspace
-│       ├── providers/        # Ollama, DeepSeek, OpenRouter, OpenAI-compatible
-│       ├── consultant/       # Reasoning layer (modes, tools, prompts, service)
-│       ├── session/          # InMemorySessionStore, event types
-│       ├── projects/         # Bible, map service, aether store
-│       └── vision/           # Image input & preprocessing
+.
+├── src/agent_ai/            # Core library (agent, tools, providers, project intelligence)
+│   ├── browser/             # Browser automation
+│   ├── capabilities/        # Capability declarations
+│   ├── codeindex/           # Code indexer
+│   ├── config/              # Settings (python-dotenv)
+│   ├── consultant/          # Consultant service, guard, policy, prompt
+│   ├── context/             # Context builder
+│   ├── core/                # Orchestrator, executor, cancel, observability
+│   ├── llm_config/          # Provider Instance / Model service (SQLite)
+│   ├── permission/          # Permission policy & classifier
+│   ├── projects/            # AetherProjectStore, Bible, Map, Skills, discovery
+│   ├── providers/           # BaseProvider + ollama / openai_compatible / custom / …
+│   ├── runtime/             # AgentRuntime, activity, models
+│   ├── task/                # Task preparation
+│   ├── tools/               # Filesystem, workspace, terminal, project_map, skills
+│   └── validation/          # Validation runner
 ├── web/
-│   ├── django_app/           # Django gateway (API, executor, SSE)
-│   │   ├── api/              # services, views, urls, execution, streaming
-│   │   └── config/           # Django settings, wsgi
-│   └── frontend/             # Vue 3 + Vite SPA
-│       └── src/
-│           ├── components/   # 13 Vue components
-│           ├── App.vue       # Root component
-│           ├── api.js         # API client
-│           ├── styles.css    # Global styles
-│           └── audioRegistry.js # Audio mapping
-├── .env                      # Local configuration (gitignored)
-├── deployment.template       # Environment template (no credentials)
-├── .env.example              # Quick-start example
-├── .gitignore
-├── pyproject.toml            # Python packaging (src-layout)
-├── requirements.txt          # Runtime dependencies
-├── run.bat                   # Self-bootstrapping launcher
-└── README.md                 # This file
+│   ├── django_app/          # Thin HTTP gateway (api/services.py, api/views.py)
+│   │   ├── api/             # Execution bridge, streaming (SSE), project_store
+│   │   └── config/          # Django settings
+│   └── frontend/            # Vue 3 + Vite workbench (src/App.vue, src/api.js)
+├── scripts/                 # install_aether.py, check_*.py verifiers
+├── tests/                   # Project tests
+├── vendor/                  # Vendored engines: CODE_ATLAS, MAP_CODE_RIG
+├── data/                    # SQLite DB (data/aether.db), version.json
+├── projects/                # Example / registered project roots
+└── run.bat                  # Self-bootstrapping launcher (double-click)
 ```
 
+`.aether` layout (created inside the active project root when a Skill / Bible entry / log is written):
+
+```
+.aether/
+├── bible/
+│   ├── index.md
+│   ├── architecture.md
+│   ├── conventions.md
+│   ├── decisions.md
+│   ├── facts.md
+│   ├── learnings.md
+│   ├── problems.md
+│   └── skills/                 # created when the first Skill is made
+│       └── <skill_id>/
+│           ├── skill.md
+│           └── references/     # optional
+├── map/
+│   ├── atlas.json
+│   ├── rig.json
+│   ├── atlas.meta.json
+│   └── rig.meta.json
+├── log/
+│   └── <task_id>.log
+├── github/                     # optional — GitHub backup config (DPAPI on Windows)
+└── ENVIRONMENT.md
+```
+
+On a fresh clone the `.aether/` directory does not need to exist — it is created on demand. The layout above is the contract used when Skills / Bible entries / maps are written.
+
 ---
 
-## Prerequisites
+## Getting Started
 
-| Tool      | Version       | Notes                                         |
-|-----------|---------------|-----------------------------------------------|
-| Windows   | 10 / 11       | AETHER is developed and tested on Windows      |
-| Python    | >= 3.10       | Must be available on PATH                      |
-| Git       | any recent    | Required for clone and backup features         |
-| Node.js   | >= 18         | Required for frontend build (npm is used only when `node_modules` is missing) |
-| Port 8000 | free          | Default AETHER gateway port                     |
+### Prerequisites
 
-AETHER does **not** install Python, Git, or Node.js automatically. If a tool is missing, the installer prints a clear message and stops.
+- Python 3.10+
+- Git
+- Node.js (for frontend build — installed automatically by `run.bat` / `scripts/install_aether.py`; manual install only needed for frontend dev)
 
----
-
-## Installation & First Run
-
-### Quick start
-
-Double-click `run.bat` in the repository root, or run from a terminal:
+### 1. Get the code
 
 ```bat
-run.bat
+git clone https://github.com/adigayung/aether-agent.git
+cd aether-agent
 ```
 
-This self-bootstrapping launcher will:
+Or just download and double-click `run.bat` — it will clone to `aether-agent/` next to the launcher if no installation is found.
 
-1. Detect whether an AETHER folder exists (signatures: `pyproject.toml` + `web\django_app\manage.py`, or `manage.py` + `scripts\install_aether.py`).
-2. If not found: `git clone https://github.com/adigayung/aether-agent.git` into a sibling folder.
-3. Validate Python and Git availability.
-4. Delegate all setup to `scripts/install_aether.py`:
-   - Create a Python virtual environment (`<root>/venv/`).
-   - Install runtime dependencies (`pip install -r requirements.txt`).
-   - Copy `deployment.template` to `.env` (no credentials included).
-   - Build the frontend via Vite (`node node_modules/vite/bin/vite.js build`).
-   - Launch the Django gateway at `http://127.0.0.1:8000/`.
+### 2. Configure providers
 
-The launcher is **idempotent** — running it again skips completed steps.
-
-### Dry-run simulation
-
-Test the installer flow **without network access or any mutations**:
+Copy the template and fill in what you need:
 
 ```bat
-set AETHER_SIMULATE=1
-run.bat
+copy .env.example .env
 ```
 
-Or directly:
+`LLMConfigService` is the source of truth for Provider Instance → Model. You can configure providers two ways:
 
-```powershell
-python scripts\install_aether.py --simulate
-python scripts\install_aether.py --simulate --root D:\empty\folder
+- **Via the Workbench** — open Settings after first launch: add a Provider Instance (type + base URL + `api_key_env` name), add Models, and set API keys (written to `.env` masked in responses).
+- **Via `.env` directly** — set `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `OLLAMA_HOST`, etc. These are used as fallbacks and for the env-var names that instances point to.
+
+Context budgets are optional:
+
+```ini
+CONTEXT_KNOWLEDGE_MAX_TOKENS=8000
+CONTEXT_MAX_TOKENS=16000
 ```
 
-### Installer CLI flags
+### 3. Run AETHER
 
-| Flag                  | Description                                                      |
-|-----------------------|------------------------------------------------------------------|
-| `--root <path>`       | AETHER installation root (default: parent of `scripts/`)          |
-| `--host <host>`       | Gateway bind host (default: `127.0.0.1`)                         |
-| `--port <port>`       | Gateway port (default: `8000`)                                    |
-| `--check`             | Verify prerequisites only; do not change anything                 |
-| `--simulate`          | Dry-run offline (no network, no mutations)                        |
-| `--no-launch`         | Setup only; do not start the server                               |
-| `--skip-frontend`     | Skip frontend build                                               |
-| `--rebuild-frontend`  | Force frontend rebuild even if `dist/` exists                     |
-| `--force-deps`        | Reinstall Python dependencies even if already satisfied           |
-| `--no-browser`        | Do not open browser automatically on launch                       |
+Double-click `run.bat`, or from a terminal:
 
-### Environment variables
+```bat
+python scripts/install_aether.py
+```
 
-The installer accepts `AETHER_INSTALL_DIR` (override installation folder) and `AETHER_ARGS` (pass extra arguments to the installer). Non-interactive mode: `AETHER_NONINTERACTIVE=1` suppresses pauses.
+What it does (idempotent — safe to run repeatedly):
+
+1. Verifies Python and Git
+2. Creates `venv/` and installs `requirements.txt`
+3. Ensures `.env` exists
+4. Builds `web/frontend/dist` if missing (`vite build`)
+5. Starts the gateway at `http://127.0.0.1:8000/` and opens a browser
+
+Useful flags:
+
+```bat
+python scripts/install_aether.py --check          # verify prerequisites only
+python scripts/install_aether.py --no-launch      # setup without starting server
+python scripts/install_aether.py --simulate       # dry-run (no downloads / writes)
+```
+
+Manual alternative (after `venv` is ready):
+
+```bat
+venv\Scripts\activate
+python web\django_app\manage.py runserver 127.0.0.1:8000
+```
+
+Deployment template: see `deployment.template` (checked in without secrets) for the environment variables consumed in a deployment. The verifier `scripts/check_packaging.py` ensures it contains no real API keys.
+
+### 4. Create a task
+
+1. Open `http://127.0.0.1:8000/`.
+2. Pick or create a Project in the launcher.
+3. Add a Provider Instance + Model in Settings if none exists.
+4. Click the input bar → Task Composer → write the task, pick **Provider**, **Model**, and **Execution** (`Queue` or `Parallel`), then Send.
+
+### 5. Queue vs Parallel
+
+- **Queue** — task waits for the serial slot (FIFO). Use for edits to the same area.
+- **Parallel** — task starts immediately and can run alongside others. Use for independent areas.
+
+Both appear in the global Task Queue; History is the persistent `.aether/log/` archive.
 
 ---
 
-## Configuration
+## Example Workflows
 
-### .env file
+Single task:
 
-AETHER reads configuration from `.env` (via `python-dotenv`). A template is provided as `deployment.template` — copy it and fill secrets:
+```
+User:
+  "Fix authentication bug — login redirect drops session after OAuth callback"
 
-```powershell
-Copy-Item deployment.template .env
+AETHER:
+  → reads Project Bible / Map
+  → searches and inspects auth code
+  → edits the relevant file(s)
+  → runs validation / tests
+  → reports the result with a diff summary
 ```
 
-Key environment variables:
+Parallel:
 
-| Variable                  | Description                                              |
-|---------------------------|----------------------------------------------------------|
-| `OLLAMA_HOST`             | Ollama server URL (default: `http://127.0.0.1:11434`)     |
-| `OLLAMA_MODEL`            | Default Ollama model                                     |
-| `OLLAMA_TIMEOUT`          | Ollama request timeout (seconds)                          |
-| `DEEPSEEK_API_KEY`        | DeepSeek API key (optional)                               |
-| `OPENROUTER_API_KEY`      | OpenRouter API key (optional)                             |
-| `OPENAI_API_KEY`          | OpenAI API key (optional)                                 |
-| `LOG_LEVEL`               | Logging level (default: `INFO`)                           |
-| `AETHER_ENV`              | `development` or `production` (controls Django security)  |
-| `DJANGO_SECRET_KEY`       | Django secret key (required in production)                |
-| `DJANGO_DEBUG`            | `true` (dev) or `false` (prod)                            |
-| `DJANGO_ALLOWED_HOSTS`    | Comma-separated host list (required in production)        |
-| `PERMISSION_*`            | Action permission overrides (allow / deny / require_approval) |
+```
+Task A → "Add calculator module (src/calc/*)"   → Parallel
+Task B → "Restyle login page (web/login.html)"  → Parallel
 
-Additional environment variables for Project Map engine paths:
-
-| Variable                      | Description                                      |
-|-------------------------------|--------------------------------------------------|
-| `AETHER_CODE_ATLAS_DIR`       | Path to Atlas engine (default: `<AETHER_ROOT>\vendor\CODE_ATLAS`) |
-| `AETHER_MAP_CODE_RIG_DIR`     | Path to RIG engine (default: `<AETHER_ROOT>\vendor\MAP_CODE_RIG`) |
-| `AETHER_DIR`                  | AETHER root directory (used by gateway at runtime) |
-| `OLLAMA_NUM_CTX`              | Ollama context window size (default: 32768)       |
-
-### LLM Provider & Model configuration
-
-Provider instances and models are managed through the AETHER Settings UI and stored in `data/aether.db` (tables `llm_provider_instances` and `llm_models`). The `.env` file only stores API secrets; the active provider is selected from the UI.
-
----
-
-## Usage
-
-### Workbench
-
-The main interface is the Workbench (http://127.0.0.1:8000/). It contains:
-
-- **Agent Input** — textarea for submitting new tasks to the Agent. Multiline support (Enter = newline). Send submits the task to the global queue.
-- **Agent Activity** — chronological timeline of agent events (commentary, tool calls, tool results, observations, final report).
-- **Task Card** — displays the latest task with lifecycle stepper, duration, provider, and model metadata.
-- **TASKS page** — two tabs: **QUEUE** (live pending/running/disabled tasks with controls: Stop, Disable/Enable, Move Up/Down, Remove) and **HISTORY** (completed tasks with report viewing).
-- **Projects page** — project registry listing with GitHub Backup status and per-project GitHub configuration. Delete removes the project from the registry only (files on disk are untouched).
-- **Backup page** — GitHub backup configuration for the active project (repository, branch, token, checkpoints, restore).
-- **Settings page** — LLM provider instance and model management, API key input.
-- **File Explorer** — tree-view file browser with recursive expansion, context menu, and live updates on filesystem changes.
-- **Changes panel** — workspace change summary with accordion diff.
-- **Code Editor** — Monaco-based editor modal for viewing/editing files.
-
-### Consultant Chat
-
-Open the Consultant Chat (from the sidebar or Agent Input area) to interact with the AETHER reasoning layer:
-
-- **Quick mode** — answers questions from Project Bible + Project Map (read-only). No source/runtime tools. Suitable for architectural and structural questions.
-- **Investigate mode** — has access to source/runtime tools (`list_files`, `read_file`, `search_code`, `run_command`) in addition to Bible + Map, for in-depth investigation.
-- The Consultant can generate a **Task Proposal** (a structured ````task block) with a **Run Task** button that submits it to the Agent. The proposal card includes per-task provider/model selection dropdowns and a copy button.
-- Image attachments (JPEG, PNG, WebP) are supported.
-
-### Task Queue
-
-- All tasks (from Consultant Run Task or Agent Input) enter a **single global queue**.
-- Execution is serial (concurrency = 1). The scheduler promotes the first `pending` task when the execution slot is free.
-- Tasks can be `disabled` (skipped by the scheduler without removal) or `removed` from the queue.
-- Stopping a running task triggers cooperative cancellation at the next safe boundary.
-
----
-
-## Data & State
-
-| Data                              | Location                             | Format               | Notes                                      |
-|-----------------------------------|--------------------------------------|----------------------|--------------------------------------------|
-| Project registry                  | `data/aether.db`                     | SQLite               | Tables: `projects`, `app_state`            |
-| LLM configuration                 | `data/aether.db`                     | SQLite               | Tables: `llm_provider_instances`, `llm_models` |
-| Task logs (persistent)            | `.aether/log/<task_id>.log`          | JSONL                | Append-only, line-delimited JSON           |
-| Project Bible                     | `.aether/bible/<category>.md`        | Markdown             | Consultant-maintained knowledge            |
-| Project Map (Atlas)               | `.aether/map/atlas.json`             | JSON                 | Code structure + navigation                |
-| Project Map (RIG)                 | `.aether/map/rig.json`               | JSON                 | Code relationship graph                    |
-| GitHub backup config              | `.aether/github/config.json`         | JSON                 | Per-project config                         |
-| GitHub backup token (encrypted)   | `.aether/github/credential.enc`      | DPAPI-encrypted      | Bound to Windows user + machine            |
-| Workspace projects                | `projects/<uuid>/`                   | Various              | User-created project workspaces            |
-| Audio assets                      | `assets/audio/*.wav`                 | WAV                  | start, succeed, failed, stop               |
-
----
-
-## API Endpoints
-
-The Django gateway exposes the following API routes (all under `/api/`):
-
-| Endpoint                                    | Method(s) | Description                          |
-|---------------------------------------------|-----------|--------------------------------------|
-| `health`                                    | GET       | Health check                         |
-| `config`                                    | GET       | Gateway configuration                |
-| `llm/config`                                | GET/POST  | LLM configuration                    |
-| `llm/credentials`                           | GET/POST  | LLM API credentials                  |
-| `llm/credentials/delete`                    | POST      | Delete a credential                  |
-| `llm/providers`                             | GET       | List LLM provider instances          |
-| `llm/providers/<id>`                        | GET       | Provider instance detail             |
-| `llm/models`                                | GET       | List LLM models                      |
-| `llm/models/<id>`                           | GET       | Model detail                         |
-| `projects`                                  | GET       | List projects                        |
-| `projects/<id>/github`                      | GET/POST  | GitHub backup config per project     |
-| `projects/<id>/github/test`                 | POST      | Test GitHub connection               |
-| `projects/<id>/github/checkpoints`          | GET       | List checkpoints (git log)           |
-| `projects/<id>/github/restore`              | POST      | Restore a checkpoint                 |
-| `projects/<id>`                             | DELETE    | Delete project from registry         |
-| `active-project`                            | GET/POST  | Get/set active project               |
-| `open-in-explorer`                          | POST      | Open folder in Windows Explorer      |
-| `reveal-in-explorer`                        | POST      | Reveal file in Windows Explorer      |
-| `delete-entry`                              | POST      | Delete file/folder from workspace    |
-| `files`                                     | GET       | List files in a directory            |
-| `files/content`                             | GET/POST  | Read/write file content              |
-| `tasks`                                     | GET/POST  | List/create tasks                    |
-| `tasks/queue`                               | GET       | List queue tasks                     |
-| `tasks/queue/<id>/disable`                  | POST      | Disable a pending task               |
-| `tasks/queue/<id>/enable`                   | POST      | Enable a disabled task               |
-| `tasks/queue/<id>/move`                     | POST      | Reorder a queue task                 |
-| `tasks/queue/<id>/remove`                   | POST      | Remove a task from queue             |
-| `tasks/history`                             | GET       | List task history (from `.aether/log`). Sorted newest → oldest |
-| `tasks/history/<id>`                        | GET       | Task history detail                  |
-| `tasks/<id>`                                | GET       | Get task status                      |
-| `tasks/<id>/cancel`                         | POST      | Cancel a running task                |
-| `tasks/<id>/activity`                       | GET       | Chronological task events            |
-| `tasks/<id>/report`                         | GET       | Final Agent report                   |
-| `consultant/consult`                        | POST      | Consultant chat request              |
-| `events`                                    | GET       | SSE event stream                     |
-
-**Note:** literal route segments (e.g., `tasks/queue`, `tasks/history`) are registered before parameterized segments (`tasks/<task_id>`) to avoid shadowing.
-
----
-
-## Verification
-
-AETHER includes 50+ verification scripts under `scripts/check_*.py`. Run them from the repository root with the AETHER virtual environment active:
-
-```powershell
-.\venv\Scripts\python.exe scripts\check_workbench.py
-.\venv\Scripts\python.exe scripts\check_task_queue_scheduler.py
-.\venv\Scripts\python.exe scripts\check_consultant.py
-.\venv\Scripts\python.exe scripts\check_cancellation.py
-.\venv\Scripts\python.exe scripts\check_final_report.py
+— Both start immediately.
+— Each uses its own Provider + Model.
+— File Write Lock prevents them from clobbering the same file;
+  independent files proceed without contention.
 ```
 
-Some scripts require the Django gateway and a configured LLM provider. Pre-existing failures (e.g., check_architecture item [5], check_workbench step [2] with stale string assertions) are unrelated to current changes.
+Consultant → Agent:
 
-Example — offline verification of the installer flow:
-
-```powershell
-python scripts\check_installer.py
 ```
+Consultant (investigate):
+  "Where is session handled and what could cause the drop?"
+
+Consultant → Task Proposal (```task fence)
+
+User clicks Run Task → task is created via the normal Queue/Parallel path.
+```
+
+These are conceptual examples, not benchmarks.
 
 ---
 
-## Development Notes
+## Design Principles
 
-### Frontend rebuild
+- LLM remains the decision maker — no heuristic auto-selector or forced completion.
+- Provider / tool agnostic — core never imports a concrete provider; tools are registered generically.
+- Project-first — all writes are project-local (`.aether/` inside the target root).
+- Modular — gateway, runtime, tools, and project intelligence are thin facades over existing components.
+- Progressive disclosure — catalog before content; references on demand; no bulk injection.
+- Avoid unnecessary reads / tool calls — duplicate reads return `already_available` / `already_read` / `already_searched` and the agent is expected to use what it already has.
+- No heuristic stop — the loop ends on the LLM's final response.
+- No unnecessary context compression — `compression.enabled` stays `false`; no automatic truncation.
+- Agent and Consultant separation — different registries, different permission policies, same loop infrastructure.
 
-The Vue frontend is served as a static production build from `web/frontend/dist/`. After any UI change, rebuild with:
+---
 
-```powershell
-cd web\frontend
-node node_modules\vite\bin\vite.js build
+## Roadmap
+
+### Implemented
+
+```
+Implemented
+├── Autonomous Agent (continuous Native Tool Calling loop)
+├── Consultant (quick / investigate, read-only, Task Proposals)
+├── Project Intelligence (Bible / Atlas / RIG / Maps with freshness)
+├── Skill System (catalog → load_skill → load_skill_reference, Agent lifecycle)
+├── Provider & Model architecture (instances + models in SQLite, OpenAI-compatible/custom)
+├── Queue (serial FIFO) + Parallel Agent (concurrent, File Write Lock)
+├── Workbench (task composer, history, activity, changes, explorer, Monaco editor)
+├── Telemetry (provider/model/round/tool calls/tokens/duration/status)
+└── Permission & workspace boundary
 ```
 
-(`npm` is not always available in the AETHER subprocess; use the Node.js entrypoint directly.)
+### Future
 
-After rebuilding, perform a hard refresh (Ctrl+F5) in the browser if the running instance serves a cached bundle.
+```
+Future
+├── Extension System
+└── Advanced multi-agent / God Mode
+```
 
-### Architecture constraints
+Extension System and God Mode are planned directions and are not yet implemented.
 
-- `src/agent_ai/` is a pure Python library and **must not depend on Django** or any web framework.
-- The Django gateway (`web/django_app/api/`) is the only layer that imports Django.
-- All changes must maintain this separation.
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
