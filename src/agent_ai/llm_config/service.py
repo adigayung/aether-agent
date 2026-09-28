@@ -504,6 +504,7 @@ class LLMConfigService:
         data["provider_label"] = spec.label if spec is not None else instance.provider_type
         data["models"] = [m.to_dict() for m in self.store.list_models(instance.id)]
         data["api_key_present"] = self.has_api_key(instance.api_key_env)
+        data["requires_model"] = spec.requires_model if spec is not None else True
         if include_api_key:
             data["api_key"] = (
                 self.get_api_key(instance.api_key_env) if instance.api_key_env else None

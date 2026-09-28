@@ -482,6 +482,39 @@ class GatewayService:
             raise NotFoundError(f"Model '{model_id}' tidak ditemukan.")
         return {"deleted": True, "id": model_id}
 
+    # ---- Test Connection ----
+    def test_llm_provider(self, provider_id: str) -> Dict[str, Any]:
+        """Test koneksi ke provider instance.
+
+        Melakukan request HTTP ringan ke endpoint provider untuk memverifikasi
+        bahwa API key dan base URL valid. Untuk provider seperti 9Router yang
+        tidak membutuhkan model, test dilakukan tanpa model.
+        """
+        from agent_ai.providers.base import ProviderError
+        from agent_ai.providers.factory import build_provider_from_config
+
+        if not provider_id:
+            raise ValidationError("Parameter 'provider_id' wajib diisi.")
+
+        try:
+            resolved = self.llm_config_service.resolve_runtime_config(
+                provider_id, include_api_key=True
+            )
+            provider = build_provider_from_config(resolved)
+        except Exception as exc:
+            raise ValidationError(str(exc)) from exc
+
+        # Test: kirim request chat sederhana.
+        try:
+            result = provider.generate(prompt="ping")
+            if result and result.text is not None:
+                return {"status": "ok", "detail": "Connection successful."}
+            return {"status": "ok", "detail": "Connection successful (empty response)."}
+        except ProviderError as exc:
+            return {"status": "error", "detail": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - error koneksi
+            return {"status": "error", "detail": f"{type(exc).__name__}: {exc}"}
+
     # ------------------------------------------------------------------ #
     # Projects (memakai ProjectRegistry AETHER)
     # ------------------------------------------------------------------ #
@@ -1304,10 +1337,16 @@ class GatewayService:
             return
 
         from agent_ai.llm_config import LLMConfigError
+        from agent_ai.llm_config.providers import get_provider_type as _get_ptype
 
         try:
             if instance_id:
-                self.llm_config_service.get_provider_instance(instance_id)
+                instance = self.llm_config_service.get_provider_instance(instance_id)
+                spec = _get_ptype(instance.provider_type)
+                # Provider yang tidak membutuhkan model (9Router) tidak perlu
+                # divalidasi model-nya.
+                if spec is not None and not spec.requires_model:
+                    return
             if model_id:
                 model = self.llm_config_service.get_model(model_id)
                 if instance_id and model.provider_id != instance_id:

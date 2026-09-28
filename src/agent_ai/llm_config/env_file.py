@@ -21,7 +21,7 @@ from agent_ai.llm_config.providers import is_api_key_env_name
 
 # Satu baris assignment: `[export ]KEY=VALUE`.
 _ENV_ASSIGNMENT = re.compile(
-    r"^(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=(?P<value>.*)$"
+    r"^(?:export\s+)?(?P<key>[A-Za-z0-9_][A-Za-z0-9_]*)\s*=(?P<value>.*)$"
 )
 
 PathLike = Union[str, "os.PathLike[str]"]

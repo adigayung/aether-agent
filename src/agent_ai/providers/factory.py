@@ -21,7 +21,7 @@ from typing import Any, Dict, Optional
 from agent_ai.providers.base import BaseProvider, ProviderNotConfiguredError
 
 #: Provider type yang membutuhkan API key (cloud, OpenAI-compatible).
-_OPENAI_COMPATIBLE_TYPES = ("openrouter", "openai", "deepseek")
+_OPENAI_COMPATIBLE_TYPES = ("openrouter", "openai", "deepseek", "9router")
 
 
 def _clean(value: Any) -> str:
@@ -52,6 +52,12 @@ def _build_openai_compatible_config(
         from agent_ai.config.settings import DeepSeekConfig
 
         config_cls = DeepSeekConfig
+    elif provider_type == "9router":
+        from agent_ai.config.settings import NineRouterConfig
+
+        config_cls = NineRouterConfig
+        # 9Router tidak membutuhkan model; jangan set model di kwargs.
+        model = ""
     else:  # pragma: no cover - dijaga caller
         raise ProviderNotConfiguredError(
             f"Provider type '{provider_type}' tidak dikenal."
@@ -139,6 +145,10 @@ def build_provider_from_config(config: Dict[str, Any]) -> BaseProvider:
             from agent_ai.providers.deepseek import DeepSeekProvider
 
             return DeepSeekProvider(config=provider_config)
+        if provider_type == "9router":
+            from agent_ai.providers.nine_router import NineRouterProvider
+
+            return NineRouterProvider(config=provider_config)
         from agent_ai.providers.openai_compatible import OpenAICompatibleProvider
 
         return OpenAICompatibleProvider(config=provider_config)

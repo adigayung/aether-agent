@@ -24,10 +24,10 @@ from typing import Dict, List, Optional, Tuple
 # Contoh valid  : OPENROUTER_API_KEY, OPENROUTER_API_KEY_AKUN_TEMAN
 # Contoh invalid: OPENROUTER_MODEL, PATH, OLLAMA_HOST, ANOTHER_SECRET
 #
-# <PREFIX> = huruf besar diawali huruf, diikuti huruf/angka.
+# <PREFIX> = huruf besar ATAU angka diawali huruf/angka, diikuti huruf/angka.
 # <SUFFIX> = satu atau lebih segmen `_XXX` (huruf besar/angka/underscore).
 API_KEY_ENV_PATTERN = re.compile(
-    r"^(?P<prefix>[A-Z][A-Z0-9]*)_API_KEY(?P<suffix>_[A-Z0-9_]+)?$"
+    r"^(?P<prefix>[A-Z0-9][A-Z0-9]*)_API_KEY(?P<suffix>_[A-Z0-9_]+)?$"
 )
 
 
@@ -41,6 +41,8 @@ class ProviderTypeSpec:
         env_prefix: prefix env untuk API key (mis. "OPENROUTER").
         default_api_url: API URL default (base URL) provider.
         requires_api_key: True bila API key wajib (cloud). False untuk lokal.
+        requires_model: True bila provider membutuhkan model. False untuk provider
+            seperti 9Router yang menentukan model sendiri.
     """
 
     key: str
@@ -48,6 +50,7 @@ class ProviderTypeSpec:
     env_prefix: str
     default_api_url: str
     requires_api_key: bool
+    requires_model: bool = True
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -56,6 +59,7 @@ class ProviderTypeSpec:
             "env_prefix": self.env_prefix,
             "default_api_url": self.default_api_url,
             "requires_api_key": self.requires_api_key,
+            "requires_model": self.requires_model,
         }
 
 
@@ -92,6 +96,14 @@ _PROVIDER_TYPES: Dict[str, ProviderTypeSpec] = {
             env_prefix="OLLAMA",
             default_api_url="http://localhost:11434",
             requires_api_key=False,
+        ),
+        ProviderTypeSpec(
+            key="9router",
+            label="9Router",
+            env_prefix="9ROUTER",
+            default_api_url="http://127.0.0.1:20128/v1",
+            requires_api_key=True,
+            requires_model=False,
         ),
     )
 }

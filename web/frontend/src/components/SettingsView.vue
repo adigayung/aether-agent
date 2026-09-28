@@ -18,6 +18,7 @@ import {
   deleteLLMModel,
   createLLMCredential,
   deleteLLMCredential,
+  testLLMProvider,
 } from "../api";
 
 const props = defineProps({
@@ -167,6 +168,25 @@ function removeModel(m) {
   run(() => deleteLLMModel(m.id), "Model dihapus.");
 }
 
+const testResults = reactive({});
+
+async function testProvider(p) {
+  const id = p.id;
+  testResults[id] = "testing…";
+  try {
+    const result = await testLLMProvider(id);
+    if (result.status === "ok") {
+      testResults[id] = "✅ Connection OK";
+    } else {
+      testResults[id] = `❌ ${result.detail || "Failed"}`;
+    }
+  } catch (e) {
+    testResults[id] = `❌ ${e.message || e}`;
+  }
+  // Auto-clear setelah 8 detik
+  setTimeout(() => { testResults[id] = ""; }, 8000);
+}
+
 function submitCredential() {
   run(async () => {
     await createLLMCredential(credentialForm.name, credentialForm.value);
@@ -256,11 +276,15 @@ onMounted(load);
             >
               {{ p.enabled ? "Disable" : "Enable" }}
             </button>
+            <button class="btn-aether btn-ghost-a" :disabled="busy" @click="testProvider(p)">
+              Test
+            </button>
             <button class="btn-aether btn-danger-a" :disabled="busy" @click="removeProvider(p)">
               Delete
             </button>
           </div>
         </div>
+        <div class="sv-test-result" v-if="testResults[p.id]">{{ testResults[p.id] }}</div>
 
         <!-- Model milik provider instance ini. -->
         <div class="sv-models">
@@ -561,6 +585,14 @@ onMounted(load);
   margin-top: 4px;
   font-size: 11.5px;
   color: var(--text-faint);
+}
+
+.sv-test-result {
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: 8px;
+  background: rgba(139, 92, 246, 0.08);
+  color: var(--text-dim);
 }
 
 .status-tag.ok {

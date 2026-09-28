@@ -180,6 +180,18 @@ def llm_provider_detail(
 @csrf_exempt
 @require_http_methods(["POST"])
 @_handle
+def llm_provider_test(request: HttpRequest, service: GatewayService) -> JsonResponse:
+    """POST /api/llm/providers/test -> test connection ke provider instance.
+
+    Body: {provider_id: str}
+    """
+    body = _parse_json_body(request)
+    return _json_response(service.test_llm_provider(provider_id=body.get("provider_id")))
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@_handle
 def llm_models(request: HttpRequest, service: GatewayService) -> JsonResponse:
     """POST /api/llm/models -> tambah model pada provider instance."""
     body = _parse_json_body(request)

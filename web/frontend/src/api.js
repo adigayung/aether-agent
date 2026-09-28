@@ -86,6 +86,13 @@ export function deleteLLMProvider(providerId) {
   });
 }
 
+export function testLLMProvider(providerId) {
+  return request("/llm/providers/test", {
+    method: "POST",
+    body: JSON.stringify({ provider_id: providerId }),
+  });
+}
+
 export function createLLMModel(payload) {
   return request("/llm/models", {
     method: "POST",

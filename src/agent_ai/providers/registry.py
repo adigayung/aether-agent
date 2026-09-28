@@ -15,6 +15,7 @@ from agent_ai.providers.deepseek import DeepSeekProvider
 from agent_ai.providers.ollama import OllamaProvider
 from agent_ai.providers.openai_compatible import OpenAICompatibleProvider
 from agent_ai.providers.openrouter import OpenRouterProvider
+from agent_ai.providers.nine_router import NineRouterProvider
 
 
 class ProviderRegistry:
@@ -59,6 +60,7 @@ registry.register(OllamaProvider)
 registry.register(DeepSeekProvider)
 registry.register(OpenRouterProvider)
 registry.register(OpenAICompatibleProvider)
+registry.register(NineRouterProvider)
 
 
 def get_provider(name: str) -> BaseProvider:

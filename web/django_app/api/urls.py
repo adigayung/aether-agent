@@ -27,6 +27,7 @@ urlpatterns = [
         name="delete_llm_credential",
     ),
     path("llm/providers", views.llm_providers, name="llm_providers"),
+    path("llm/providers/test", views.llm_provider_test, name="llm_provider_test"),
     path(
         "llm/providers/<str:provider_id>",
         views.llm_provider_detail,

@@ -162,6 +162,22 @@ class OpenRouterConfig:
         return bool(self.api_key)
 
 
+@dataclass(frozen=True)
+class NineRouterConfig:
+    """Konfigurasi provider 9Router (OpenAI-compatible, tanpa model)."""
+
+    api_key: str = field(default_factory=lambda: _get("9ROUTER_API_KEY"))
+    base_url: str = "http://127.0.0.1:20128/v1"
+    model: str = field(default="")
+    timeout: int = 120
+    context_window: int = 0
+
+    @property
+    def is_configured(self) -> bool:
+        """True bila API key sudah diisi."""
+        return bool(self.api_key)
+
+
 # ---------------------------------------------------------------------------
 # Konfigurasi Advanced Context / Token Budgeting (#40)
 # ---------------------------------------------------------------------------
@@ -499,6 +515,7 @@ class Settings:
     deepseek: DeepSeekConfig = field(default_factory=DeepSeekConfig)
     openai: OpenAIConfig = field(default_factory=OpenAIConfig)
     openrouter: OpenRouterConfig = field(default_factory=OpenRouterConfig)
+    nine_router: NineRouterConfig = field(default_factory=NineRouterConfig)
 
     # Advanced Context / Token Budgeting (#40)
     context: ContextConfig = field(default_factory=ContextConfig)

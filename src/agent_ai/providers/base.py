@@ -342,6 +342,10 @@ class BaseProvider(ABC):
     #: Nama unik provider. Wajib di-override oleh subclass.
     name: str = "base"
 
+    #: True bila provider membutuhkan model untuk beroperasi.
+    #: Provider seperti 9Router yang menentukan model sendiri dapat set ini ke False.
+    requires_model: bool = True
+
     @abstractmethod
     def generate(
         self,

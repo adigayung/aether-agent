@@ -40,10 +40,21 @@ const providerOptions = computed(() =>
   (props.providers || []).filter((p) => p.enabled !== false)
 );
 
+// Apakah provider yang dipilih membutuhkan model?
+const providerNeedsModel = computed(() => {
+  const inst = providerOptions.value.find((p) => p.id === props.providerInstanceId);
+  if (!inst) return true; // default: butuh model
+  return inst.requires_model !== false;
+});
+
 // Model difilter: HANYA model milik Provider Instance yang dipilih.
+// Untuk provider dengan requires_model=False (seperti 9Router), model dianggap
+// tidak diperlukan — model selector disembunyikan.
 const modelOptions = computed(() => {
   const inst = providerOptions.value.find((p) => p.id === props.providerInstanceId);
   if (!inst) return [];
+  // Provider seperti 9Router tidak membutuhkan model
+  if (inst.requires_model === false) return [];
   return (inst.models || []).filter((m) => m.enabled !== false);
 });
 
@@ -109,7 +120,7 @@ function submit() {
       </label>
 
       <!-- Model: HANYA model milik Provider Instance yang dipilih. -->
-      <label class="composer-select">
+      <label v-if="modelOptions.length > 0 || providerNeedsModel" class="composer-select">
         <span class="cs-label">Model</span>
         <select
           class="input-a"

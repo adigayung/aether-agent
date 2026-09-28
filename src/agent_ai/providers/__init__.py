@@ -12,6 +12,7 @@ from agent_ai.providers.base import (
     ToolDefinition,
 )
 from agent_ai.providers.deepseek import DeepSeekProvider
+from agent_ai.providers.nine_router import NineRouterProvider
 from agent_ai.providers.ollama import OllamaProvider
 from agent_ai.providers.openai_compatible import OpenAICompatibleProvider
 from agent_ai.providers.openrouter import OpenRouterProvider
@@ -38,6 +39,7 @@ __all__ = [
     "DeepSeekProvider",
     "OpenAICompatibleProvider",
     "OpenRouterProvider",
+    "NineRouterProvider",
     "registry",
     "get_provider",
     "InfrastructureRetryPolicy",
