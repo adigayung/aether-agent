@@ -2152,6 +2152,19 @@ class GatewayService:
         ext_reg = getattr(self, "_ext_registry", None)
         lifecycle = getattr(self, "_ext_lifecycle_store", None)
         if cap_reg is None or ext_reg is None:
+            try:
+                from agent_ai.extensions.agent_bridge import get_agent_extension_manager
+
+                mgr = get_agent_extension_manager()
+                self._ext_capability_registry = mgr.capability_registry  # type: ignore[attr-defined]
+                self._ext_registry = mgr.registry  # type: ignore[attr-defined]
+                self._ext_lifecycle_store = mgr.lifecycle_store  # type: ignore[attr-defined]
+                self._ext_tool_registry = mgr.tool_registry  # type: ignore[attr-defined]
+                self._ext_manager = mgr  # type: ignore[attr-defined]
+                return mgr
+            except Exception:
+                pass
+        if cap_reg is None or ext_reg is None:
             cap_reg = CapabilityRegistry()
             ext_reg = ExtensionRegistry()
             lifecycle = get_lifecycle_store()
@@ -2178,9 +2191,9 @@ class GatewayService:
         tool_reg = getattr(self, "_ext_tool_registry", None)
         if tool_reg is None:
             try:
-                from agent_ai.tools.registry import ToolRegistry
+                from agent_ai.tools.registry import get_extension_tool_registry
 
-                tool_reg = ToolRegistry()
+                tool_reg = get_extension_tool_registry()
             except Exception:
                 tool_reg = None
             self._ext_tool_registry = tool_reg  # type: ignore[attr-defined]

@@ -195,6 +195,13 @@ class TaskExecutor:
         if workspace_root:
             from agent_ai.tools.registry import build_registry
 
+            try:
+                from agent_ai.extensions.agent_bridge import ensure_agent_extensions_loaded
+
+                ensure_agent_extensions_loaded()
+            except Exception:
+                pass
+
             # cancel_token diteruskan ke run_command agar proses command yang
             # sedang berjalan benar-benar dihentikan saat user menekan Stop
             # (bukan hanya menunggu timeout). Ini membuat slot queue cepat

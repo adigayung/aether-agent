@@ -25,6 +25,8 @@ from agent_ai.providers.base import (
     ToolChoice,
     ToolDefinition,
     build_provider_api_error,
+    from_provider_safe_tool_name,
+    to_provider_safe_tool_name,
 )
 from agent_ai.providers.retry import (
     InfrastructureRetryPolicy,
@@ -235,6 +237,10 @@ class OpenAICompatibleProvider(BaseProvider):
         opts = options or GenerateOptions()
         chat_messages = self._build_messages(prompt, messages)
         chat_messages = [self._to_openai_message(m) for m in chat_messages]
+        # Nama tool pada riwayat (assistant.tool_calls + pesan role "tool")
+        # di-encode agar konsisten dengan definisi tool yang dikirim (lihat
+        # `_to_openai_tool`). Nama aman tidak berubah (no-op).
+        chat_messages = [self._encode_message_tool_names(m) for m in chat_messages]
 
         payload: Dict[str, Any] = {
             "messages": chat_messages,
@@ -330,21 +336,67 @@ class OpenAICompatibleProvider(BaseProvider):
 
     @staticmethod
     def _to_openai_tool(tool: ToolDefinition) -> Dict[str, Any]:
-        """Konversi ToolDefinition (internal) -> format tools OpenAI."""
+        """Konversi ToolDefinition (internal) -> format tools OpenAI.
+
+        Nama di-encode ke bentuk provider-safe (lihat
+        `to_provider_safe_tool_name`) karena API OpenAI-compatible menolak nama
+        di luar pola `^[a-zA-Z0-9_-]+$` — termasuk id Extension bertitik
+        (mis. "aether.playwright.browser_click"). Nama internal AETHER tetap
+        utuh; hanya representasi payload yang dinormalisasi.
+        """
         return {
             "type": "function",
             "function": {
-                "name": tool.name,
+                "name": to_provider_safe_tool_name(tool.name),
                 "description": tool.description,
                 "parameters": tool.parameters,
             },
         }
 
     @staticmethod
+    def _encode_message_tool_names(message: Dict[str, Any]) -> Dict[str, Any]:
+        """Encode nama tool pada SATU pesan riwayat (tanpa memutasi input).
+
+        Meng-encode `tool_calls[].function.name` (pesan assistant) dan `name`
+        (pesan role "tool") agar konsisten dengan definisi tool yang dikirim.
+        Salinan dibuat agar riwayat asli AETHER tidak berubah.
+        """
+        tool_calls = message.get("tool_calls")
+        role = message.get("role")
+        name = message.get("name")
+        needs_tool_name = role == "tool" and isinstance(name, str)
+        if not isinstance(tool_calls, list) and not needs_tool_name:
+            return message
+        result = dict(message)
+        if isinstance(tool_calls, list):
+            new_calls: List[Any] = []
+            for call in tool_calls:
+                if isinstance(call, dict):
+                    new_call = dict(call)
+                    function = new_call.get("function")
+                    if isinstance(function, dict):
+                        new_function = dict(function)
+                        if isinstance(new_function.get("name"), str):
+                            new_function["name"] = to_provider_safe_tool_name(
+                                new_function["name"]
+                            )
+                        new_call["function"] = new_function
+                    new_calls.append(new_call)
+                else:
+                    new_calls.append(call)
+            result["tool_calls"] = new_calls
+        if needs_tool_name:
+            result["name"] = to_provider_safe_tool_name(name)
+        return result
+
+    @staticmethod
     def _to_openai_tool_choice(choice: ToolChoice) -> Any:
         """Konversi ToolChoice (internal) -> format tool_choice OpenAI."""
         if choice.mode == "specific" and choice.name:
-            return {"type": "function", "function": {"name": choice.name}}
+            return {
+                "type": "function",
+                "function": {"name": to_provider_safe_tool_name(choice.name)},
+            }
         # "auto" | "none" | "required" dipetakan langsung.
         return choice.mode
 
@@ -476,6 +528,11 @@ class OpenAICompatibleProvider(BaseProvider):
         for call in message.get("tool_calls") or []:
             function = call.get("function") or {}
             name = function.get("name", "")
+            # Nama tool yang dikirim ke API di-encode (provider-safe); kembalikan
+            # ke identitas internal AETHER agar lookup registry tetap benar.
+            # Nama yang sudah aman tidak berubah (no-op).
+            if isinstance(name, str):
+                name = from_provider_safe_tool_name(name)
             arguments = function.get("arguments", {})
             if isinstance(arguments, str):
                 if arguments.strip() == "":

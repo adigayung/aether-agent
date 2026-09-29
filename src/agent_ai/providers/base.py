@@ -7,9 +7,77 @@ Semua provider konkret WAJIB mengimplementasikan interface ini.
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
+
+# ---------------------------------------------------------------------------
+# Nama tool provider-safe (reversible)
+# ---------------------------------------------------------------------------
+# API OpenAI-compatible (mis. DeepSeek) hanya menerima nama function/tool yang
+# cocok pola `^[a-zA-Z0-9_-]+$`. Nama tool internal AETHER boleh memuat karakter
+# lain — terutama TITIK pada id Extension yang di-namespacekan (mis.
+# "aether.playwright.browser_click"). Mengirim nama bertitik apa adanya membuat
+# provider menolak SELURUH request (HTTP 400: Invalid 'tools[i].function.name':
+# string does not match pattern), sehingga Run Task gagal total.
+#
+# Solusi minimal di boundary provider: nama di-ENCODE saat keluar (tool
+# definitions + nama di riwayat pesan) dan di-DECODE kembali saat masuk (nama
+# tool_call pada response). Identitas nama di registry/tool definitions AETHER
+# TIDAK berubah — hanya representasi yang dikirim ke API.
+#
+# Encoding dipilih REVERSIBLE dan NO-OP untuk nama yang sudah aman:
+#   * nama yang cocok `^[a-zA-Z0-9_]+$` (mis. read_file) dibiarkan APA ADANYA;
+#   * karakter lain (termasuk '-') dipetakan ke escape "-<hex>-" sehingga hasil
+#     selalu cocok `^[a-zA-Z0-9_-]+$` (mis. "." -> "-2e-").
+# Karena output "sudah aman" TIDAK pernah memuat '-' dan output hasil encoding
+# SELALU memuat '-', proses decode tidak ambigu.
+_PROVIDER_SAFE_TOOL_NAME_RE = re.compile(r"^[a-zA-Z0-9_]+$")
+
+
+def to_provider_safe_tool_name(name: str) -> str:
+    """Encode nama tool agar valid untuk API provider (openai-compatible).
+
+    Returns:
+        Nama provider-safe. Nama yang sudah aman dikembalikan apa adanya.
+    """
+    if not name or _PROVIDER_SAFE_TOOL_NAME_RE.match(name):
+        return name
+    out: List[str] = []
+    for ch in name:
+        if ch.isascii() and (ch.isalnum() or ch == "_"):
+            out.append(ch)
+        else:
+            out.append("-" + format(ord(ch), "x") + "-")
+    return "".join(out)
+
+
+def from_provider_safe_tool_name(name: str) -> str:
+    """Kebalikan `to_provider_safe_tool_name` (nama provider-safe -> asli)."""
+    if not name or "-" not in name:
+        return name
+    out: List[str] = []
+    index = 0
+    length = len(name)
+    while index < length:
+        ch = name[index]
+        if ch == "-":
+            end = name.find("-", index + 1)
+            if end != -1:
+                try:
+                    out.append(chr(int(name[index + 1 : end], 16)))
+                    index = end + 1
+                    continue
+                except ValueError:
+                    pass
+            out.append(ch)
+            index += 1
+        else:
+            out.append(ch)
+            index += 1
+    return "".join(out)
 
 
 # ---------------------------------------------------------------------------

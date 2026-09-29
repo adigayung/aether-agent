@@ -52,6 +52,9 @@ class NineRouterProvider(OpenAICompatibleProvider):
         opts = options or GenerateOptions()
         chat_messages = self._build_messages(prompt, messages)
         chat_messages = [self._to_openai_message(m) for m in chat_messages]
+        # Nama tool pada riwayat di-encode provider-safe (konsisten dengan
+        # definisi tool yang dikirim; lihat OpenAICompatibleProvider).
+        chat_messages = [self._encode_message_tool_names(m) for m in chat_messages]
 
         payload: Dict[str, Any] = {
             "model": opts.model or "auto",
