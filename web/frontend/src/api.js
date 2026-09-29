@@ -335,6 +335,73 @@ export function consult(
   return request("/consultant/consult", { method: "POST", body: JSON.stringify(body) });
 }
 
+// --- Extension Management (Task 07) - generic management API (thin over ExtensionManager) ---
+export function listExtensions() {
+  return request("/extensions");
+}
+export function getExtension(extensionId) {
+  return request(`/extensions/${encodeURIComponent(extensionId)}`);
+}
+export function installExtension(repositoryUrl, ref = null) {
+  const body = { repository_url: repositoryUrl };
+  if (ref) body.ref = ref;
+  return request("/extensions/install", { method: "POST", body: JSON.stringify(body) });
+}
+export function enableExtension(extensionId) {
+  return request(`/extensions/${encodeURIComponent(extensionId)}/enable`, { method: "POST" });
+}
+export function disableExtension(extensionId) {
+  return request(`/extensions/${encodeURIComponent(extensionId)}/disable`, { method: "POST" });
+}
+export function updateExtension(extensionId, repositoryUrl = null, ref = null) {
+  const body = {};
+  if (repositoryUrl) body.repository_url = repositoryUrl;
+  if (ref) body.ref = ref;
+  return request(`/extensions/${encodeURIComponent(extensionId)}/update`, { method: "POST", body: JSON.stringify(body) });
+}
+export function uninstallExtension(extensionId) {
+  return request(`/extensions/${encodeURIComponent(extensionId)}`, { method: "DELETE" });
+}
+
+// --- Extension UI System (Task 05) - generic contract -----------------------
+// UI contributions: daftar UI capability extension (form/table/chart/modal/...)
+// Config form schema: declarative schema untuk form config (secret-safe)
+// Result resolution: generic renderer resolution untuk structured result
+export function listExtensionUI({ extensionId = null, type = null, enabledOnly = true } = {}) {
+  const params = new URLSearchParams();
+  if (extensionId) params.set("extension_id", extensionId);
+  if (type) params.set("type", type);
+  if (!enabledOnly) params.set("enabled_only", "0");
+  const qs = params.toString();
+  return request(`/extensions/ui${qs ? `?${qs}` : ""}`);
+}
+
+export function getExtensionConfigSchema(extensionId, projectId = null) {
+  const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+  return request(`/extensions/config/${encodeURIComponent(extensionId)}${qs}`);
+}
+
+export function getExtensionConfigValue(extensionId, key) {
+  return request(`/extensions/config/${encodeURIComponent(extensionId)}/${encodeURIComponent(key)}`);
+}
+
+export function setExtensionConfigValue(extensionId, key, value, opts = {}) {
+  const body = { value };
+  if (opts.scope) body.scope = opts.scope;
+  if (opts.projectId) body.project_id = opts.projectId;
+  return request(`/extensions/config/${encodeURIComponent(extensionId)}/${encodeURIComponent(key)}`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function resolveExtensionResult(payload) {
+  return request("/extensions/result", {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
 // --- #51 SSE ---------------------------------------------------------------
 // Membuka EventSource ke /api/events (opsional filter session_id/task_id).
 // Mengembalikan EventSource agar pemanggil dapat menutupnya (disconnect).

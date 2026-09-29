@@ -26,6 +26,7 @@ import QueuePanel from "./components/QueuePanel.vue";
 import ReportViewer from "./components/ReportViewer.vue";
 import SettingsView from "./components/SettingsView.vue";
 import ConsultantChat from "./components/ConsultantChat.vue";
+import ExtensionManager from "./components/ExtensionManager.vue";
 import {
   cancelTask,
   closeActiveProject,
@@ -95,6 +96,11 @@ const navItems = [
     id: "backup",
     label: "Backup",
     icon: "M12 3v10M8 9l4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2",
+  },
+  {
+    id: "extension",
+    label: "Extension",
+    icon: "M12 2l7 4v8l-7 4-7-4V6zM12 12v8M5 6l7 6 7-6",
   },
   {
     id: "settings",
@@ -714,6 +720,7 @@ const pageTitle = computed(() => {
   if (activeNav.value === "tasks") return "Tasks";
   if (activeNav.value === "projects") return "Projects";
   if (activeNav.value === "backup") return "Backup";
+  if (activeNav.value === "extension") return "Extension";
   if (activeNav.value === "settings") return "Settings";
   return "Workbench";
 });
@@ -721,9 +728,13 @@ const pageDesc = computed(() => {
   if (activeNav.value === "tasks") return "Live task queue and past task history.";
   if (activeNav.value === "projects") return "Workspaces registered in AETHER.";
   if (activeNav.value === "backup") return "GitHub backup, checkpoints, and recovery for the active project.";
+  if (activeNav.value === "extension") return "Manage AETHER extensions.";
   if (activeNav.value === "settings") return "Configure providers and models used by the AETHER workbench.";
   return "";
 });
+
+// Extension management refresh key — incremented after operations that need catalog refresh
+const extensionRefreshKey = ref(0);
 
 function statusTagClass(s) {
   const v = (s || "").toLowerCase();
@@ -2082,8 +2093,16 @@ onBeforeUnmount(() => {
             </div>
           </section>
 
+          <!-- Extension Management -->
+          <section v-else-if="activeNav === 'extension'" class="panel">
+            <div class="panel-body">
+              <ExtensionManager :key="extensionRefreshKey" @error="(m) => { error = m; }" />
+            </div>
+          </section>
+
           <!-- Settings (kelola provider/model/credential via Gateway). -->
-          <SettingsView v-else :config="config" />
+          <SettingsView v-else-if="activeNav === 'settings'" :config="config" />
+          <div v-else class="panel"><div class="panel-body"><div class="wb-empty">Unknown section.</div></div></div>
         </main>
       </div>
     </div>

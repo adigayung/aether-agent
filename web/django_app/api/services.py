@@ -2129,6 +2129,328 @@ class GatewayService:
     # ------------------------------------------------------------------ #
     # Events (memakai SessionStore AETHER; tanpa event model kedua)
     # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    # Extension Management (Task 07) — thin facade over ExtensionManager
+    # ------------------------------------------------------------------ #
+    def _get_extension_manager(self):  # type: ignore[no-untyped-def]
+        """Return singleton ExtensionManager bound to GatewayService shared registries.
+
+        Registries are loaded once via ExtensionLoader (filesystem + lifecycle).
+        All subsequent operations reuse same registry/capability/lifecycle objects,
+        so catalog reflects live state (install/enable/disable/update/uninstall).
+        No duplicated lifecycle logic: all via ExtensionManager.
+        """
+        if hasattr(self, "_ext_manager") and getattr(self, "_ext_manager", None) is not None:
+            return self._ext_manager  # type: ignore[attr-defined]
+        from agent_ai.extensions.capabilities import CapabilityRegistry
+        from agent_ai.extensions.lifecycle import get_lifecycle_store
+        from agent_ai.extensions.loader import ExtensionLoader
+        from agent_ai.extensions.manager import ExtensionManager
+        from agent_ai.extensions.registry import ExtensionRegistry
+
+        cap_reg = getattr(self, "_ext_capability_registry", None)
+        ext_reg = getattr(self, "_ext_registry", None)
+        lifecycle = getattr(self, "_ext_lifecycle_store", None)
+        if cap_reg is None or ext_reg is None:
+            cap_reg = CapabilityRegistry()
+            ext_reg = ExtensionRegistry()
+            lifecycle = get_lifecycle_store()
+            loader = ExtensionLoader(
+                registry=ext_reg,
+                capability_registry=cap_reg,
+                lifecycle_store=lifecycle,
+                enable_entry_points=False,
+            )
+            try:
+                loader.load_all()
+            except Exception:
+                pass
+            self._ext_capability_registry = cap_reg  # type: ignore[attr-defined]
+            self._ext_registry = ext_reg  # type: ignore[attr-defined]
+            self._ext_lifecycle_store = lifecycle  # type: ignore[attr-defined]
+        else:
+            if lifecycle is None:
+                from agent_ai.extensions.lifecycle import get_lifecycle_store as _gls
+
+                lifecycle = _gls()
+                self._ext_lifecycle_store = lifecycle  # type: ignore[attr-defined]
+
+        tool_reg = getattr(self, "_ext_tool_registry", None)
+        if tool_reg is None:
+            try:
+                from agent_ai.tools.registry import ToolRegistry
+
+                tool_reg = ToolRegistry()
+            except Exception:
+                tool_reg = None
+            self._ext_tool_registry = tool_reg  # type: ignore[attr-defined]
+
+        config_store = None
+        try:
+            from agent_ai.extensions.config import get_config_store
+
+            config_store = get_config_store()
+        except Exception:
+            config_store = None
+
+        mgr = ExtensionManager(
+            registry=ext_reg,
+            capability_registry=cap_reg,
+            lifecycle_store=lifecycle,
+            tool_registry=tool_reg,
+            config_store=config_store,
+        )
+        self._ext_manager = mgr  # type: ignore[attr-defined]
+        return mgr
+
+    @staticmethod
+    def _extension_error_to_gateway(exc: Exception):  # type: ignore[no-untyped-def]
+        """Map Extension errors to GatewayError HTTP semantics."""
+        from agent_ai.extensions.errors import (
+            ExtensionCompatibilityError,
+            ExtensionInstallError,
+            ExtensionLifecycleError,
+            ExtensionUninstallError,
+            ExtensionUpdateError,
+            ExtensionValidationError,
+        )
+        from agent_ai.extensions.manifest import DuplicateExtensionError
+
+        msg = str(exc) or exc.__class__.__name__
+        low = msg.lower()
+        # Not found -> 404
+        if isinstance(exc, (ExtensionLifecycleError, ExtensionUninstallError, ExtensionUpdateError)):
+            if "not found" in low:
+                from api.services import NotFoundError as _NF
+
+                return _NF(msg)
+        if isinstance(exc, DuplicateExtensionError):
+            from api.services import ConflictError as _CF
+
+            return _CF(msg)
+        if isinstance(exc, ExtensionInstallError):
+            if "duplicate" in low or "already installed" in low or "already exists" in low or "folder collision" in low:
+                from api.services import ConflictError as _CF
+
+                return _CF(msg)
+            # git clone / validation etc. -> 400
+            from api.services import ValidationError as _VE
+
+            return _VE(msg)
+        if isinstance(exc, (ExtensionValidationError, ExtensionCompatibilityError)):
+            from api.services import ValidationError as _VE
+
+            return _VE(msg)
+        if isinstance(exc, ExtensionUpdateError):
+            if "not found" in low:
+                from api.services import NotFoundError as _NF
+
+                return _NF(msg)
+            from api.services import ValidationError as _VE
+
+            return _VE(msg)
+        if isinstance(exc, ExtensionUninstallError):
+            if "not found" in low:
+                from api.services import NotFoundError as _NF
+
+                return _NF(msg)
+            from api.services import ValidationError as _VE
+
+            return _VE(msg)
+        if isinstance(exc, ExtensionLifecycleError):
+            from api.services import ValidationError as _VE
+
+            return _VE(msg)
+        # Generic duplicate message
+        if "duplicate" in low or "already installed" in low:
+            from api.services import ConflictError as _CF
+
+            return _CF(msg)
+        if "not found" in low:
+            from api.services import NotFoundError as _NF
+
+            return _NF(msg)
+        # Fallback 400 for validation-like, 500 otherwise -> map to GatewayError 500 but we prefer 400 for extension errors
+        from api.services import ValidationError as _VE
+
+        return _VE(msg)
+
+    def list_extensions(self) -> Dict[str, Any]:
+        """List installed extensions (generic catalog, UI-friendly)."""
+        mgr = self._get_extension_manager()
+        items = mgr.list_installed()
+        # Enrich with capability counts
+        for item in items:
+            try:
+                caps = self._ext_capability_registry.list_by_extension(item["id"])  # type: ignore[attr-defined]
+                summary: Dict[str, int] = {}
+                for rec in caps:
+                    summary[rec.type] = summary.get(rec.type, 0) + 1
+                item["capabilities"] = summary
+                item["capability_count"] = len(caps)
+            except Exception:
+                item.setdefault("capabilities", {})
+                item.setdefault("capability_count", 0)
+        # Include failed extensions not in registry but known via failures / lifecycle
+        try:
+            fails = self._ext_registry.failures()  # type: ignore[attr-defined]
+            existing_ids = {i["id"] for i in items}
+            for f in fails:
+                fid = f.get("id")
+                err = f.get("error", "")
+                src = f.get("source", "")
+                if fid and fid not in existing_ids:
+                    items.append(
+                        {
+                            "id": fid,
+                            "name": fid,
+                            "version": "",
+                            "description": "",
+                            "api_version": "",
+                            "status": "failed",
+                            "enabled": False,
+                            "error": err,
+                            "installed_version": "",
+                            "source": src,
+                            "capabilities": {},
+                            "capability_count": 0,
+                        }
+                    )
+                    existing_ids.add(fid)
+                elif not fid:
+                    key = src or "unknown"
+                    if key not in existing_ids:
+                        items.append(
+                            {
+                                "id": key,
+                                "name": key,
+                                "version": "",
+                                "description": "",
+                                "api_version": "",
+                                "status": "failed",
+                                "enabled": False,
+                                "error": err,
+                                "installed_version": "",
+                                "source": src,
+                                "capabilities": {},
+                                "capability_count": 0,
+                            }
+                        )
+        except Exception:
+            pass
+        try:
+            rows = self._ext_lifecycle_store.all_rows()  # type: ignore[attr-defined]
+            ids = {i["id"] for i in items}
+            for r in rows:
+                eid = r.get("extension_id")
+                if r.get("status") == "failed" and eid not in ids:
+                    items.append(
+                        {
+                            "id": eid,
+                            "name": eid,
+                            "version": r.get("installed_version") or "",
+                            "description": "",
+                            "api_version": "",
+                            "status": "failed",
+                            "enabled": False,
+                            "error": r.get("error") or "",
+                            "installed_version": r.get("installed_version") or "",
+                            "source": "",
+                            "capabilities": {},
+                            "capability_count": 0,
+                        }
+                    )
+        except Exception:
+            pass
+        items_sorted = sorted(items, key=lambda x: str(x.get("id", "")).lower())
+        return {"count": len(items_sorted), "extensions": items_sorted}
+
+    def get_extension(self, extension_id: str) -> Dict[str, Any]:
+        """Detail for one extension (generic, secret-safe)."""
+        if not extension_id or not str(extension_id).strip():
+            raise ValidationError("Field 'extension_id' wajib diisi.")
+        mgr = self._get_extension_manager()
+        try:
+            data = mgr.get_status(str(extension_id).strip())
+        except Exception as exc:
+            raise self._extension_error_to_gateway(exc) from exc
+        # Capability summary
+        try:
+            caps = self._ext_capability_registry.list_by_extension(data["id"])  # type: ignore[attr-defined]
+            summary: Dict[str, int] = {}
+            for rec in caps:
+                summary[rec.type] = summary.get(rec.type, 0) + 1
+            data["capabilities"] = summary
+            data["capability_count"] = len(caps)
+        except Exception:
+            data.setdefault("capabilities", {})
+            data.setdefault("capability_count", 0)
+        # UI contributions (generic)
+        try:
+            from agent_ai.extensions.ui import UICatalog
+
+            cat = UICatalog(self._ext_capability_registry, self._ext_registry)  # type: ignore[attr-defined]
+            contribs = cat.list_contributions(extension_id=data["id"], enabled_only=False)
+            data["ui_contributions"] = [c.to_dict() for c in contribs]
+            data["ui_count"] = len(contribs)
+        except Exception:
+            data.setdefault("ui_contributions", [])
+            data.setdefault("ui_count", 0)
+        return data
+
+    def install_extension(self, repository_url: str, ref: Optional[str] = None) -> Dict[str, Any]:
+        if not repository_url or not str(repository_url).strip():
+            raise ValidationError("Field 'repository_url' wajib diisi.")
+        mgr = self._get_extension_manager()
+        try:
+            result = mgr.install(str(repository_url).strip(), ref=str(ref).strip() if ref and str(ref).strip() else None)
+        except Exception as exc:
+            raise self._extension_error_to_gateway(exc) from exc
+        result["restart_required"] = False
+        return result
+
+    def enable_extension(self, extension_id: str) -> Dict[str, Any]:
+        if not extension_id or not str(extension_id).strip():
+            raise ValidationError("Field 'extension_id' wajib diisi.")
+        mgr = self._get_extension_manager()
+        try:
+            result = mgr.enable(str(extension_id).strip())
+        except Exception as exc:
+            raise self._extension_error_to_gateway(exc) from exc
+        return result
+
+    def disable_extension(self, extension_id: str) -> Dict[str, Any]:
+        if not extension_id or not str(extension_id).strip():
+            raise ValidationError("Field 'extension_id' wajib diisi.")
+        mgr = self._get_extension_manager()
+        try:
+            result = mgr.disable(str(extension_id).strip())
+        except Exception as exc:
+            raise self._extension_error_to_gateway(exc) from exc
+        return result
+
+    def update_extension(self, extension_id: str, repository_url: Optional[str] = None, ref: Optional[str] = None) -> Dict[str, Any]:
+        if not extension_id or not str(extension_id).strip():
+            raise ValidationError("Field 'extension_id' wajib diisi.")
+        mgr = self._get_extension_manager()
+        try:
+            result = mgr.update(str(extension_id).strip(), repository_url=str(repository_url).strip() if repository_url and str(repository_url).strip() else None, ref=str(ref).strip() if ref and str(ref).strip() else None)
+        except Exception as exc:
+            raise self._extension_error_to_gateway(exc) from exc
+        # Task 06 explicitly requires restart for Python code activation — never hot reload
+        result["restart_required"] = True
+        return result
+
+    def uninstall_extension(self, extension_id: str) -> Dict[str, Any]:
+        if not extension_id or not str(extension_id).strip():
+            raise ValidationError("Field 'extension_id' wajib diisi.")
+        mgr = self._get_extension_manager()
+        try:
+            result = mgr.uninstall(str(extension_id).strip())
+        except Exception as exc:
+            raise self._extension_error_to_gateway(exc) from exc
+        return result
+
     def emit_event(
         self,
         session_id: str,

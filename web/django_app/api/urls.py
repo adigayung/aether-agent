@@ -104,5 +104,17 @@ urlpatterns = [
     path("tasks/<str:task_id>/report", views.task_report, name="task_report"),
     # Consultant API (AETHER reasoning layer, read-only terhadap CODE PROJECT)
     path("consultant/consult", views.consultant_consult, name="consultant_consult"),
+    # Extension Management (Task 07) - generic management API (thin facade over ExtensionManager)
+    path("extensions", views.extensions_list, name="extensions_list"),
+    path("extensions/install", views.extensions_install, name="extensions_install"),
+    # Extension UI System (Task 05) - generic viewer/config contract
+    path("extensions/ui", views.extensions_ui, name="extensions_ui"),
+    path("extensions/config/<str:extension_id>", views.extension_config, name="extension_config"),
+    path("extensions/config/<str:extension_id>/<str:key>", views.extension_config_key, name="extension_config_key"),
+    path("extensions/result", views.extensions_result, name="extensions_result"),
+    path("extensions/<str:extension_id>", views.extensions_detail, name="extensions_detail"),
+    path("extensions/<str:extension_id>/enable", views.extensions_enable, name="extensions_enable"),
+    path("extensions/<str:extension_id>/disable", views.extensions_disable, name="extensions_disable"),
+    path("extensions/<str:extension_id>/update", views.extensions_update, name="extensions_update"),
     path("events", views.events, name="events"),
 ]

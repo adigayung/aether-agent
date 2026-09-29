@@ -67,6 +67,15 @@ def _handle(handler: Callable[..., JsonResponse]) -> Callable:
             return handler(request, service, **kwargs)
         except GatewayError as exc:
             return _error_response(exc)
+        except Exception as exc:  # noqa: BLE001 - generic fallback for extension UI
+            # Map CapabilityValidationError etc. to 400
+            msg = str(exc)
+            if "validation" in msg.lower() or "enum" in msg.lower() or "unknown" in msg.lower():
+                return _json_response({"error": {"code": "validation_error", "message": msg}}, status=400)
+            # Map known extension errors to 404/409
+            if "not found" in msg.lower() or "unknown" in msg.lower():
+                return _json_response({"error": {"code": "not_found", "message": msg}}, status=404)
+            raise
 
     wrapper.__name__ = handler.__name__
     return wrapper
@@ -607,6 +616,240 @@ def task_report(request: HttpRequest, service: GatewayService, task_id: str) -> 
     """
     project_id = request.GET.get("project_id") or None
     return _json_response(service.get_task_report(task_id, project_id=project_id))
+
+
+# ---------------------------------------------------------------------------
+# Extension UI System (Task 05) - generic contract
+# ---------------------------------------------------------------------------
+def _ext_ui_context() -> Any:
+    """Build runtime UI context: registry + capability + loader state.
+
+    We reuse existing singletons where possible. For generic API we create
+    ephemeral registries populated via ExtensionLoader from default extensions dir.
+    Results are dynamic (reads loader state on each call).
+    """
+    # Attempt to reuse global loader if Django has one; otherwise build fresh via loader
+    # For simplicity, build a fresh loader reading existing Extension directory
+    from agent_ai.extensions.capabilities import CapabilityRegistry
+    from agent_ai.extensions.registry import ExtensionRegistry
+    from agent_ai.extensions.loader import ExtensionLoader
+    from agent_ai.extensions.ui import UICatalog, build_form_schema_for_extension
+
+    # We load extensions each time? For UI listing we need current capabilities.
+    # To avoid heavy reload, we try to find existing global registry cached on service
+    service = get_service()
+    cap_reg = getattr(service, "_ext_capability_registry", None)
+    ext_reg = getattr(service, "_ext_registry", None)
+    if cap_reg is None:
+        cap_reg = CapabilityRegistry()
+        ext_reg = ExtensionRegistry()
+        loader = ExtensionLoader(registry=ext_reg, capability_registry=cap_reg, enable_entry_points=False)
+        try:
+            loader.load_all()
+        except Exception:
+            pass
+        # Cache on service for subsequent calls
+        try:
+            service._ext_capability_registry = cap_reg  # type: ignore[attr-defined]
+            service._ext_registry = ext_reg  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    return cap_reg, ext_reg
+
+
+@require_http_methods(["GET"])
+@_handle
+def extensions_ui(request: HttpRequest, service: GatewayService) -> JsonResponse:
+    """GET /api/extensions/ui -> list UI contributions (generic).
+
+    Query params (optional):
+        extension_id: filter by extension
+        type: filter by UI type (modal|form|panel|table|chart|viewer|wizard|result_renderer|action|custom_view)
+        enabled_only: 1/0 (default 1)
+    """
+    from agent_ai.extensions.ui import UICatalog
+
+    cap_reg, ext_reg = _ext_ui_context()
+    extension_id = request.GET.get("extension_id") or None
+    ui_type = request.GET.get("type") or None
+    enabled_raw = request.GET.get("enabled_only", "1")
+    enabled_only = str(enabled_raw).lower() not in ("0", "false", "no")
+    catalog = UICatalog(cap_reg, ext_reg)
+    items = catalog.list_contributions(extension_id=extension_id, ui_type=ui_type, enabled_only=enabled_only)
+    return _json_response({"count": len(items), "contributions": [c.to_dict() for c in items]})
+
+
+@require_http_methods(["GET"])
+@_handle
+def extension_config(request: HttpRequest, service: GatewayService, extension_id: str) -> JsonResponse:
+    """GET /api/extensions/config/<extension_id> -> form schema for extension config.
+
+    Returns declarative form schema derived from capability metadata (secret-safe).
+    """
+    from agent_ai.extensions.ui import build_form_schema_for_extension
+    from agent_ai.extensions.config import get_config_store
+
+    cap_reg, ext_reg = _ext_ui_context()
+    # Verify extension exists
+    if not cap_reg.list_by_extension(extension_id) and (ext_reg is None or not ext_reg.exists(extension_id)):
+        # Not a hard fail: if no config, return empty form schema
+        pass
+    try:
+        store = get_config_store()
+    except Exception:
+        store = None
+    project_id = request.GET.get("project_id") or None
+    schema = build_form_schema_for_extension(extension_id, cap_reg, config_store=store, project_id=project_id)
+    # Also include raw definitions for debugging (without secret values)
+    return _json_response({"extension_id": extension_id, "schema": schema})
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST", "PUT"])
+@_handle
+def extension_config_key(request: HttpRequest, service: GatewayService, extension_id: str, key: str) -> JsonResponse:
+    """GET/POST/PUT /api/extensions/config/<extension_id>/<key> -> get/set config value.
+
+    GET  -> returns value (for non-secret) or configured flag (for secret)
+    POST/PUT -> sets value (validated via existing ConfigFacade/config store)
+    """
+    import json as _json
+
+    from agent_ai.extensions.context import ExtensionContext
+    from agent_ai.extensions.manifest import Manifest
+    from agent_ai.extensions.config import get_config_store, ConfigValidationError
+    from agent_ai.extensions.capabilities import CapabilityValidationError as _CVE
+
+    cap_reg, ext_reg = _ext_ui_context()
+    store = get_config_store()
+    manifest = Manifest(id=extension_id, name=extension_id, version="1", description="", api_version="1", raw={}, source_path="")
+    ctx = ExtensionContext(manifest=manifest, capability_registry=cap_reg, config_store=store)
+
+    if request.method == "GET":
+        try:
+            # Determine if secret
+            rec = cap_reg.get("config", f"{extension_id}.{key}")
+            is_secret = False
+            if rec is not None:
+                is_secret = bool(rec.metadata.get("secret") or rec.metadata.get("type") == "secret")
+            if is_secret:
+                # Never return value, just configured flag
+                has = ctx.config.has(key)
+                return _json_response({"key": key, "extension_id": extension_id, "configured": bool(has), "secret": True})
+            else:
+                val = ctx.config.get(key)
+                return _json_response({"key": key, "extension_id": extension_id, "value": val})
+        except Exception as exc:
+            # Map to validation/not found
+            raise
+    else:
+        # POST/PUT set value
+        body = _parse_json_body(request)
+        value = body.get("value")
+        scope = body.get("scope") or None
+        project_id = body.get("project_id") or request.GET.get("project_id") or None
+        try:
+            ctx.config.set(key, value, scope=scope, project_id=project_id)
+        except (ConfigValidationError, _CVE) as exc:
+            from api.services import ValidationError
+            raise ValidationError(str(exc)) from exc
+        return _json_response({"key": key, "extension_id": extension_id, "value": value if not ctx.config.is_secret(key) else "[redacted]", "saved": True})
+
+
+# ---------------------------------------------------------------------------
+# Extension Management (Task 07) — generic management API (thin over ExtensionManager)
+# ---------------------------------------------------------------------------
+@require_http_methods(["GET"])
+@_handle
+def extensions_list(request: HttpRequest, service: GatewayService) -> JsonResponse:
+    """GET /api/extensions -> list installed extensions (generic, UI-friendly)."""
+    data = service.list_extensions()
+    return _json_response(data)
+
+
+@require_http_methods(["GET", "DELETE"])
+@_handle
+def extensions_detail(request: HttpRequest, service: GatewayService, extension_id: str) -> JsonResponse:
+    """GET /api/extensions/<id> -> detail; DELETE -> uninstall."""
+    if request.method == "DELETE":
+        result = service.uninstall_extension(extension_id)
+        return _json_response(result)
+    data = service.get_extension(extension_id)
+    return _json_response(data)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@_handle
+def extensions_install(request: HttpRequest, service: GatewayService) -> JsonResponse:
+    """POST /api/extensions/install -> install from Git URL (generic). Body: {repository_url, ref?}"""
+    body = _parse_json_body(request)
+    # Accept both repository_url and repository for flexibility
+    repo = body.get("repository_url") or body.get("repository") or body.get("url") or ""
+    ref = body.get("ref") or body.get("branch") or None
+    # Light frontend-style validation: empty check; backend is authoritative for git/manifest/etc.
+    if not repo or not str(repo).strip():
+        from api.services import ValidationError
+
+        raise ValidationError("Field 'repository_url' wajib diisi.")
+    result = service.install_extension(str(repo).strip(), ref=str(ref).strip() if ref and str(ref).strip() else None)
+    return _json_response(result, status=201)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@_handle
+def extensions_enable(request: HttpRequest, service: GatewayService, extension_id: str) -> JsonResponse:
+    """POST /api/extensions/<id>/enable -> enable extension."""
+    result = service.enable_extension(extension_id)
+    return _json_response(result)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@_handle
+def extensions_disable(request: HttpRequest, service: GatewayService, extension_id: str) -> JsonResponse:
+    """POST /api/extensions/<id>/disable -> disable extension."""
+    result = service.disable_extension(extension_id)
+    return _json_response(result)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@_handle
+def extensions_update(request: HttpRequest, service: GatewayService, extension_id: str) -> JsonResponse:
+    """POST /api/extensions/<id>/update -> update extension (generic). Body: {repository_url?, ref?}"""
+    body = _parse_json_body(request)
+    # Optional: repository_url may be omitted to use stored source; Task 07 prioritizes existing source
+    repo = body.get("repository_url") or body.get("repository") or body.get("url") or None
+    ref = body.get("ref") or body.get("branch") or None
+    result = service.update_extension(extension_id, repository_url=str(repo).strip() if repo and str(repo).strip() else None, ref=str(ref).strip() if ref and str(ref).strip() else None)
+    return _json_response(result)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@_handle
+def extensions_result(request: HttpRequest, service: GatewayService) -> JsonResponse:
+    """POST /api/extensions/result -> validate/resolve a structured result payload.
+
+    Body: {renderer?, type?, data?, artifact?, metadata?}
+    Returns: {renderer, type, data, artifact, metadata} with resolved renderer.
+    Generic, no hardcode extension.
+    """
+    from agent_ai.extensions.ui import resolve_renderer_for_result
+
+    body = _parse_json_body(request)
+    renderer = body.get("renderer") or body.get("type") or resolve_renderer_for_result(body)
+    result: Dict[str, Any] = {
+        "renderer": renderer,
+        "type": body.get("type") or renderer,
+        "data": body.get("data"),
+        "metadata": body.get("metadata") or {},
+    }
+    if body.get("artifact") is not None:
+        result["artifact"] = body["artifact"]
+    return _json_response({"result": result, "resolved_renderer": renderer})
 
 
 # ---------------------------------------------------------------------------
