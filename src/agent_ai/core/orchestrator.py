@@ -2000,9 +2000,7 @@ class AgentOrchestrator:
                 if payload is None:
                     continue
                 # Hasil tool SELALU dikirim sebagai pesan role "tool".
-                history.append_tool_result(
-                    payload.tool_call_id, payload.tool_name, payload.to_content()
-                )
+                self._record_tool_result(history, payload)
                 # Catat step untuk observability/penghitungan max_steps.
                 # Ini bukan keputusan completion: agent tidak pernah dianggap
                 # selesai berdasarkan jumlah step. Satu-satunya guard jumlah
@@ -2024,6 +2022,67 @@ class AgentOrchestrator:
             steps=loop.to_dict()["steps"],
             learning=learning,
             provider_error=provider_error,
+        )
+
+    def _record_tool_result(
+        self, history: ConversationHistory, payload: ToolResultPayload
+    ) -> None:
+        """Catat hasil satu tool ke histori sebagai pesan role "tool".
+
+        Backward compatible: hasil tool biasa tetap SATU pesan role "tool"
+        (teks) seperti sebelumnya.
+
+        ADDITIVE (Vision/multimodal): bila hasil tool membawa content part
+        gambar (kunci ``MULTIMODAL_PARTS_KEY``, mis. dari tool ``view_image``),
+        part gambar DIPISAHKAN dari teks: teks tetap menjadi pesan role "tool"
+        (kontrak tool calling — pesan tool harus text-only), sedangkan part
+        gambar dikirim sebagai pesan user multimodal LANJUTAN sehingga provider
+        adapter menerjemahkannya menjadi input image (image_url / Ollama images).
+        Dengan begitu Agent benar-benar MELIHAT gambar lewat mekanisme provider
+        multimodal yang sudah ada, tanpa menumpahkan base64 ke pesan tool.
+        """
+        try:
+            from agent_ai.tools.base import split_multimodal_parts
+
+            cleaned_output, parts = split_multimodal_parts(payload.output)
+        except Exception:  # noqa: BLE001 - bridge multimodal tidak boleh gagalkan task
+            cleaned_output, parts = payload.output, None
+
+        if not parts:
+            history.append_tool_result(
+                payload.tool_call_id, payload.tool_name, payload.to_content()
+            )
+            return
+
+        content = ToolResultPayload.stringify(cleaned_output)
+        history.append_tool_result(payload.tool_call_id, payload.tool_name, content)
+        # Pesan user lanjutan membawa gambar sebagai input multimodal. Pesan ini
+        # TIDAK mengubah kontrak tool calling (assistant tool_calls -> tool ->
+        # user) dan tidak mengubah keputusan LLM kapan task selesai.
+        history.append_user_message(
+            self._vision_content_message(cleaned_output), parts=parts
+        )
+        emit_event(
+            self.event_sink,
+            "vision_image_attached",
+            {
+                "tool": payload.tool_name,
+                "parts": len(parts),
+            },
+        )
+
+    @staticmethod
+    def _vision_content_message(output: Any) -> str:
+        """Teks pendamping pesan multimodal (menyebut path bila tersedia)."""
+        path = output.get("path") if isinstance(output, dict) else None
+        if path:
+            return (
+                f"[view_image] Konten gambar dari '{path}' dilampirkan sebagai "
+                "input multimodal; gunakan gambar ini untuk menjawab."
+            )
+        return (
+            "[view_image] Konten gambar dilampirkan sebagai input multimodal; "
+            "gunakan gambar ini untuk menjawab."
         )
 
     @staticmethod

@@ -14,7 +14,48 @@ planner, memory, Git, database, atau command execution.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, Tuple
+
+
+# --------------------------------------------------------------------------- #
+# Bridge hasil tool -> content part multimodal (GENERIC, provider-agnostic)
+# --------------------------------------------------------------------------- #
+#: Kunci output hasil tool yang membawa content part multimodal (mis. image).
+#: Tool dapat mengembalikan output dict berisi kunci ini (mis. tool Vision Agent
+#: ``view_image``); orchestrator MEMISAHKAN part-nya dari teks: teks tetap
+#: menjadi pesan role "tool" (kontrak tool calling = text-only), sedangkan part
+#: multimodal diteruskan lewat pesan user lanjutan sehingga provider adapter
+#: mengubahnya menjadi input image (image_url / Ollama images).
+#:
+#: Kontrak ini GENERIC (bukan spesifik vision): part memakai format internal
+#: AETHER yang sudah ada, mis. {"type": "image", "mime_type": ..., "encoding":
+#: "base64", "data": ...}. Didefinisikan di modul INTERFACE tool agar baik paket
+#: ``tools`` (yang memasok part) maupun ``core`` (yang meneruskannya) dapat
+#: memakainya TANPA saling mengimpor di luar batas arsitektur.
+MULTIMODAL_PARTS_KEY = "multimodal_parts"
+
+
+def split_multimodal_parts(
+    output: Any,
+) -> Tuple[Any, Optional[List[Dict[str, Any]]]]:
+    """Pisahkan content part multimodal dari output hasil tool.
+
+    Args:
+        output: output hasil tool (dict bila membawa part, selain itu apa adanya).
+
+    Returns:
+        (cleaned_output, parts):
+            - ``cleaned_output`` = output tanpa kunci ``MULTIMODAL_PARTS_KEY``
+              (output non-dict dikembalikan apa adanya);
+            - ``parts`` = daftar content part multimodal, atau None bila tidak ada.
+    """
+    if not isinstance(output, dict):
+        return output, None
+    parts = output.get(MULTIMODAL_PARTS_KEY)
+    if not parts or not isinstance(parts, (list, tuple)):
+        return output, None
+    cleaned = {key: value for key, value in output.items() if key != MULTIMODAL_PARTS_KEY}
+    return cleaned, [dict(part) for part in parts]
 
 
 # ---------------------------------------------------------------------------

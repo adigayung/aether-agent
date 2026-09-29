@@ -244,16 +244,21 @@ class ToolResultPayload:
     def is_success(self) -> bool:
         return self.status == ToolResultStatus.SUCCESS
 
+    @staticmethod
+    def stringify(output: Any) -> str:
+        """Ubah output tool APAPUN menjadi teks konten (untuk pesan role "tool")."""
+        if output is None:
+            return ""
+        if isinstance(output, str):
+            return output
+        try:
+            return json.dumps(output, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            return str(output)
+
     def to_content(self) -> str:
         """Ubah output menjadi teks konten untuk pesan role "tool"."""
-        if self.output is None:
-            return ""
-        if isinstance(self.output, str):
-            return self.output
-        try:
-            return json.dumps(self.output, ensure_ascii=False, default=str)
-        except (TypeError, ValueError):
-            return str(self.output)
+        return ToolResultPayload.stringify(self.output)
 
     def to_dict(self) -> Dict[str, Any]:
         return {

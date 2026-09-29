@@ -238,6 +238,7 @@ def build_registry(
     from agent_ai.tools.project_map import build_project_map_tools
     from agent_ai.tools.read_cache import ToolReadCache
     from agent_ai.tools.terminal import RunCommandTool
+    from agent_ai.tools.vision import ViewImageTool
     from agent_ai.tools.workspace import (
         DeleteFileTool,
         EditFileTool,
@@ -264,6 +265,11 @@ def build_registry(
     reg.register(DeleteFileTool(root=resolved, change_sink=change_sink, read_cache=read_cache))
     reg.register(MoveFileTool(root=resolved, change_sink=change_sink, read_cache=read_cache))
     reg.register(RunCommandTool(root=resolved, cancel_token=cancel_token))
+    # Vision (Agent): tool generik `view_image(path)` membaca image lokal di
+    # workspace (workspace boundary) dan menyiapkannya sebagai input multimodal
+    # lewat mekanisme Vision existing (ImageInputLoader + ImagePreprocessor).
+    # Reuse jalur Consultant, TANPA mengubahnya; Agent-only.
+    reg.register(ViewImageTool(root=resolved))
     # Project Map (Agent): termasuk refresh_project_map (Agent-only).
     for tool in build_project_map_tools(root=resolved, include_refresh=True):
         reg.register(tool)
