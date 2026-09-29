@@ -103,6 +103,45 @@ class ToolRegistry:
 
 
 # ---------------------------------------------------------------------------
+# Tool yang dikontribusikan Extension (shared, process-wide)
+# ---------------------------------------------------------------------------
+#: Registry bersama tempat Extension yang ENABLED mendaftarkan tool-nya lewat
+#: mekanisme Extension yang SUDAH ADA (ExtensionContext.tools -> ToolsFacade ->
+#: ToolRegistry). Registry ini sengaja terpisah dari registry bawaan Agent karena
+#: `build_registry()` membangun registry BARU per task; isi registry ini lalu
+#: DIGABUNGKAN ke toolset Agent di dalam `build_registry()`.
+#:
+#: Dengan pemisahan ini: (a) Extension (mis. `aether.playwright`) tetap package
+#: mandiri dan terus memakai API registration Extension yang sudah ada, (b) tool
+#: Extension ENABLED benar-benar tersedia pada toolset Agent, (c) ENABLE/DISABLE
+#: mengelola isi registry ini (lihat ExtensionManager._enable/_disable_capabilities),
+#: sehingga state tools mengikuti lifecycle Extension.
+#:
+#: Tidak ada import balik ke package Extension di sini (mencegah import cycle saat
+#: modul ini di-import): populasi registry dilakukan oleh layer Extension/gateway
+#: (`agent_ai.extensions.agent_bridge`).
+_extension_tool_registry: "ToolRegistry | None" = None
+
+
+def get_extension_tool_registry() -> "ToolRegistry":
+    """Registry bersama untuk tool yang didaftarkan Extension.
+
+    Dipakai dua sisi:
+        * ExtensionLoader/ExtensionManager (layer Extension) MENULIS tool Extension
+          ke sini saat Extension ENABLED;
+        * `build_registry()` (Agent) MEMBACA dari sini agar tool Extension muncul
+          pada toolset Agent.
+
+    Returns:
+        Satu instance ToolRegistry yang stabil selama proses hidup.
+    """
+    global _extension_tool_registry
+    if _extension_tool_registry is None:
+        _extension_tool_registry = ToolRegistry()
+    return _extension_tool_registry
+
+
+# ---------------------------------------------------------------------------
 
 # Registry global + pendaftaran tool bawaan (read-only filesystem tools).
 # ---------------------------------------------------------------------------
@@ -156,6 +195,12 @@ def build_registry(
     `load_skill_reference` terdaftar di sini (Agent) dan juga di registry
     Consultant via `build_skill_tools` yang sama — SATU mekanisme Skill
     (SkillStore) tanpa storage/loader baru, tanpa auto-selector heuristic.
+
+    Extension (Task 08+): tool yang didaftarkan Extension ENABLED (mis.
+    `aether.playwright.browser_*`) ikut digabungkan ke registry ini dari
+    `get_extension_tool_registry()`. Extension tetap memakai API registration
+    yang sudah ada (`ExtensionContext.tools`); `build_registry()` hanya membaca
+    registry bersama tersebut.
     """
     from pathlib import Path as _Path
 
@@ -205,6 +250,22 @@ def build_registry(
 
     for tool in build_skill_tools(root=resolved, include_lifecycle=True):
         reg.register(tool)
+    # Gabungkan tool yang dikontribusikan Extension (mis. `aether.playwright`)
+    # ke toolset Agent. Registry Extension bersifat proses-wide dan hanya memuat
+    # tool Extension ENABLED (enable/disable Extension mengelola isinya). Nama
+    # tool Extension WAJIB namespaced (mis. "aether.playwright.browser_launch"),
+    # sehingga tidak bertabrakan dengan tool bawaan. Ini TIDAK menambah subsystem
+    # baru: hanya menggabungkan registry yang sudah ada.
+    ext_registry = _extension_tool_registry
+    if ext_registry is not None:
+        for _name in ext_registry.list():
+            if reg.has(_name):
+                continue
+            try:
+                reg.register(ext_registry.get(_name))
+            except Exception:
+                # Satu Extension bermasalah tidak boleh menggagalkan registry Agent.
+                continue
     return reg
 
 

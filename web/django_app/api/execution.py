@@ -195,6 +195,19 @@ class TaskExecutor:
         if workspace_root:
             from agent_ai.tools.registry import build_registry
 
+            # Integrasi Extension: pastikan Extension (mis. `aether.playwright`)
+            # ter-load & tool-nya ENABLED terdaftar ke registry bersama SEBELUM
+            # registry Agent dibangun, sehingga `build_registry()` menggabungkan
+            # tool Extension (browser_*) ke toolset Agent. Best-effort: kegagalan
+            # Extension tidak boleh menggagalkan eksekusi task (Agent tetap jalan
+            # tanpa tool Extension).
+            try:
+                from agent_ai.extensions.agent_bridge import ensure_agent_extensions_loaded
+
+                ensure_agent_extensions_loaded()
+            except Exception:
+                pass
+
             # cancel_token diteruskan ke run_command agar proses command yang
             # sedang berjalan benar-benar dihentikan saat user menekan Stop
             # (bukan hanya menunggu timeout). Ini membuat slot queue cepat
