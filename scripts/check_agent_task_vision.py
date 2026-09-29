@@ -21,7 +21,15 @@ Membuktikan rantai ADDITIVE (reuse mekanisme vision Consultant):
        AgentOrchestrator menerima `user_parts` dan provider MELIHAT image part
        pada pesan user.
     8. Frontend: api.js `createTask` mengirim `images`; TaskComposer.vue memuat
-       jalur attach image (format mengikuti Consultant).
+       jalur attach image (format mengikuti Consultant) & mengirim base64
+       (bukan path lokal).
+    9. END-TO-END NYATA (format TaskComposer.images -> create_task ->
+       _run_task_inner -> TaskExecutor NYATA -> AgentRuntime -> AgentOrchestrator
+       -> OpenAICompatibleProvider NYATA): payload `/chat/completions` final
+       memiliki content block `image_url` dengan data URL base64 yang SAMA
+       dengan yang dikirim UI. Tanpa attachment -> tetap text-only.
+   10. Path lokal (mis. `C:\\Users\\...\\xxx.png`) TIDAK PERNAH menjadi input
+       image: data yang bukan base64 gambar valid ditolak (ValidationError).
 
 Jalankan:
     python scripts/check_agent_task_vision.py
@@ -257,7 +265,152 @@ def main() -> int:
     for needle in ("onFilesPicked", "attachments", "attach-btn", "removeAttachment", "images:"):
         assert needle in composer, f"TaskComposer.vue harus memuat: {needle}"
     assert "image/jpeg,image/png,image/webp" in composer, "accept harus jpeg/png/webp"
+    # Komposer mengirim BASE64 hasil FileReader (bukan path lokal file sistem).
+    assert "a.base64" in composer, "TaskComposer harus mengirim base64, bukan path"
+    assert "file.path" not in composer, "TaskComposer tidak boleh mengirim path file"
     print("[8] frontend Agent Task attach image OK -> api.js + TaskComposer.vue")
+
+    # 9) END-TO-END NYATA: format TaskComposer.images -> create_task ->
+    #    _run_task_inner -> TaskExecutor NYATA -> AgentRuntime -> AgentOrchestrator
+    #    -> OpenAICompatibleProvider NYATA -> payload /chat/completions image_url.
+    #    Hanya network yang di-stub; konversi multimodal yang diuji = kode asli.
+    from api.execution import TaskExecutor as _RealTaskExecutor
+    from agent_ai.providers.base import GenerateResult
+    from agent_ai.session.store import InMemorySessionStore as _InMemoryStore
+
+    class CapturingOpenAIProvider(OpenAICompatibleProvider):
+        """Provider OpenAI-compatible NYATA; network di-stub, payload direkam."""
+
+        name = "openai-capture"
+
+        def __init__(self):
+            super().__init__(
+                config=OpenAIConfig(api_key="x", base_url="http://localhost", model="m")
+            )
+            self.payloads = []
+
+        def generate(self, prompt=None, messages=None, options=None, tools=None, tool_choice=None):
+            self.payloads.append(
+                self._build_payload(prompt, messages, options, tools, tool_choice)
+            )
+            return GenerateResult(text="final", model="m", provider=self.name)
+
+    capture = CapturingOpenAIProvider()
+    e2e_store = _InMemoryStore()
+
+    def _hermetic_runtime(provider, executor, session_id=None, options=None):
+        """AgentRuntime standar TANPA project_root (hermetic).
+
+        Menghindari brain/Project Bible & penulisan project sehingga verifier
+        tidak menyentuh database/berkas milik user; jalur runtime/orchestrator
+        tetap yang NYATA dipakai produksi.
+        """
+        from agent_ai.runtime.runtime import AgentRuntime as _AgentRuntime
+
+        kwargs = {
+            "provider": provider,
+            "executor": executor,
+            "session_store": e2e_store,
+            "session_id": session_id,
+        }
+        if options is not None:
+            kwargs["options"] = options
+        return _AgentRuntime(**kwargs)
+
+    real_tx = _RealTaskExecutor(
+        e2e_store,
+        provider_factory=lambda: capture,
+        runtime_factory=_hermetic_runtime,
+    )
+    gw_e2e = services_mod.GatewayService(auto_execute=False, task_executor=real_tx)
+    # Hermetic: jangan menyentuh workspace/active-project (menghindari memuat
+    # extension & menulis database global). Jalur vision (user_parts) tidak
+    # terpengaruh karena image mengalir lewat attachment task, bukan workspace.
+    gw_e2e._resolve_workspace_root = lambda project_id=None: None
+
+    # Images PERSIS format TaskComposer.vue: {data: base64, mime_type, filename}.
+    composer_images = [{"data": b64, "mime_type": "image/png", "filename": "xxx.png"}]
+    record3 = gw_e2e.create_task("deskripsikan gambar ini", images=composer_images)
+    gw_e2e._run_task_inner(record3["task_id"], CancellationToken())
+    assert capture.payloads, "provider NYATA harus dipanggil"
+    # Kumpulkan SEMUA content block image_url lintas pemanggilan provider
+    # (defensif; normalnya satu pemanggilan agent per task).
+    image_urls = []
+    for payload in capture.payloads:
+        for message in payload["messages"]:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "image_url":
+                    image_urls.append(block["image_url"]["url"])
+    assert image_urls, "provider NYATA harus melihat content block image_url"
+    # Payload provider = EXACT image part yang dihasilkan gateway dari attachment
+    # UI (base64 hasil preprocessing vision, bukan path lokal).
+    stored_e2e = gw_e2e._task_attachments[record3["task_id"]]
+    expected_url = (
+        f"data:{stored_e2e[0]['mime_type']};base64,{stored_e2e[0]['data']}"
+    )
+    assert image_urls[0] == expected_url, image_urls[0][:60]
+    assert image_urls[0].startswith("data:image/png;base64,"), image_urls[0][:40]
+    decoded = base64.b64decode(image_urls[0].split(",", 1)[1])
+    assert decoded[:8] == b"\x89PNG\r\n\x1a\n", decoded[:8]
+    print("[9] E2E: TaskComposer.images -> create_task -> provider image_url OK")
+
+    # 9b) Backward compatible E2E: tanpa attachment -> pesan user tetap string.
+    capture_b = CapturingOpenAIProvider()
+    e2e_store_b = _InMemoryStore()
+
+    def _hermetic_runtime_b(provider, executor, session_id=None, options=None):
+        from agent_ai.runtime.runtime import AgentRuntime as _AgentRuntime
+
+        kwargs = {
+            "provider": provider,
+            "executor": executor,
+            "session_store": e2e_store_b,
+            "session_id": session_id,
+        }
+        if options is not None:
+            kwargs["options"] = options
+        return _AgentRuntime(**kwargs)
+
+    real_tx_b = _RealTaskExecutor(
+        e2e_store_b,
+        provider_factory=lambda: capture_b,
+        runtime_factory=_hermetic_runtime_b,
+    )
+    gw_e2e_b = services_mod.GatewayService(auto_execute=False, task_executor=real_tx_b)
+    gw_e2e_b._resolve_workspace_root = lambda project_id=None: None
+    record4 = gw_e2e_b.create_task("tugas teks saja")
+    gw_e2e_b._run_task_inner(record4["task_id"], CancellationToken())
+    agent_text_seen = False
+    image_in_text_only = False
+    for payload in capture_b.payloads:
+        for message in payload["messages"]:
+            content = message.get("content")
+            if (
+                message.get("role") == "user"
+                and isinstance(content, str)
+                and "tugas teks saja" in content
+            ):
+                agent_text_seen = True
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "image_url":
+                        image_in_text_only = True
+    assert agent_text_seen, "pesan user agent harus tetap text-only"
+    assert not image_in_text_only, "tanpa attachment TIDAK boleh ada image_url"
+    print("[9b] E2E tanpa attachment tetap text-only OK")
+
+    # 10) Path lokal TIDAK PERNAH menjadi input image: data berupa path file
+    #     (mis. `C:\\Users\\...\\xxx.png`) ditolak sebagai gambar invalid.
+    for bad_data in (r"C:\Users\me\xxx.png", r"C:/Users/me/xxx.png"):
+        try:
+            gw.create_task("x", images=[{"data": bad_data, "mime_type": "image/png"}])
+            raise AssertionError(f"path lokal harus ditolak: {bad_data!r}")
+        except ValidationError:
+            pass
+    print("[10] path lokal tidak diterima sebagai image (rejected) OK")
 
     print()
     print("[OK] Vision/Multimodal Agent Task bekerja (additive, backward compatible).")
