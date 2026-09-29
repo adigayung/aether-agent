@@ -512,7 +512,80 @@ These are conceptual examples, not benchmarks.
 
 ---
 
+## Extension System
+
+**Extension = capability package for AETHER**
+
+AETHER can be extended by installing *extensions* – self‑contained Python packages that provide additional capabilities such as new tools, UI components, services, or storage back‑ends.  The system is fully implemented and consists of the following parts:
+
+* **Directory layout** – extensions live under `<AETHER_ROOT>/Extension/`.  Each extension is a normal Python package that contains a `manifest.json` and an `extension.py` which defines a subclass of `agent_ai.extensions.Extension`.
+* **Manifest** – a JSON file that must contain the fields `id`, `name`, `version`, `description` and `api_version`.  The `id` is a globally unique identifier (e.g. `myorg.myextension`).  The manifest is validated on load.
+* **Discovery & loading** – at startup `ExtensionLoader` scans the extensions directory (and optional entry‑point groups) to discover extensions, validates their manifests, imports the module and creates an instance of the `Extension` class.
+* **Registration** – the loader calls `extension.register(context)`.  The provided `ExtensionContext` exposes ten facades (`tools`, `skills`, `knowledge`, `config`, `services`, `providers`, `resources`, `hooks`, `commands`, `ui` and `storage`).  An extension can add capabilities by calling the appropriate facade, e.g. `ctx.tools.register_tool(MyTool())` or `ctx.config.set('my_key', 'value')`.
+* **Lifecycle (enable/disable)** – the state of each extension is stored in the **Extension Lifecycle Store**.  By default an extension is *enabled* after successful registration.  The `ExtensionManager.enable(id)` and `ExtensionManager.disable(id)` methods flip this flag, invoke the optional `on_enable` / `on_disable` hooks, and activate or deactivate all capabilities registered by the extension (including removal from the global `ToolRegistry`).
+* **Configuration** – extensions can read/write configuration via `ctx.config`, which is backed by the same SQLite configuration store used by the core AETHER settings.
+* **Installation** – `ExtensionManager.install(repository_url, ref=None)` clones a Git repository to a temporary staging area, validates the package structure (`pyproject.toml`, `manifest.json`, `__init__.py`, `extension.py`), checks the declared `system_requirements`, runs optional dependency installation, registers the extension and enables it.  The function returns a status dict identical to `ExtensionManager.get_status`.
+* **Updating** – `ExtensionManager.update(extension_id, repository_url, ref=None)` performs the same validation steps on a new version, backs up the currently installed package, swaps the directory atomically and re‑registers the extension.  If any step fails the previous version is restored automatically.
+* **Uninstalling** – `ExtensionManager.uninstall(extension_id)` disables the extension, runs its `on_disable` hook, removes all of its capabilities and deletes the source folder.
+* **Helper factory** – `create_installer(...)` (in `src/agent_ai/extensions/installer.py`) builds a ready‑to‑use `ExtensionManager` with the appropriate registries and stores.
+
+Typical usage pattern (in a Python console or script):
+
+```python
+from agent_ai.extensions.manager import create_installer
+
+# Create a manager bound to the current AETHER runtime
+installer = create_installer()
+
+# Install a new extension from a git repo
+status = installer.install('https://github.com/example/myextension.git')
+print('Installed:', status)
+
+# Enable or disable an extension at runtime
+installer.disable('myorg.myextension')
+installer.enable('myorg.myextension')
+
+# Update an existing extension
+installer.update('myorg.myextension', 'https://github.com/example/myextension.git')
+
+# Uninstall it completely
+installer.uninstall('myorg.myextension')
+```
+
+All operations are safe: failures during install or update roll back any partially registered capabilities, and the core runtime remains stable.
+
+---
+
 ## Roadmap
+
+### Implemented
+
+```
+Implemented
+├── Autonomous Agent (continuous Native Tool Calling loop)
+├── Consultant (quick / investigate, read-only, Task Proposals)
+├── Project Intelligence (Bible / Atlas / RIG / Maps with freshness)
+├── Skill System (catalog → load_skill → load_skill_reference, Agent lifecycle)
+├── Provider & Model architecture (instances + models in SQLite)
+├── Queue (serial FIFO) + Parallel Agent (concurrent, File Write Lock)
+├── Workbench (task composer, history, activity, changes, explorer, Monaco editor)
+├── Telemetry (provider/model/round/tool calls/tokens/duration/status)
+└── Permission & workspace boundary
+```
+
+### Future
+
+```
+Future
+└── God Mode
+```
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
 
 ### Implemented
 
