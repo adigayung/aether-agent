@@ -141,6 +141,32 @@ def get_extension_tool_registry() -> "ToolRegistry":
     return _extension_tool_registry
 
 
+def is_extension_tool(name: str) -> bool:
+    """True bila ``name`` adalah tool yang dikontribusikan Extension ENABLED.
+
+    Identifikasi memakai MEKANISME REGISTRASI Extension yang SUDAH ADA (registry
+    bersama di atas), BUKAN pencocokan nama/pola Extension tertentu: Extension
+    yang ENABLED mendaftarkan tool-nya ke registry bersama ini saat aktivasi dan
+    DISABLE mencabutnya kembali (lihat ``ExtensionManager._enable_capabilities``
+    / ``_disable_capabilities``). Karena itu keanggotaan registry ini persis
+    merepresentasikan "tool Extension yang enabled" — berlaku GENERIC untuk
+    seluruh Extension (bukan logic khusus Playwright dsb.).
+
+    Tidak pernah membuat registry baru: bila registry bersama belum pernah
+    dibuat (belum ada Extension yang ter-load), hasilnya False.
+
+    Returns:
+        True bila ``name`` terdaftar sebagai tool Extension (enabled), else False.
+    """
+    reg = _extension_tool_registry
+    if reg is None:
+        return False
+    try:
+        return bool(reg.has(name))
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 
 # Registry global + pendaftaran tool bawaan (read-only filesystem tools).
