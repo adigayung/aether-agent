@@ -200,6 +200,8 @@ class AgentRuntime:
         self,
         prepared: PreparedTask,
         lifecycle: Optional["TaskLifecycle"] = None,
+        *,
+        user_parts: Optional[List[Dict[str, Any]]] = None,
     ) -> RuntimeResult:
         """Jalankan PreparedTask dan kembalikan RuntimeResult.
 
@@ -209,6 +211,9 @@ class AgentRuntime:
                 menggerakkan transition status (RUNNING -> VALIDATING ->
                 COMPLETED/FAILED) tanpa mengubah perilaku eksekusi. Bila None,
                 perilaku sama seperti sebelumnya.
+            user_parts: content blocks opsional untuk pesan user awal (mis.
+                image, format internal AETHER provider-agnostic). Diteruskan ke
+                AgentOrchestrator. Kosong (default) = text-only tidak berubah.
 
         Returns:
             RuntimeResult (status, result/error, progress, steps).
@@ -250,7 +255,7 @@ class AgentRuntime:
         # (bila ada) hanya context advisory. Tidak ada pemanggilan per-step.
         if self.use_continuous_loop:
             self._current_environment_context = self._session_environment_context()
-            result = self._run_continuous(prepared, progress)
+            result = self._run_continuous(prepared, progress, user_parts=user_parts)
             result = self._maybe_validate(prepared, progress, result, lifecycle)
             self._lifecycle_finalize(lifecycle, result)
             return result
@@ -258,7 +263,7 @@ class AgentRuntime:
         # --- Jalur legacy (use_continuous_loop=False) ---
         # Tanpa plan: jalankan task sebagai satu langkah tunggal.
         if plan is None or not plan.steps:
-            result = self._run_single(prepared, progress)
+            result = self._run_single(prepared, progress, user_parts=user_parts)
             result = self._maybe_validate(prepared, progress, result, lifecycle)
             self._lifecycle_finalize(lifecycle, result)
             return result
@@ -1039,6 +1044,8 @@ class AgentRuntime:
         self,
         prepared: PreparedTask,
         progress: RuntimeProgress,
+        *,
+        user_parts: Optional[List[Dict[str, Any]]] = None,
     ) -> RuntimeResult:
         """Jalankan task sebagai SATU percakapan kontinu (Native Tool Calling).
 
@@ -1050,11 +1057,14 @@ class AgentRuntime:
 
         Plan (bila ada) hanya dipakai sebagai context ADVISORY opsional; ia
         tidak menentukan urutan pemanggilan tool.
+
+        user_parts: content blocks opsional (mis. image) untuk pesan user awal,
+        diteruskan ke AgentOrchestrator.run. Kosong = text-only tidak berubah.
         """
         progress.current_step = prepared.task
         task_text = self._build_continuous_task(prepared)
         orchestrator = self._make_orchestrator(self.provider)
-        result = orchestrator.run(task_text)
+        result = orchestrator.run(task_text, user_parts=user_parts)
         progress.iteration += max(1, getattr(result, "iterations", 0))
 
         # Cancellation (cooperative): loop berhenti di safe boundary -> task
@@ -1097,11 +1107,13 @@ class AgentRuntime:
         self,
         prepared: PreparedTask,
         progress: RuntimeProgress,
+        *,
+        user_parts: Optional[List[Dict[str, Any]]] = None,
     ) -> RuntimeResult:
         """Jalankan task tanpa plan (satu langkah tunggal) - jalur legacy."""
         progress.current_step = prepared.task
         orchestrator = self._make_orchestrator(self.provider)
-        result = orchestrator.run(self._build_task(prepared))
+        result = orchestrator.run(self._build_task(prepared), user_parts=user_parts)
         progress.iteration += max(1, getattr(result, "iterations", 0))
 
         if result.status == AgentStatus.DONE:

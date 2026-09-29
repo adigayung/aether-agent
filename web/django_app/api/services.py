@@ -207,6 +207,12 @@ class GatewayService:
         self._tasks: Dict[str, TaskRecord] = {}
         # PreparedTask asli (bukan ringkasan) untuk diteruskan ke runtime.
         self._prepared: Dict[str, Any] = {}
+        # Attachment gambar per task (image content parts provider-agnostic,
+        # SUDAH dipreprocess). Disimpan TERPISAH dari TaskRecord.to_dict() agar
+        # base64 TIDAK bocor ke API list/history/activity/log. Ini mekanisme
+        # penyimpanan attachment level-task (in-memory, seumur eksekusi task) —
+        # BUKAN storage subsystem baru. Dipakai jalur Agent Task (vision).
+        self._task_attachments: Dict[str, List[Dict[str, Any]]] = {}
         self._lock = threading.Lock()
         # Cooperative cancellation: satu token per task yang sedang dieksekusi.
         # Bukan sistem cancellation kedua — primitif tunggal (agent_ai.core.cancel)
@@ -1091,12 +1097,49 @@ class GatewayService:
     # ------------------------------------------------------------------ #
     # Tasks
     # ------------------------------------------------------------------ #
+    def _prepare_task_image_parts(
+        self, images: Optional[Any]
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Normalisasi + proses gambar task -> image content parts (ADDITIVE).
+
+        Memakai normalisasi gambar bersama (`_normalize_images`, batas IDENTIK
+        dengan Consultant) dan helper vision bersama
+        (`agent_ai.vision.parts.build_image_parts`). TIDAK menulis ulang logika
+        image. None/kosong -> None (text-only, perilaku lama tidak berubah).
+
+        Returns:
+            List image content part (provider-agnostic) atau None bila tidak ada.
+
+        Raises:
+            ValidationError: bentuk/ukuran gambar tidak valid, atau gambar tidak
+                dapat diproses modul vision (bukan PNG/JPEG/WebP / rusak).
+        """
+        normalized = self._normalize_images(images)
+        if not normalized:
+            return None
+
+        from agent_ai.vision.parts import build_image_parts
+
+        try:
+            return build_image_parts(normalized)
+        except ValidationError:
+            raise
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 - map error vision ke ValidationError
+            from agent_ai.vision.models import VisionError
+
+            if isinstance(exc, VisionError):
+                raise ValidationError(f"Gambar tidak dapat diproses: {exc}") from exc
+            raise
+
     def create_task(
         self,
         task: str,
         project_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         execution_mode: Optional[str] = None,
+        images: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Buat task: validasi + siapkan via TaskPreparation, lalu eksekusi.
 
@@ -1109,12 +1152,19 @@ class GatewayService:
             project_id: project terkait (opsional; divalidasi bila diisi).
             metadata: metadata tambahan (opsional).
             execution_mode: 'queue' | 'parallel' (opsional, default 'queue').
+            images: daftar gambar opsional (multimodal, ADDITIVE). Setiap item:
+                {"data": "<base64>", "mime_type": "image/png", "filename":
+                opsional}. Dinormalisasi + diproses modul vision existing
+                (batas sama dengan Consultant: maks 8 gambar, JPEG/PNG/WebP)
+                lalu diteruskan sebagai image parts ke jalur Agent Task
+                (AgentOrchestrator menerima `user_parts`).
 
         Returns:
             TaskRecord sebagai dict.
 
         Raises:
-            ValidationError: bila task kosong atau execution_mode tidak valid.
+            ValidationError: bila task kosong, execution_mode tidak valid, atau
+                gambar tidak valid / melebihi batas.
             NotFoundError: bila project_id diisi tapi tidak ditemukan.
         """
         if not task or not isinstance(task, str) or not task.strip():
@@ -1137,6 +1187,12 @@ class GatewayService:
         if raw_mode is None and metadata and isinstance(metadata, dict):
             raw_mode = metadata.get("execution_mode")
         execution_mode_norm = _normalize_execution_mode(raw_mode)
+
+        # Attachment gambar (vision, ADDITIVE): normalisasi + proses
+        # (preprocess) di sini agar gambar invalid ditolak LEBIH AWAL (400),
+        # sama seperti jalur Consultant. Hasil = image content parts AETHER
+        # (provider-agnostic). Disimpan per-task, BUKAN di TaskRecord.to_dict().
+        image_parts = self._prepare_task_image_parts(images)
 
         task_id = new_task_id()
         prepared = self.preparation.prepare(task.strip(), task_id=task_id)
@@ -1168,6 +1224,9 @@ class GatewayService:
             record.queue_order = self._queue_seq
             self._tasks[task_id] = record
             self._prepared[task_id] = prepared
+            # Attachment gambar per-task (dipakai jalur eksekusi Agent).
+            if image_parts:
+                self._task_attachments[task_id] = image_parts
 
         # Event TASK_CREATED (memakai event AETHER existing).
         self._emit(
@@ -1337,6 +1396,9 @@ class GatewayService:
             # --- Release execution slot (COMPLETED/FAILED/CANCELLED/semua path).
             with self._lock:
                 self._cancel_tokens.pop(task_id, None)
+                # Attachment gambar tidak lagi dibutuhkan setelah eksekusi
+                # (hindari menahan base64 di memori).
+                self._task_attachments.pop(task_id, None)
                 rec = self._tasks.get(task_id)
                 # Bila runtime crash tanpa pernah mengirim status terminal,
                 # jangan biarkan slot "nyangkut" running selamanya.
@@ -1353,6 +1415,10 @@ class GatewayService:
         with self._lock:
             record = self._tasks.get(task_id)
             prepared = self._prepared.get(task_id)
+            # Attachment gambar (image content parts) untuk task ini, bila ada.
+            # Dibaca di dalam lock agar konsisten dengan penyimpanan saat
+            # create_task.
+            user_parts = self._task_attachments.get(task_id)
         if record is None or prepared is None:
             return
 
@@ -1381,19 +1447,25 @@ class GatewayService:
         provider_instance_id = meta.get("provider_instance_id") or None
         model_id = meta.get("model_id") or None
 
+        run_kwargs: Dict[str, Any] = {
+            "session_id": record.session_id,
+            "task_id": task_id,
+            "on_status": on_status,
+            "workspace_root": workspace_root,
+            "provider_name": provider_name,
+            "model_name": model_name,
+            "provider_instance_id": provider_instance_id,
+            "model_id": model_id,
+            "cancel_token": token,
+        }
+        # Hanya kirim `user_parts` bila ADA attachment gambar. Ini menjaga
+        # kompatibilitas dengan TaskExecutor/verifier lama yang signature-nya
+        # belum mengenal parameter ini (perilaku text-only tidak berubah).
+        if user_parts:
+            run_kwargs["user_parts"] = user_parts
+
         try:
-            summary = self.task_executor.run(
-                prepared,
-                session_id=record.session_id,
-                task_id=task_id,
-                on_status=on_status,
-                workspace_root=workspace_root,
-                provider_name=provider_name,
-                model_name=model_name,
-                provider_instance_id=provider_instance_id,
-                model_id=model_id,
-                cancel_token=token,
-            )
+            summary = self.task_executor.run(prepared, **run_kwargs)
         except Exception as exc:  # noqa: BLE001 - jangan biarkan thread crash
             if token.is_cancelled():
                 # Dibatalkan saat error: pertahankan status CANCELLED.
@@ -2000,7 +2072,7 @@ class GatewayService:
         if not message or not str(message).strip():
             raise ValidationError("Field 'message' wajib diisi dan tidak boleh kosong.")
 
-        normalized_images = self._normalize_consult_images(images)
+        normalized_images = self._normalize_images(images)
 
         if root is None:
             root = self._resolve_workspace_root(project_id)
@@ -2037,10 +2109,10 @@ class GatewayService:
             raise
         return result.to_dict()
 
-    def _normalize_consult_images(
+    def _normalize_images(
         self, images: Optional[Any]
     ) -> Optional[List[Dict[str, Any]]]:
-        """Validasi & normalisasi daftar gambar dari request Consultant.
+        """Validasi & normalisasi daftar gambar (GENERALIZED: Consultant + Task).
 
         Bentuk yang diterima: list of {"data": "<base64>", "mime_type": str,
         "filename": opsional}. Dibatasi jumlah/ukuran agar aman.
@@ -2082,6 +2154,17 @@ class GatewayService:
                 entry["filename"] = str(item["filename"])
             normalized.append(entry)
         return normalized
+
+    def _normalize_consult_images(
+        self, images: Optional[Any]
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Alias backward-compatible untuk `_normalize_images`.
+
+        Dipertahankan agar pemanggil/verifier lama (jalur Consultant) tetap
+        bekerja; implementasi tunggal ada di `_normalize_images` sehingga
+        batas jumlah/ukuran gambar IDENTIK di jalur Consultant dan Agent Task.
+        """
+        return self._normalize_images(images)
 
     def _build_consultant_provider(
         self,

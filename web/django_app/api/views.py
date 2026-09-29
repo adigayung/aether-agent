@@ -450,6 +450,9 @@ def tasks(request: HttpRequest, service: GatewayService) -> JsonResponse:
     project_id = body.get("project_id")
     metadata = body.get("metadata")
     execution_mode = body.get("execution_mode")
+    # Attachment gambar (multimodal, opsional). Daftar {data, mime_type,
+    # filename?}; divalidasi/dinormalisasi service (batas sama Consultant).
+    images = body.get("images")
     if execution_mode is None and metadata and isinstance(metadata, dict):
         execution_mode = metadata.get("execution_mode")
     if metadata is not None and not isinstance(metadata, dict):
@@ -457,7 +460,11 @@ def tasks(request: HttpRequest, service: GatewayService) -> JsonResponse:
 
         raise ValidationError("Field 'metadata' harus berupa object bila diisi.")
     record = service.create_task(
-        task=task, project_id=project_id, metadata=metadata, execution_mode=execution_mode
+        task=task,
+        project_id=project_id,
+        metadata=metadata,
+        execution_mode=execution_mode,
+        images=images,
     )
     return _json_response(record, status=201)
 

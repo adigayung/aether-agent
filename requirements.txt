@@ -14,3 +14,4 @@ requests>=2.28
 # Vision / preprocessing gambar (src/agent_ai/vision)
 Pillow>=9.0
 
+playwright==1.63.0

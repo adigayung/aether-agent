@@ -1102,7 +1102,8 @@ async function submitTask(
   text,
   overrideProviderInstanceId = null,
   overrideModelId = null,
-  overrideExecutionMode = null
+  overrideExecutionMode = null,
+  images = null
 ) {
   error.value = "";
   submitting.value = true;
@@ -1125,7 +1126,8 @@ async function submitTask(
       text,
       selectedProjectId.value || null,
       Object.keys(metadata).length ? metadata : null,
-      executionMode
+      executionMode,
+      images || null
     );
     // Status awal = KEBENARAN backend, BUKAN optimistik. Task yang dikirim
     // (Workbench Agent Input maupun Consultant Run Task) masuk SATU Global Task
@@ -1193,6 +1195,18 @@ async function submitTask(
   } finally {
     submitting.value = false;
   }
+}
+
+// Handler TaskComposer (Agent Input): payload { text, images } (bentuk baru)
+// ATAU string lama (backward compatible). Attachment gambar diteruskan sebagai
+// parameter ke-5 submitTask TANPA mengubah urutan override provider/model/mode
+// (yang dipakai card Task Proposal Consultant).
+async function onComposerSubmit(payload) {
+  const text = typeof payload === "string" ? payload : (payload && payload.text) || "";
+  if (!text) return null;
+  const images =
+    payload && typeof payload === "object" ? payload.images || null : null;
+  return submitTask(text, null, null, null, images);
 }
 
 async function stopTask() {
@@ -2135,7 +2149,7 @@ onBeforeUnmount(() => {
           :model-id="selectedModelId"
           :mode="selectedMode"
           :execution-mode="selectedExecutionMode"
-          @submit="submitTask"
+          @submit="onComposerSubmit"
           @stop="requestStop"
           @update:provider-instance-id="selectedProviderInstanceId = $event"
           @update:model-id="selectedModelId = $event"

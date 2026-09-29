@@ -37,6 +37,7 @@ from agent_ai.vision.models import (
     VisionError,
     VisionRequest,
 )
+from agent_ai.vision.parts import build_image_parts
 from agent_ai.vision.policy import VISION_REQUIRED_CAPABILITIES, VisionPolicy
 from agent_ai.vision.preprocessing import ImagePreprocessor
 
@@ -44,6 +45,7 @@ __all__ = [
     "ImageInputLoader",
     "ImagePreprocessor",
     "VisionPolicy",
+    "build_image_parts",
     "ImageInput",
     "ImageMetadata",
     "ProcessedImage",

@@ -230,8 +230,17 @@ class AgentOrchestrator:
     # ------------------------------------------------------------------ #
     # History helpers
     # ------------------------------------------------------------------ #
-    def _build_messages(self, task: str, history: List[Message]) -> List[Message]:
-        """Bangun daftar pesan untuk LLM: system + task + history."""
+    def _build_messages(
+        self,
+        task: str,
+        history: List[Message],
+        user_parts: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Message]:
+        """Bangun daftar pesan untuk LLM: system + task + history.
+
+        `user_parts` (opsional) = content blocks untuk pesan user awal (mis.
+        image). None (default) = perilaku text-only tidak berubah.
+        """
         messages: List[Message] = []
         if self.system_prompt:
             messages.append(Message(role="system", content=self.system_prompt))
@@ -239,7 +248,7 @@ class AgentOrchestrator:
         environment = self._environment_context_message()
         if environment is not None:
             messages.append(environment)
-        messages.append(Message(role="user", content=task))
+        messages.append(Message(role="user", content=task, parts=user_parts))
         messages.extend(history)
         return messages
 
@@ -1391,7 +1400,12 @@ class AgentOrchestrator:
     # ------------------------------------------------------------------ #
     # Main loop
     # ------------------------------------------------------------------ #
-    def run(self, task: str) -> OrchestratorResult:
+    def run(
+        self,
+        task: str,
+        *,
+        user_parts: Optional[List[Dict[str, Any]]] = None,
+    ) -> OrchestratorResult:
         """Jalankan iterative agent loop untuk sebuah task.
 
         Bila `use_continuous_loop` aktif (default), delegasikan ke
@@ -1399,11 +1413,17 @@ class AgentOrchestrator:
         Loop lama hanya dipakai bila pemanggil memberi eksplisit
         `use_continuous_loop=False` (kompatibilitas/uji).
 
+        Args:
+            task: task/permintaan user.
+            user_parts: content blocks opsional untuk pesan user awal (mis.
+                image, format internal AETHER provider-agnostic). Kosong
+                (default) = perilaku text-only tidak berubah.
+
         Returns:
             OrchestratorResult (status DONE/FAILED, result, steps).
         """
         if self.use_continuous_loop:
-            return self.run_continuous_loop(task)
+            return self.run_continuous_loop(task, user_parts=user_parts)
 
         loop = AgentLoop(task=task, max_iterations=self.max_iterations)
         loop.start()
@@ -1428,7 +1448,7 @@ class AgentOrchestrator:
                 loop.cancel(self._cancel_reason())
                 break
             # 1) Panggil LLM via abstraction (sertakan definisi tool native).
-            messages = self._build_messages(task, history)
+            messages = self._build_messages(task, history, user_parts=user_parts)
             tools = self._tool_definitions()
             emit_event(
                 self.event_sink,

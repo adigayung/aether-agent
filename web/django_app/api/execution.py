@@ -32,7 +32,7 @@ task ditandai FAILED dengan error jelas (tidak crash).
 from __future__ import annotations
 
 import threading
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from agent_ai.core.executor import ToolExecutor
 from agent_ai.permission.manager import PermissionManager
@@ -291,6 +291,7 @@ class TaskExecutor:
         provider_instance_id: Optional[str] = None,
         model_id: Optional[str] = None,
         cancel_token: Optional[Any] = None,
+        user_parts: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Jalankan PreparedTask lewat AETHER Runtime (synchronous).
 
@@ -315,6 +316,10 @@ class TaskExecutor:
             cancel_token: token pembatalan kooperatif (opsional). Bila diisi,
                 runtime/orchestrator berhenti di safe boundary saat token
                 diminta dan task dilaporkan CANCELLED (bukan FAILED).
+            user_parts: content blocks opsional untuk pesan user awal (mis.
+                image, format internal AETHER provider-agnostic). Diteruskan ke
+                AgentRuntime -> AgentOrchestrator (user_parts). Kosong (default)
+                = text-only tidak berubah.
 
         Returns:
             Ringkasan hasil: {"status", "result", "error", "iterations"}.
@@ -387,7 +392,11 @@ class TaskExecutor:
                 cancel_token=cancel_token,
                 change_sink=_change_sink,
             )
-            result = runtime.run(prepared, lifecycle=lifecycle)
+            result = runtime.run(
+                prepared,
+                lifecycle=lifecycle,
+                **({"user_parts": user_parts} if user_parts else {}),
+            )
         except Exception as exc:  # noqa: BLE001 - provider/runtime error -> FAILED
             error = f"{type(exc).__name__}: {exc}"
             self._emit(

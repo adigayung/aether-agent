@@ -210,7 +210,7 @@ export function restoreGithubCheckpoint(projectId, commit, force = false) {
   });
 }
 
-export function createTask(task, projectId = null, metadata = null, executionMode = null) {
+export function createTask(task, projectId = null, metadata = null, executionMode = null, images = null) {
   const body = { task };
   if (projectId) body.project_id = projectId;
   if (metadata) body.metadata = metadata;
@@ -218,6 +218,10 @@ export function createTask(task, projectId = null, metadata = null, executionMod
   // parallel execution. Default 'queue' di backend agar task lama kompatibel.
   const rawMode = executionMode || (metadata && metadata.execution_mode) || null;
   if (rawMode) body.execution_mode = String(rawMode).toLowerCase();
+  // Attachment gambar (multimodal, ADDITIVE): daftar {data: base64,
+  // mime_type, filename?}. Dikirim hanya bila ada; backend memvalidasi &
+  // meneruskan image parts ke jalur Agent Task (sama seperti Consultant).
+  if (images && images.length) body.images = images;
   return request("/tasks", { method: "POST", body: JSON.stringify(body) });
 }
 
