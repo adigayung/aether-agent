@@ -2152,26 +2152,6 @@ class GatewayService:
         ext_reg = getattr(self, "_ext_registry", None)
         lifecycle = getattr(self, "_ext_lifecycle_store", None)
         if cap_reg is None or ext_reg is None:
-            # Tidak ada registry yang di-inject: pakai manager proses-wide yang
-            # TERIKAT ke registry tool bersama Agent (agent_bridge). Ini membuat
-            # UI Extension dan jalur eksekusi Agent berbagi state yang sama —
-            # Extension yang di-ENABLE mendaftarkan tool-nya ke registry yang
-            # dibaca `build_registry()` (toolset Agent), dan tidak ada load ganda.
-            try:
-                from agent_ai.extensions.agent_bridge import get_agent_extension_manager
-
-                mgr = get_agent_extension_manager()
-                self._ext_capability_registry = mgr.capability_registry  # type: ignore[attr-defined]
-                self._ext_registry = mgr.registry  # type: ignore[attr-defined]
-                self._ext_lifecycle_store = mgr.lifecycle_store  # type: ignore[attr-defined]
-                self._ext_tool_registry = mgr.tool_registry  # type: ignore[attr-defined]
-                self._ext_manager = mgr  # type: ignore[attr-defined]
-                return mgr
-            except Exception:
-                # Fallback: tetap bangun manager per-service (backward compatible).
-                pass
-
-        if cap_reg is None or ext_reg is None:
             cap_reg = CapabilityRegistry()
             ext_reg = ExtensionRegistry()
             lifecycle = get_lifecycle_store()
@@ -2198,12 +2178,9 @@ class GatewayService:
         tool_reg = getattr(self, "_ext_tool_registry", None)
         if tool_reg is None:
             try:
-                # Default: registry tool bersama Agent (bukan registry lepas),
-                # agar Extension yang di-enable lewat manajer ini juga masuk ke
-                # toolset Agent. Caller tetap bisa meng-inject registry sendiri.
-                from agent_ai.tools.registry import get_extension_tool_registry
+                from agent_ai.tools.registry import ToolRegistry
 
-                tool_reg = get_extension_tool_registry()
+                tool_reg = ToolRegistry()
             except Exception:
                 tool_reg = None
             self._ext_tool_registry = tool_reg  # type: ignore[attr-defined]
