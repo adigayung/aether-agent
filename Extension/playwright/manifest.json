@@ -1,0 +1,7 @@
+{
+  "id": "aether.playwright",
+  "name": "Playwright",
+  "version": "0.1.0",
+  "description": "Browser automation and web debugging extension for AETHER",
+  "api_version": "1"
+}

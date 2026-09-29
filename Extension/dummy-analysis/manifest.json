@@ -1,7 +1,0 @@
-{
-  "id": "dummy.analysis",
-  "name": "Dummy Analysis Extension",
-  "version": "0.1.0",
-  "description": "Example extension for Task 05 UI System",
-  "api_version": "1"
-}
