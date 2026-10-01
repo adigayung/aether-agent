@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 import threading
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from agent_ai.consultant.guard import (
     ConsultantBoundProvider,
@@ -164,7 +164,9 @@ class ConsultantService:
 
     def __init__(self, max_steps: int = _DEFAULT_MAX_STEPS) -> None:
         self.max_steps = max_steps
-        self._sessions: Dict[str, ConsultantSession] = {}
+        # Sesi di-key oleh (project_id, session_id) agar TERISOLASI per project:
+        # id sesi yang sama pada project berbeda tidak pernah berbagi konteks.
+        self._sessions: Dict[Tuple[str, str], ConsultantSession] = {}
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ #
@@ -175,23 +177,48 @@ class ConsultantService:
     ) -> ConsultantSession:
         """Ambil/buat sesi konsultasi (thread-safe).
 
-        Tanpa session_id tetap membuat sesi ephemeral agar perilaku API lama
-        tidak berubah. Pembuatan sesi bernama dapat dilakukan lewat create_session.
+        Sesi di-key oleh ``(project_id, session_id)`` sehingga sesi Consultant
+        TERISOLASI per project: id sesi yang sama pada project berbeda tidak
+        pernah berbagi konteks. Tanpa session_id tetap membuat sesi ephemeral
+        agar perilaku API lama tidak berubah. Pembuatan sesi bernama dapat
+        dilakukan lewat create_session.
         """
+        project_key = project_id or ""
         with self._lock:
-            if session_id and session_id in self._sessions:
-                return self._sessions[session_id]
+            if session_id:
+                existing = self._sessions.get((project_key, session_id))
+                if existing is not None:
+                    return existing
+                # Adopsi sesi anonim (project belum ditetapkan) dengan session_id
+                # yang sama, lalu kaitkan ke project sekarang. Menjaga kontinuitas
+                # sesi yang dibuat lewat create_session() tanpa project.
+                anonymous = self._sessions.pop(("", session_id), None)
+                if anonymous is not None and project_id:
+                    anonymous.project_id = project_id
+                    self._sessions[(project_key, session_id)] = anonymous
+                    return anonymous
             session = ConsultantSession(session_id=session_id, project_id=project_id)
-            self._sessions[session.session_id] = session
+            self._sessions[(project_key, session.session_id)] = session
             return session
+
+    def _find_session(
+        self, session_id: str, project_id: Optional[str] = None
+    ) -> Optional[ConsultantSession]:
+        """Cari objek sesi (project_id None = cari lintas project)."""
+        if project_id is not None:
+            return self._sessions.get((project_id, session_id))
+        for session in self._sessions.values():
+            if session.session_id == session_id:
+                return session
+        return None
 
     def create_session(
         self, project_id: Optional[str] = None, title: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Buat sesi Consultant in-memory baru."""
+        """Buat sesi Consultant in-memory baru (ter-scope ke project)."""
         with self._lock:
             session = ConsultantSession(project_id=project_id, title=title)
-            self._sessions[session.session_id] = session
+            self._sessions[(project_id or "", session.session_id)] = session
             return session.to_dict()
 
     def list_sessions(self, project_id: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -204,35 +231,48 @@ class ConsultantService:
             sessions.sort(key=lambda s: s.updated_at, reverse=True)
             return [s.to_dict() for s in sessions]
 
-    def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Kembalikan konteks sesi (bila ada)."""
+    def get_session(
+        self, session_id: str, project_id: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Kembalikan konteks sesi (bila ada).
+
+        Bila project_id diberikan, sesi dicari pada project tersebut; bila tidak,
+        sesi dicari lintas project (kompatibel dengan pemanggil lama).
+        """
         with self._lock:
-            session = self._sessions.get(session_id)
+            session = self._find_session(session_id, project_id)
             return session.to_dict() if session is not None else None
 
-    def rename_session(self, session_id: str, title: str) -> Optional[Dict[str, Any]]:
+    def rename_session(
+        self, session_id: str, title: str, project_id: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
         """Ubah judul sesi; None bila sesi tidak ditemukan."""
         with self._lock:
-            session = self._sessions.get(session_id)
+            session = self._find_session(session_id, project_id)
             if session is None:
                 return None
             session.title = str(title or "New Chat").strip() or "New Chat"
             session.touch()
             return session.to_dict()
 
-    def delete_session(self, session_id: str) -> bool:
+    def delete_session(
+        self, session_id: str, project_id: Optional[str] = None
+    ) -> bool:
         """Hapus sesi Consultant (alias terarah untuk reset_session)."""
-        return self.reset_session(session_id)
+        return self.reset_session(session_id, project_id=project_id)
 
-    def reset_session(self, session_id: str) -> bool:
+    def reset_session(
+        self, session_id: str, project_id: Optional[str] = None
+    ) -> bool:
         """Hapus konteks sesi (mulai konsultasi baru). Returns True bila ada."""
         with self._lock:
-            return self._sessions.pop(session_id, None) is not None
-
-    def reset_session(self, session_id: str) -> bool:
-        """Hapus konteks sesi (mulai konsultasi baru). Returns True bila ada."""
-        with self._lock:
-            return self._sessions.pop(session_id, None) is not None
+            if project_id is not None:
+                return self._sessions.pop((project_id, session_id), None) is not None
+            for key, session in list(self._sessions.items()):
+                if session.session_id == session_id:
+                    del self._sessions[key]
+                    return True
+            return False
 
     # ------------------------------------------------------------------ #
     # Consult
@@ -244,6 +284,7 @@ class ConsultantService:
         provider: Any,
         root: Optional[str] = None,
         session_id: Optional[str] = None,
+        project_id: Optional[str] = None,
         max_steps: Optional[int] = None,
         mode: Optional[str] = None,
         images: Optional[List[Dict[str, Any]]] = None,
@@ -257,6 +298,9 @@ class ConsultantService:
             root: root project target. Bila diisi, tool dibatasi ke root itu dan
                 Project Bible dibaca/ditulis di `<root>/.aether/bible/`.
             session_id: id sesi konsultasi (untuk konteks lintas giliran).
+            project_id: id project terkait. Dipakai untuk MENGISOLASI sesi per
+                project: sesi dengan id sama pada project berbeda tidak berbagi
+                konteks. Bila None, sesi berada pada scope global (perilaku lama).
             max_steps: override batas langkah.
             mode: mode Consultant ("quick" | "investigate"). Default "quick".
                 Mode menentukan tool yang benar-benar tersedia bagi LLM dan

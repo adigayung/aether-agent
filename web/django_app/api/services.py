@@ -2099,6 +2099,14 @@ class GatewayService:
 
         normalized_images = self._normalize_images(images)
 
+        # Default ke active project (konsisten dengan _resolve_workspace_root)
+        # agar sesi Consultant ter-tag dan TERISOLASI per project.
+        if not project_id:
+            try:
+                project_id = self.project_store.get_active_project_id() or None
+            except Exception:  # noqa: BLE001 - project state tidak boleh menggagalkan consult
+                project_id = None
+
         if root is None:
             root = self._resolve_workspace_root(project_id)
         if not root:
@@ -2118,6 +2126,7 @@ class GatewayService:
                 provider=provider,
                 root=root,
                 session_id=session_id,
+                project_id=project_id,
                 mode=mode,
                 images=normalized_images,
             )
