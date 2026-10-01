@@ -517,6 +517,41 @@ def tasks(request: HttpRequest, service: GatewayService) -> JsonResponse:
     return _json_response(record, status=201)
 
 
+# ---------------------------------------------------------------------------
+# Approval (ASK) — keputusan user untuk action yang ditahan policy.
+#
+# BUKAN sistem permission kedua: keputusan tetap dibuat PermissionManager
+# existing. Endpoint ini hanya menyampaikan Allow/Deny user ke action yang
+# DITAHAN, terikat ke task/session agar tidak tertukar antar task.
+# ---------------------------------------------------------------------------
+@require_http_methods(["GET"])
+@_handle
+def task_approvals(request: HttpRequest, service: GatewayService) -> JsonResponse:
+    """GET /api/tasks/approvals -> approval yang masih PENDING (opsional filter).
+
+    Query param: ?task_id=<id> (opsional).
+    """
+    task_id = request.GET.get("task_id") or None
+    return _json_response({"approvals": service.list_approvals(task_id=task_id)})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@_handle
+def task_approval_resolve(request: HttpRequest, service: GatewayService) -> JsonResponse:
+    """POST /api/tasks/approvals/resolve -> Allow/Deny sebuah approval.
+
+    Body: { request_id: str, allow: bool }.
+    """
+    body = _parse_json_body(request)
+    allow = body.get("allow")
+    if isinstance(allow, str):
+        allow = allow.strip().lower() in ("1", "true", "yes", "allow", "on")
+    return _json_response(
+        service.resolve_approval(body.get("request_id"), bool(allow))
+    )
+
+
 @require_http_methods(["GET"])
 @_handle
 def get_task(request: HttpRequest, service: GatewayService, task_id: str) -> JsonResponse:

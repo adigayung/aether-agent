@@ -55,8 +55,11 @@ from agent_ai.projects.models import (
     SkillCatalogEntry,
 )
 from agent_ai.projects.permissions import (
+    ACTION_LABELS,
+    ACTION_OPTIONS,
     DEFAULT_PROJECT_POLICY_MODE,
     DEFAULT_PROJECT_POLICY_SCOPE,
+    MATRIX_MODE_VALUES_SET,
     MODE_OPTIONS,
     PERMISSIONS_FILE_NAME,
     SCOPE_OPTIONS,
@@ -186,6 +189,9 @@ __all__ = [
     "SCOPE_OPTIONS",
     "SCOPE_WORKSPACE",
     "SCOPE_OUTSIDE",
+    "ACTION_LABELS",
+    "ACTION_OPTIONS",
+    "MATRIX_MODE_VALUES_SET",
     "normalize_mode",
     "normalize_scope",
     "mode_label",

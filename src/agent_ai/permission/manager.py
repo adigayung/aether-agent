@@ -95,6 +95,8 @@ class PermissionManager:
         *,
         project_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        workspace_root: Optional[Any] = None,
+        project_matrix: Optional[Any] = None,
     ) -> PermissionDecision:
         """Evaluasi action/tool -> PermissionDecision.
 
@@ -103,6 +105,11 @@ class PermissionManager:
             arguments: argumen action.
             project_id: project terkait (opsional).
             metadata: info tambahan bebas.
+            workspace_root: root workspace project opsional. Dipakai Project
+                Permission Matrix untuk menentukan INSIDE/OUTSIDE (allow/ask/deny
+                di dalam vs di luar workspace). Bila None, scope = INSIDE.
+            project_matrix: Project Permission Matrix opsional untuk project ini
+                (project-local menang atas matrix global policy).
 
         Returns:
             PermissionDecision.
@@ -112,6 +119,8 @@ class PermissionManager:
             arguments=dict(arguments or {}),
             project_id=project_id,
             metadata=dict(metadata or {}),
+            workspace_root=str(workspace_root) if workspace_root is not None else None,
+            project_matrix=project_matrix,
         )
         return self.policy.evaluate(request)
 

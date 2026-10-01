@@ -34,6 +34,10 @@ class EventType(str, Enum):
     RECOVERY_STARTED = "recovery_started"
     RECOVERY_COMPLETED = "recovery_completed"
     CHANGE_DETECTED = "change_detected"
+    # Approval (ASK) policy: action ditahan menunggu keputusan user. Memakai
+    # event system existing (session store), BUKAN channel/message bus kedua.
+    APPROVAL_REQUESTED = "approval_requested"
+    APPROVAL_RESOLVED = "approval_resolved"
     TASK_COMPLETED = "task_completed"
     TASK_FAILED = "task_failed"
     TASK_CANCELLED = "task_cancelled"

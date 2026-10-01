@@ -6,6 +6,8 @@ menduplikasi tanggung jawab Runtime, ToolRegistry, Validation, Recovery, atau
 Django.
 
     ActionClass        -> klasifikasi action (read-only, write, delete, command, ...)
+    ActionScope        -> lokasi target relatif workspace (inside / outside)
+    MatrixAction       -> aksi Project Permission Matrix (read_files, modify_files, ...)
     PolicyMode         -> mode kebijakan (allow / deny / require_approval)
     PermissionRequest  -> input terstruktur untuk evaluasi
     PermissionDecision -> keputusan lengkap + alasan
@@ -35,6 +37,35 @@ class ActionClass(str, Enum):
     UNKNOWN = "unknown"                      # tidak terklasifikasi
 
 
+class ActionScope(str, Enum):
+    """Lokasi target sebuah action relatif terhadap workspace project.
+
+    Dipakai oleh Project Permission Matrix untuk membedakan policy di dalam dan
+    di luar workspace project.
+
+        INSIDE  -> path/aksi berada DI DALAM workspace project.
+        OUTSIDE -> path/aksi berada DI LUAR workspace project.
+    """
+
+    INSIDE = "inside"
+    OUTSIDE = "outside"
+
+
+class MatrixAction(str, Enum):
+    """Aksi Project Permission Matrix (baris matrix).
+
+    Setiap aksi dipetakan ke satu ActionClass existing, sehingga matrix tetap
+    memakai klasifikasi action existing (bukan classifier kedua).
+    """
+
+    READ_FILES = "read_files"                # baca file (read-only)
+    MODIFY_FILES = "modify_files"            # tulis/edit file
+    DELETE_FILES = "delete_files"            # hapus file/directory
+    MOVE_FILES = "move_files"                # pindah/rename file/directory
+    TERMINAL_READ = "terminal_read"          # command terminal read-only
+    TERMINAL_MUTATING = "terminal_mutating"  # command terminal yang mengubah state
+
+
 class PolicyMode(str, Enum):
     """Mode kebijakan untuk sebuah ActionClass."""
 
@@ -54,6 +85,10 @@ class PermissionRequest:
             otomatis oleh policy).
         project_id: project terkait (opsional, untuk konteks).
         metadata: info tambahan bebas.
+
+    Matrix (`project_matrix`) & scope (`scope`/`workspace_root`) bersifat
+    OPSIONAL dan ADDITIVE: bila tidak diisi, policy existing berperilaku persis
+    seperti sebelumnya (backward compatible).
     """
 
     action: str
@@ -61,6 +96,12 @@ class PermissionRequest:
     action_class: Optional[ActionClass] = None
     project_id: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    #: Root workspace project (untuk menentukan INSIDE/OUTSIDE). None = tidak
+    #: dapat dibedakan (diperlakukan INSIDE; boundary tool tetap berlaku).
+    workspace_root: Optional[str] = None
+    #: Project Permission Matrix efektif (bila project punya
+    #: `.aether/permissions.json`). None = pakai PermissionConfig existing.
+    project_matrix: Optional[Any] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -69,6 +110,7 @@ class PermissionRequest:
             "action_class": self.action_class.value if self.action_class else None,
             "project_id": self.project_id,
             "metadata": self.metadata,
+            "workspace_root": self.workspace_root,
         }
 
 
@@ -82,6 +124,8 @@ class PermissionDecision:
         action_class: klasifikasi action yang mendasari keputusan.
         reason: alasan singkat.
         requires_approval: True bila butuh persetujuan (mode require_approval).
+        matrix_action: aksi Project Permission Matrix (bila matrix dipakai).
+        scope: INSIDE/OUTSIDE workspace (bila dapat ditentukan).
         metadata: info tambahan bebas.
     """
 
@@ -90,6 +134,8 @@ class PermissionDecision:
     action_class: ActionClass = ActionClass.UNKNOWN
     reason: str = ""
     requires_approval: bool = False
+    matrix_action: Optional[MatrixAction] = None
+    scope: Optional[ActionScope] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -97,6 +143,10 @@ class PermissionDecision:
             "allowed": self.allowed,
             "mode": self.mode.value,
             "action_class": self.action_class.value,
+            "matrix_action": (
+                self.matrix_action.value if self.matrix_action is not None else None
+            ),
+            "scope": self.scope.value if self.scope is not None else None,
             "reason": self.reason,
             "requires_approval": self.requires_approval,
             "metadata": self.metadata,

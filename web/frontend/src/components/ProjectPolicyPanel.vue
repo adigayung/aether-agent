@@ -1,11 +1,13 @@
 <script setup>
-// Project Policy / Permission panel (PROJECT-LOCAL, Sidebar -> Projects ->
-// Project Settings / Policy).
+// Project Permission Matrix MODAL (PROJECT-LOCAL, Sidebar -> Projects ->
+// gear "Permission Policy" -> modal).
 //
-// SATU sumber policy per project: `<root>/.aether/permissions.json` (dibuat
-// dari Default Project Policy saat project dibuat). Panel ini HANYA memanggil
-// HTTP gateway; TIDAK ada policy engine kedua di frontend. Mode/scope
-// di-enforce oleh PermissionManager AETHER existing.
+// SATU sumber policy per project: `<root>/.aether/permissions.json` — disimpan
+// sebagai Permission Matrix (aksi x inside/outside), dibuat dari Default
+// Project Permission Matrix saat project dibuat. Komponen ini HANYA memanggil
+// HTTP gateway; TIDAK ada policy engine/konfigurasi permission kedua di
+// frontend. Matrix di-enforce oleh PermissionManager AETHER existing saat
+// Agent melakukan action.
 //
 // Perubahan policy di sini HANYA berlaku untuk project ini (isolasi project):
 // project lain tidak terpengaruh, dan Default Project Policy tidak berubah.
@@ -16,6 +18,8 @@ const props = defineProps({
   // Project (dari daftar launcher / active project): { id, name, root|path }.
   project: { type: Object, default: null },
 });
+// Modal ditutup oleh pemanggil (App.vue) saat Close/Cancel/backdrop diklik.
+const emit = defineEmits(["close"]);
 
 const loading = ref(false);
 const busy = ref(false);
@@ -23,37 +27,51 @@ const error = ref("");
 const notice = ref("");
 
 // Nilai AKTUAL project (dibaca dari `<root>/.aether/permissions.json`).
-const policy = ref({
-  mode: "",
-  mode_label: "",
-  scope: "",
-  scope_label: "",
-  path: "",
-  exists: false,
-  project_id: "",
-});
-// Opsi mode/scope dari backend (TIDAK di-hardcode di frontend).
-const options = ref({ mode: [], scope: [] });
-// Pilihan di form (dikirim saat Save).
-const form = ref({ mode: "", scope: "" });
+const policy = ref({ matrix: {}, path: "", exists: false, project_id: "" });
+// Opsi dari backend (TIDAK di-hardcode di frontend).
+const actions = ref([]); // [{value, label, scopes:[{value,label}]}] dari backend
+const scopes = ref([]);
+const modes = ref([]);
+// Pilihan di form (dikirim saat Save): { action: { scope: mode } }.
+const form = ref({});
 
 function projectId() {
   return props.project && (props.project.id || props.project.project_id);
 }
 
+function emptyForm() {
+  const next = {};
+  for (const action of actions.value) {
+    next[action.value] = {};
+    for (const scope of action.scopes || []) {
+      next[action.value][scope.value] = "allow";
+    }
+  }
+  return next;
+}
+
 function applyPolicy(data) {
   const d = data || {};
+  const opts = d.options || {};
+  if (opts.actions && opts.actions.length) actions.value = opts.actions;
+  if (opts.scopes) scopes.value = opts.scopes;
+  if (opts.modes) modes.value = opts.modes;
+
+  const matrix = d.matrix || {};
+  const next = emptyForm();
+  for (const action of actions.value) {
+    for (const scope of action.scopes || []) {
+      const raw = matrix[action.value] && matrix[action.value][scope.value];
+      next[action.value][scope.value] = raw || "allow";
+    }
+  }
+  form.value = next;
   policy.value = {
-    mode: d.mode || "",
-    mode_label: d.mode_label || "",
-    scope: d.scope || "",
-    scope_label: d.scope_label || "",
+    matrix,
     path: d.path || "",
     exists: Boolean(d.exists),
     project_id: d.project_id || "",
   };
-  if (d.options) options.value = d.options;
-  form.value = { mode: policy.value.mode, scope: policy.value.scope };
 }
 
 async function load() {
@@ -81,10 +99,9 @@ async function save() {
   error.value = "";
   notice.value = "";
   try {
-    applyPolicy(
-      await saveProjectPolicy(id, { mode: form.value.mode, scope: form.value.scope })
-    );
-    notice.value = "Policy disimpan untuk project ini (project lain tidak terpengaruh).";
+    applyPolicy(await saveProjectPolicy(id, { matrix: form.value }));
+    notice.value =
+      "Policy disimpan untuk project ini (project lain tidak terpengaruh).";
   } catch (e) {
     error.value = e.message || String(e);
   } finally {
@@ -92,73 +109,167 @@ async function save() {
   }
 }
 
+function close() {
+  if (busy.value) return;
+  emit("close");
+}
+
 watch(() => projectId(), load, { immediate: true });
 </script>
 
 <template>
-  <div class="pp">
-    <div v-if="loading" class="pp-empty">Memuat Project Policy…</div>
-
-    <template v-else-if="projectId()">
-      <div v-if="error" class="pp-alert err">{{ error }}</div>
-      <div v-if="notice" class="pp-alert ok">{{ notice }}</div>
-
-      <!-- Ringkasan nilai AKTUAL project ini (bukan default global). -->
-      <div class="pp-status">
-        <span class="pp-dot" :class="policy.exists ? 'ok' : 'off'"></span>
-        <span class="pp-status-text">
-          <strong :class="policy.exists ? 'ok' : 'off'">
-            {{ policy.exists ? "Configured" : "Not initialized" }}
-          </strong>
-          — policy milik project ini saja.
-        </span>
-      </div>
-      <div class="pp-meta mono" :title="policy.path">
-        {{ policy.path || "—" }}
-      </div>
-
-      <div class="pp-form">
-        <div class="pp-form-title">Project Policy</div>
-        <div class="pp-grid">
-          <label class="pp-field">
-            <span class="pp-label">Permission mode</span>
-            <select v-model="form.mode" class="pp-input" :disabled="busy">
-              <option v-for="o in options.mode" :key="o.value" :value="o.value">
-                {{ o.label }}
-              </option>
-            </select>
-          </label>
-          <label class="pp-field">
-            <span class="pp-label">Scope</span>
-            <select v-model="form.scope" class="pp-input" :disabled="busy">
-              <option v-for="o in options.scope" :key="o.value" :value="o.value">
-                {{ o.label }}
-              </option>
-            </select>
-          </label>
+  <!-- Modal AETHER (pola .modal-backdrop/.modal existing). Policy TIDAK lagi
+       ditampilkan sebagai panel inline di bawah tombol gear. -->
+  <div v-if="projectId()" class="modal-backdrop" @click.self="close">
+    <div class="modal pp-modal" role="dialog" aria-modal="true" aria-labelledby="pp-title">
+      <div class="pp-modal-head">
+        <div>
+          <div id="pp-title" class="modal-title">Permission Policy</div>
+          <div class="pp-modal-sub">
+            Permission matrix for
+            <span class="mono">{{ project ? project.name : "project" }}</span>
+            — saved per project.
+          </div>
         </div>
-        <div class="pp-hint">
-          Mode berlaku untuk operasi project ini; Setting global tidak berubah.
-          Perubahan hanya tersimpan untuk project ini (isolasi project).
-        </div>
-        <div class="pp-actions">
-          <button class="pp-btn" type="button" :disabled="busy || loading" @click="load">
-            Reload
-          </button>
-          <button class="pp-btn primary" type="button" :disabled="busy" @click="save">
-            {{ busy ? "Menyimpan…" : "Save Policy" }}
-          </button>
-        </div>
+        <button
+          type="button"
+          class="pp-x"
+          aria-label="Close"
+          title="Close"
+          :disabled="busy"
+          @click="close"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
       </div>
-    </template>
 
-    <div v-else class="pp-empty">
-      Pilih/buka project untuk melihat Project Policy.
+      <div class="pp-modal-body">
+        <div v-if="loading" class="pp-empty">Memuat Project Permission Matrix…</div>
+
+        <template v-else>
+          <div v-if="error" class="pp-alert err">{{ error }}</div>
+          <div v-if="notice" class="pp-alert ok">{{ notice }}</div>
+
+          <!-- Ringkasan nilai AKTUAL project ini (bukan default global). -->
+          <div class="pp-status">
+            <span class="pp-dot" :class="policy.exists ? 'ok' : 'off'"></span>
+            <span class="pp-status-text">
+              <strong :class="policy.exists ? 'ok' : 'off'">
+                {{ policy.exists ? "Configured" : "Not initialized" }}
+              </strong>
+              — policy milik project ini saja.
+            </span>
+          </div>
+          <div class="pp-meta mono" :title="policy.path">
+            {{ policy.path || "—" }}
+          </div>
+
+          <div class="pp-form">
+            <div class="pp-form-title">Permission Matrix</div>
+            <table class="pp-matrix">
+              <thead>
+                <tr>
+                  <th class="pp-th-action">Action</th>
+                  <th v-for="scope in scopes" :key="scope.value" class="pp-th-scope">
+                    {{ scope.label }}
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="action in actions" :key="action.value">
+                  <td class="pp-td-action">{{ action.label }}</td>
+                  <td
+                    v-for="scope in action.scopes"
+                    :key="scope.value"
+                    class="pp-td-cell"
+                  >
+                    <select
+                      v-model="form[action.value][scope.value]"
+                      class="pp-input"
+                      :disabled="busy"
+                    >
+                      <option v-for="m in modes" :key="m.value" :value="m.value">
+                        {{ m.label }}
+                      </option>
+                    </select>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <div class="pp-hint">
+              Matrix berlaku untuk operasi project ini (inside vs outside workspace);
+              Setting global tidak berubah. DENY menahan action Agent, ASK menahan &
+              meminta approval. Perubahan hanya tersimpan untuk project ini.
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <div class="modal-actions pp-modal-foot">
+        <button type="button" class="btn-ghost" :disabled="busy" @click="load">
+          Reload
+        </button>
+        <button type="button" class="btn-ghost" :disabled="busy" @click="close">
+          Cancel
+        </button>
+        <button type="button" class="pp-btn primary" :disabled="busy || loading" @click="save">
+          {{ busy ? "Menyimpan…" : "Save Policy" }}
+        </button>
+      </div>
     </div>
   </div>
 </template>
 
 <style scoped>
+.pp-modal {
+  max-width: 640px;
+  width: min(640px, 94vw);
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+.pp-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.pp-modal-sub {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.pp-x {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 8px;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.pp-x:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--accent);
+}
+.pp-modal-body {
+  padding: 16px 18px;
+  overflow: auto;
+  display: grid;
+  gap: 12px;
+}
+.pp-modal-foot {
+  padding: 14px 18px;
+  margin-top: 0;
+  border-top: 1px solid var(--border-soft);
+}
 .pp {
   display: grid;
   gap: 12px;
@@ -228,19 +339,29 @@ watch(() => projectId(), load, { immediate: true });
   text-transform: uppercase;
   letter-spacing: 0.4px;
 }
-.pp-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 10px;
+.pp-matrix {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
 }
-.pp-field {
-  display: grid;
-  gap: 5px;
-  min-width: 0;
-}
-.pp-label {
-  font-size: 11.5px;
+.pp-th-action,
+.pp-th-scope {
+  text-align: left;
+  font-weight: 600;
   color: var(--text-faint);
+  font-size: 11px;
+  padding: 4px 8px 6px 0;
+}
+.pp-td-action {
+  color: var(--text-dim);
+  padding: 4px 10px 4px 0;
+  white-space: nowrap;
+}
+.pp-td-cell {
+  padding: 4px 8px 4px 0;
+}
+.pp-td-cell .pp-input {
+  padding: 6px 10px;
 }
 .pp-input {
   width: 100%;
@@ -261,11 +382,6 @@ watch(() => projectId(), load, { immediate: true });
   font-size: 11px;
   color: var(--text-faint);
   line-height: 1.5;
-}
-.pp-actions {
-  display: flex;
-  gap: 9px;
-  flex-wrap: wrap;
 }
 .pp-btn {
   background: transparent;

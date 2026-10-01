@@ -177,8 +177,14 @@ def _run() -> int:
         print("[2] Global Settings menolak key Project Policy OK (file global utuh)")
 
         # --- [3] Project Policy MENOLAK key Global Settings ----------------
-        # Set policy valid dulu sebagai baseline project A.
-        resp = post_policy(pid_a, {"mode": "deny", "scope": "outside"})
+        # Set policy valid dulu sebagai baseline project A (matrix).
+        from agent_ai.permission.matrix import DEFAULT_MATRIX_RULES
+
+        allow_matrix = {
+            action: {"inside": "allow", "outside": "allow"}
+            for action in DEFAULT_MATRIX_RULES
+        }
+        resp = post_policy(pid_a, allow_matrix)
         assert resp.status_code == 200, (resp.status_code, resp.content)
         policy_a_before = _read_json(_permissions_path(root_a))
         for bad in (
@@ -186,7 +192,7 @@ def _run() -> int:
             {"compression": {"enabled": True}},
             {"write_log_response_api": False},
             {"api_retry": {"failed_count": 1}},
-            {"mode": "deny", "port": 9000},
+            {"port": 9000, "read_files": {"inside": "allow"}},
         ):
             resp = post_policy(pid_a, bad)
             assert resp.status_code == 400, (bad, resp.status_code, resp.content)
@@ -196,7 +202,7 @@ def _run() -> int:
         )
         # Key global TIDAK pernah tersimpan di permissions.json.
         pol = _read_json(_permissions_path(root_a))
-        assert set(pol) <= {"mode", "scope"}, pol
+        assert set(pol) == set(DEFAULT_MATRIX_RULES), pol
         print("[3] Project Policy menolak key Global Settings OK (file policy utuh)")
 
         # --- [4] Perubahan Global Settings TIDAK menyentuh policy project ---
@@ -206,27 +212,29 @@ def _run() -> int:
         assert _read_json(_permissions_path(root_a)) == policy_a_before, (
             "policy project A berubah karena Global Settings"
         )
-        assert _read_json(_permissions_path(root_b)) == {
-            "mode": "allow",
-            "scope": "workspace",
-        }, _read_json(_permissions_path(root_b))
+        assert _read_json(_permissions_path(root_b)) == DEFAULT_MATRIX_RULES, _read_json(
+            _permissions_path(root_b)
+        )
         print("[4] Global Settings tidak menyentuh Project Policy OK")
 
         # --- [5] Perubahan Project Policy TIDAK menyentuh settings.json -----
         settings_before2 = _read_json(settings_path)
-        resp = post_policy(pid_b, {"mode": "ask", "scope": "outside"})
+        ask_matrix = {
+            action: {"inside": "ask", "outside": "deny"}
+            for action in DEFAULT_MATRIX_RULES
+        }
+        resp = post_policy(pid_b, ask_matrix)
         assert resp.status_code == 200, (resp.status_code, resp.content)
-        assert _read_json(_permissions_path(root_b)) == {
-            "mode": "require_approval",
-            "scope": "outside",
-        }, _read_json(_permissions_path(root_b))
+        assert _read_json(_permissions_path(root_b)) == ask_matrix, _read_json(
+            _permissions_path(root_b)
+        )
         assert _read_json(settings_path) == settings_before2, (
             "data/settings.json berubah karena Project Policy"
         )
         print("[5] Project Policy tidak menyentuh Global Settings OK")
 
         # --- [6] Isolasi antar-project dipertahankan ------------------------
-        # A masih deny/outside; B require_approval/outside; keduanya berbeda file.
+        # A allow-all; B ask/deny; keduanya berbeda file.
         assert _read_json(_permissions_path(root_a)) != _read_json(
             _permissions_path(root_b)
         ), "policy A == policy B (isolasi rusak)"
@@ -240,8 +248,8 @@ def _run() -> int:
         # GET policy per project mengembalikan nilai AKTUAL masing-masing.
         ga = client.get(f"/api/projects/{pid_a}/policy").json()
         gb = client.get(f"/api/projects/{pid_b}/policy").json()
-        assert ga["mode"] == "deny" and ga["scope"] == "outside", ga
-        assert gb["mode"] == "require_approval" and gb["scope"] == "outside", gb
+        assert ga["matrix"] == allow_matrix, ga
+        assert gb["matrix"] == ask_matrix, gb
         print("[6] isolasi antar-project tetap OK setelah Global Settings berubah")
     finally:
         settings_mod.SETTINGS_PATH = previous_path

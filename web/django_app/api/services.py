@@ -29,11 +29,12 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from agent_ai.core.cancel import CancellationToken
+from agent_ai.permission.approval import ApprovalCoordinator
+from agent_ai.permission.matrix import MATRIX_ACTIONS, MATRIX_SCOPES
 from agent_ai.projects.permissions import (
+    ACTION_OPTIONS,
+    MATRIX_MODE_VALUES_SET,
     MODE_OPTIONS,
-    SCOPE_OPTIONS,
-    normalize_mode,
-    normalize_scope,
 )
 from agent_ai.projects.registry import (
     ProjectNotFoundError,
@@ -169,6 +170,59 @@ class TaskRecord:
         }
 
 
+def _extract_matrix_payload(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Ambil payload matrix dari body POST policy (kanonik atau dibungkus).
+
+    Menerima:
+        - matrix kanonik langsung: {"read_files": {"inside": ...}, ...}
+        - dibungkus: {"matrix": {...}} atau {"rules": {...}}
+    """
+    if not isinstance(body, dict):
+        return {}
+    for key in ("matrix", "rules"):
+        inner = body.get(key)
+        if isinstance(inner, dict):
+            return inner
+    return body
+
+
+def _validate_matrix_payload(payload: Any) -> None:
+    """Validasi payload matrix; raise ValidationError bila tidak valid.
+
+    Menerima payload kosong (matrix default). Untuk setiap aksi/scope yang
+    dikirim, nilai WAJIB allow|ask|deny (tidak menurunkan diam-diam).
+    """
+    if payload is None:
+        return
+    if not isinstance(payload, dict):
+        raise ValidationError("Body policy harus berupa object JSON.")
+    allowed_scopes = set(MATRIX_SCOPES)
+    unknown_actions = set(payload) - set(MATRIX_ACTIONS)
+    if unknown_actions:
+        raise ValidationError(
+            "Aksi policy tidak dikenal: "
+            f"{', '.join(sorted(unknown_actions))}. "
+            f"Gunakan salah satu dari {', '.join(MATRIX_ACTIONS)}."
+        )
+    for action, scopes in payload.items():
+        if not isinstance(scopes, dict):
+            raise ValidationError(
+                f"Nilai '{action}' harus berupa object {{inside, outside}}."
+            )
+        unknown_scopes = set(scopes) - allowed_scopes
+        if unknown_scopes:
+            raise ValidationError(
+                f"Scope tidak dikenal pada '{action}': "
+                f"{', '.join(sorted(unknown_scopes))}. Gunakan inside | outside."
+            )
+        for scope, value in scopes.items():
+            if str(value).strip().lower() not in MATRIX_MODE_VALUES_SET:
+                raise ValidationError(
+                    f"Nilai '{action}.{scope}' harus salah satu dari "
+                    "allow | ask | deny."
+                )
+
+
 class GatewayService:
     """Facade tipis menuju komponen AETHER yang sudah ada.
 
@@ -233,6 +287,12 @@ class GatewayService:
         # Ini BUKAN worker framework/queue subsystem kedua: satu queue, satu
         # scheduler, satu slot — sumber data tetap self._tasks.
         self._pumping = False
+        # Koordinator approval untuk action yang butuh approval (ASK/mode
+        # `require_approval`). Ini BUKAN sistem permission kedua: keputusan
+        # tetap dibuat PermissionManager existing; koordinator HANYA menahan
+        # eksekusi lalu meneruskan keputusan user (Allow/Deny) ke gate. Event
+        # approval memakai event system existing (SessionStore).
+        self._approvals = ApprovalCoordinator(sink=self._on_approval_event)
 
     @property
     def task_executor(self) -> Any:
@@ -740,10 +800,11 @@ class GatewayService:
         return ProjectPermissionStore(root=self._project_root_by_id(project_id))
 
     def get_project_policy(self, project_id: str) -> Dict[str, Any]:
-        """GET Project Policy aktual dari `<root>/.aether/permissions.json`.
+        """GET Project Permission Matrix aktual dari `<root>/.aether/permissions.json`.
 
         Mengembalikan nilai policy AKTUAL project tersebut (bukan default
-        global). Bila file belum ada, default aman & backward-compatible.
+        global). Bila file belum ada, default policy (matrix default) dipakai
+        tanpa merusak project.
 
         Raises:
             ValidationError: bila project_id kosong.
@@ -753,8 +814,9 @@ class GatewayService:
         policy = store.load()
         data = policy.to_ui_dict()
         data["options"] = {
-            "mode": MODE_OPTIONS,
-            "scope": SCOPE_OPTIONS,
+            "actions": ACTION_OPTIONS,
+            "scopes": list(MATRIX_SCOPES),
+            "modes": MODE_OPTIONS,
         }
         data["path"] = str(store.path)
         data["exists"] = store.exists()
@@ -764,25 +826,25 @@ class GatewayService:
     def save_project_policy(
         self, project_id: str, body: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """POST Project Policy -> simpan ke `<root>/.aether/permissions.json`.
+        """POST Project Permission Matrix -> simpan ke `<root>/.aether/permissions.json`.
+
+        Body menerima matrix kanonik (langsung atau dibungkus `{"matrix": {...}}`):
+
+            {"read_files": {"inside": "allow", "outside": "allow"}, ...}
 
         Policy hanya berlaku untuk project ini (project-local); project lain
         tidak terpengaruh.
 
         Raises:
-            ValidationError: bila project_id kosong atau mode/scope tidak valid.
+            ValidationError: bila project_id kosong atau nilai matrix tidak valid.
             NotFoundError: bila project tidak ditemukan.
         """
-        from agent_ai.projects.permissions import (
-            SCOPE_ALIASES_SET,
-            MODE_ALIASES_SET,
-            ProjectPolicy,
-        )
+        from agent_ai.projects.permissions import ProjectPolicy
 
         body = body or {}
         # Pemisahan konfigurasi: Global Settings AETHER (`data/settings.json`)
         # TIDAK boleh masuk lewat endpoint Project Policy. Hanya field project
-        # policy (mode/scope) yang diterima; key global ditolak eksplisit.
+        # policy (matrix) yang diterima; key global ditolak eksplisit.
         from agent_ai.config.settings import _EDITABLE_SETTINGS_KEYS
 
         leaked = set(body) & _EDITABLE_SETTINGS_KEYS
@@ -793,26 +855,18 @@ class GatewayService:
                 "Kelola dari Sidebar -> Settings."
             )
 
-        raw_mode = body.get("mode")
-        raw_scope = body.get("scope")
-        # Validasi eksplisit: bila field dikirim tetapi tidak valid -> tolak
-        # (jangan diam-diam menurunkan ke default).
-        if raw_mode is not None and str(raw_mode).strip().lower() not in MODE_ALIASES_SET:
-            raise ValidationError(
-                "mode harus salah satu dari allow | ask (require_approval) | deny."
-            )
-        if raw_scope is not None and str(raw_scope).strip().lower() not in SCOPE_ALIASES_SET:
-            raise ValidationError(
-                "scope harus salah satu dari workspace (inside) | outside."
-            )
+        matrix_payload = _extract_matrix_payload(body)
+        _validate_matrix_payload(matrix_payload)
 
-        mode = normalize_mode(raw_mode)
-        scope = normalize_scope(raw_scope)
         store = self._project_policy_store(project_id)
-        policy = ProjectPolicy(mode=mode, scope=scope)
+        policy = ProjectPolicy.from_dict(matrix_payload)
         store.save(policy)
         data = policy.to_ui_dict()
-        data["options"] = {"mode": MODE_OPTIONS, "scope": SCOPE_OPTIONS}
+        data["options"] = {
+            "actions": ACTION_OPTIONS,
+            "scopes": list(MATRIX_SCOPES),
+            "modes": MODE_OPTIONS,
+        }
         data["path"] = str(store.path)
         data["exists"] = True
         data["project_id"] = str(project_id)
@@ -836,6 +890,27 @@ class GatewayService:
             return None
         try:
             return store.load().to_permission_config()
+        except Exception:  # noqa: BLE001 - policy tidak boleh crash eksekusi
+            return None
+
+    def project_permission_matrix(self, project_id: Optional[str]):
+        """Project Permission Matrix project-local (bila ada).
+
+        Dipakai jalur eksekusi task agar matrix (aksi x inside/outside) benar-
+        benar berlaku. Mengembalikan None bila tidak ada project / matrix gagal
+        dibaca (backward compatible: executor memakai policy default).
+        """
+        candidate = project_id
+        if not candidate:
+            candidate = self.project_store.get_active_project_id()
+        if not candidate:
+            return None
+        try:
+            store = self._project_policy_store(candidate)
+        except GatewayError:
+            return None
+        try:
+            return store.load().matrix
         except Exception:  # noqa: BLE001 - policy tidak boleh crash eksekusi
             return None
 
@@ -1618,6 +1693,23 @@ class GatewayService:
         project_config = self.project_permission_config(record.project_id)
         if project_config is not None:
             run_kwargs["project_permission_config"] = project_config
+        # Project Permission Matrix project-local (aksi x inside/outside). Bila
+        # project punya `.aether/permissions.json`, matrix-nya di-enforce pada
+        # execution path (DENY menahan, ASK menahan + butuh approval). Bila
+        # tidak ada, perilaku existing tidak berubah.
+        project_matrix = self.project_permission_matrix(record.project_id)
+        if project_matrix is not None:
+            run_kwargs["project_permission_matrix"] = project_matrix
+
+        # Gate approval (ASK): action yang butuh approval DITAHAN lalu dimintakan
+        # keputusan user. Gate terikat ke task/session ini sehingga approval TIDAK
+        # tertukar antar task. Hanya memengaruhi action ber-mode ask/require_approval.
+        # Dikirim HANYA bila executor mendukungnya (verifier/executor lama tetap
+        # bekerja tanpa parameter ini — backward compatible).
+        if self._run_accepts("approval_gate"):
+            run_kwargs["approval_gate"] = self.approval_gate_for(
+                task_id, record.session_id
+            )
 
         try:
             summary = self.task_executor.run(prepared, **run_kwargs)
@@ -1736,6 +1828,78 @@ class GatewayService:
             self.emit_event(session_id, event_type, task_id=task_id, payload=payload)
         except Exception:  # noqa: BLE001 - event emission tidak boleh crash
             return
+
+    # ------------------------------------------------------------------ #
+    # Approval (ASK) — koordinasi tahan-lanjut untuk mode require_approval.
+    #
+    # Ini BUKAN sistem permission kedua: keputusan tetap dibuat
+    # PermissionManager existing. Gateway HANYA menjadi jembatan antara
+    # execution thread (yang menahan action) dan HTTP request user (Allow/Deny),
+    # memakai ApprovalCoordinator (primitif sinkron bounded) + event system
+    # existing (SessionStore).
+    # ------------------------------------------------------------------ #
+    def _on_approval_event(
+        self, session_id: str, event_type: str, payload: Dict[str, Any]
+    ) -> None:
+        """Sink approval -> SessionStore (event streaming existing).
+
+        Event ditandai dengan task_id dari payload sehingga UI dapat mengaitkan
+        approval ke task/execution yang benar (tidak tertukar antar task).
+        """
+        try:
+            task_id = (payload or {}).get("task_id") or None
+            self._emit(session_id, event_type, task_id=task_id, payload=payload)
+        except Exception:  # noqa: BLE001 - event tidak boleh crash eksekusi
+            return
+
+    def approval_gate_for(self, task_id: str, session_id: str):
+        """Bangun gate approval terikat ke satu task/session (untuk TaskExecutor).
+
+        Gate dipanggil pada execution thread saat sebuah action butuh approval:
+        ia menahan eksekusi, memancarkan `approval_requested`, lalu menunggu
+        keputusan user (bounded timeout; timeout -> DENY, tidak pernah auto-allow).
+        """
+        from agent_ai.permission.approval import make_approval_gate
+
+        return make_approval_gate(self._approvals, task_id=task_id, session_id=session_id)
+
+    def _run_accepts(self, param: str) -> bool:
+        """True bila ``task_executor.run`` menerima keyword ``param``.
+
+        Dipakai untuk kompatibilitas: verifier/executor lama yang belum mengenal
+        parameter baru (mis. ``approval_gate``) tetap dipanggil dengan signature
+        lamanya (tidak error).
+        """
+        import inspect
+
+        run = getattr(self.task_executor, "run", None)
+        if run is None:
+            return False
+        try:
+            params = inspect.signature(run).parameters
+        except (TypeError, ValueError):
+            return False
+        if param in params:
+            return True
+        return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+    def list_approvals(self, task_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Daftar approval yang masih PENDING (opsional difilter task_id)."""
+        return [r.to_dict() for r in self._approvals.pending(task_id)]
+
+    def resolve_approval(self, request_id: str, allow: bool) -> Dict[str, Any]:
+        """Selesaikan approval (Allow/Deny) -> lanjutkan/batalkan action tertahan.
+
+        Raises:
+            ValidationError: bila request_id kosong.
+            NotFoundError: bila approval tidak ditemukan.
+        """
+        if not request_id or not str(request_id).strip():
+            raise ValidationError("Field 'request_id' wajib diisi.")
+        record = self._approvals.resolve(str(request_id).strip(), bool(allow))
+        if record is None:
+            raise NotFoundError(f"Approval '{request_id}' tidak ditemukan.")
+        return record.to_dict()
 
     def get_task(self, task_id: str) -> Dict[str, Any]:
         """Ambil task berdasarkan id.
@@ -2209,6 +2373,12 @@ class GatewayService:
         # 1) Sinyal kooperatif: Agent loop berhenti di safe boundary.
         if token is not None:
             token.request("user_requested")
+        # 1b) Tolak approval PENDING milik task ini agar action tertahan tidak
+        #     menggantung (gate menerima DENY -> action dibatalkan segera).
+        try:
+            self._approvals.cancel_task(task_id)
+        except Exception:  # noqa: BLE001 - cleanup tidak boleh gagal cancel
+            pass
         # 2) Status record gateway langsung CANCELLED (UI/HTTP responsif).
         #    Ini juga menyetel queue_state="done" (via _update_task_status),
         #    sehingga task keluar dari antrian aktif.

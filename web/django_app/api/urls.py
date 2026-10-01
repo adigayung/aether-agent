@@ -81,6 +81,15 @@ urlpatterns = [
     path("files", views.files, name="files"),
     path("files/content", views.file_content, name="file_content"),
     path("tasks", views.tasks, name="tasks"),
+    # Approval (ASK) — keputusan user untuk action yang ditahan policy.
+    # Literal route \"tasks/approvals\" HARUS mendahului \"tasks/<str:task_id>\"
+    # agar tidak di-shadow.
+    path("tasks/approvals", views.task_approvals, name="task_approvals"),
+    path(
+        "tasks/approvals/resolve",
+        views.task_approval_resolve,
+        name="task_approval_resolve",
+    ),
     # Task Queue API (TAMPILAN/kontrol UI antrian). Literal route "tasks/queue"
     # dan sub-route-nya HARUS mendahului "tasks/<str:task_id>" agar tidak
     # di-shadow (task_id="queue").

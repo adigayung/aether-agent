@@ -171,21 +171,21 @@ export function deleteProject(projectId) {
   return request(`/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" });
 }
 
-// --- Project Policy / Permission (PROJECT-LOCAL) ---------------------------
+// --- Project Policy / Permission Matrix (PROJECT-LOCAL) --------------------
 // Policy permission SETIAP project disimpan project-local di
-// `<root>/.aether/permissions.json` (dibuat dari Default Project Policy saat
-// project dibuat). Di-enforce oleh PermissionManager AETHER existing — BUKAN
-// sistem permission kedua. Dikelola dari Sidebar -> Projects -> Project
-// Settings / Policy.
-// Mode/scope di-enforce oleh Permission Policy Layer AETHER existing.
+// `<root>/.aether/permissions.json` (dibuat dari Default Project Permission
+// Matrix saat project dibuat). Di-enforce oleh PermissionManager AETHER
+// existing saat Agent melakukan action — BUKAN sistem permission kedua.
+// Dikelola dari Sidebar -> Projects -> Project Settings / Policy.
+// Matrix: aksi x inside/outside workspace (allow | ask | deny).
 export function getProjectPolicy(projectId) {
   return request(`/projects/${encodeURIComponent(projectId)}/policy`);
 }
 
-export function saveProjectPolicy(projectId, { mode, scope }) {
+export function saveProjectPolicy(projectId, { matrix }) {
   return request(`/projects/${encodeURIComponent(projectId)}/policy`, {
     method: "POST",
-    body: JSON.stringify({ mode, scope }),
+    body: JSON.stringify(matrix ? { matrix } : {}),
   });
 }
 
@@ -261,6 +261,24 @@ export function createTask(task, projectId = null, metadata = null, executionMod
 
 export function getTask(taskId) {
   return request(`/tasks/${encodeURIComponent(taskId)}`);
+}
+
+// --- Approval (ASK) --------------------------------------------------------
+// Saat policy menahan sebuah action (mode ASK/require_approval), backend
+// memancarkan `approval_requested` (SSE) DAN menyediakan endpoint berikut.
+// Allow/Deny disampaikan lewat endpoint resolve (terikat ke task/session).
+// Ini BUKAN sistem permission kedua: enforcement tetap di PermissionManager
+// existing; UI hanya menyampaikan keputusan user.
+export function listApprovals(taskId = null) {
+  const qs = taskId ? `?task_id=${encodeURIComponent(taskId)}` : "";
+  return request(`/tasks/approvals${qs}`);
+}
+
+export function resolveApproval(requestId, allow) {
+  return request("/tasks/approvals/resolve", {
+    method: "POST",
+    body: JSON.stringify({ request_id: requestId, allow: Boolean(allow) }),
+  });
 }
 
 // Minta penghentian task (cooperative cancellation: Agent loop berhenti di
@@ -470,6 +488,8 @@ export function openEventStream({ sessionId = null, taskId = null, onEvent } = {
     "recovery_started",
     "recovery_completed",
     "change_detected",
+    "approval_requested",
+    "approval_resolved",
     "task_completed",
     "task_failed",
     "task_cancelled",

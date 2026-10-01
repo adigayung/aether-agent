@@ -2197,6 +2197,53 @@ select.input-a {
   margin-top: 18px;
 }
 
+/* --- Approval (ASK) modal (Allow/Deny action Agent yang ditahan policy) --- */
+.modal.approval-m {
+  max-width: 520px;
+  width: min(520px, 94vw);
+}
+.approval-body {
+  display: grid;
+  gap: 8px;
+}
+.approval-line {
+  color: var(--text);
+  font-size: 13.5px;
+}
+.approval-kv {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+}
+.approval-k {
+  flex: 0 0 auto;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-faint);
+}
+.approval-kv .mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-size: 12.5px;
+}
+.approval-reason {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  line-height: 1.5;
+}
+.approval-more {
+  font-size: 11.5px;
+  color: var(--accent);
+}
+
 /* --- Task Composer modal (shell-level, mengikuti .composer-a dummy) --- */
 .modal.composer-a {
   max-width: 1100px;

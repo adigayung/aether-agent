@@ -87,12 +87,16 @@ class TaskExecutor:
         permission_manager: Optional[PermissionManager] = None,
         runtime_factory: Optional[Callable[..., AgentRuntime]] = None,
         llm_config_service: Optional[Any] = None,
+        approval_gate: Optional[Callable[[Dict[str, Any]], bool]] = None,
     ) -> None:
         self.sessions = session_store
         self._provider_factory = provider_factory
         self.permission_manager = permission_manager or PermissionManager()
         self._runtime_factory = runtime_factory
         self._llm_config_service = llm_config_service
+        # Gate approval ASK opsional (dipasang di execution path produksi).
+        # Bila None, action ASK diperlakukan seperti sebelumnya (tidak dijalankan).
+        self.approval_gate = approval_gate
 
     @property
     def llm_config_service(self) -> Any:
@@ -169,6 +173,8 @@ class TaskExecutor:
         cancel_token: Optional[Any] = None,
         change_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
         permission_manager: Optional[PermissionManager] = None,
+        project_matrix: Optional[Any] = None,
+        approval_gate: Optional[Callable[[Dict[str, Any]], bool]] = None,
     ) -> AgentRuntime:
         """Rakit AgentRuntime dengan ToolExecutor yang punya PermissionManager.
 
@@ -198,8 +204,18 @@ class TaskExecutor:
         memakai `self.permission_manager` (perilaku existing). Dipakai untuk
         memasang policy project-local (`<root>/.aether/permissions.json`) pada
         perintah task project tertentu TANPA mengubah jalur lain.
+
+        project_matrix: Project Permission Matrix project-local opsional.
+        Diteruskan ke ToolExecutor agar matrix (aksi x inside/outside) benar-
+        benar berlaku. Bila None, perilaku existing tidak berubah.
+
+        approval_gate: gate approval ASK opsional (dari gateway). Diteruskan ke
+        ToolExecutor agar action yang butuh approval (ASK) DITAHAN lalu dimintakan
+        keputusan user. Bila None, ASK diperlakukan seperti sebelumnya.
         """
         effective_pm = permission_manager or self.permission_manager
+        matrix = project_matrix
+        gate = approval_gate if approval_gate is not None else self.approval_gate
         if workspace_root:
             from agent_ai.tools.registry import build_registry
 
@@ -220,10 +236,18 @@ class TaskExecutor:
                 cancel_token=cancel_token,
             )
             executor = ToolExecutor(
-                registry=registry, permission_manager=effective_pm
+                registry=registry,
+                permission_manager=effective_pm,
+                workspace_root=workspace_root,
+                project_matrix=matrix,
+                approval_gate=gate,
             )
         else:
-            executor = ToolExecutor(permission_manager=effective_pm)
+            executor = ToolExecutor(
+                permission_manager=effective_pm,
+                project_matrix=matrix,
+                approval_gate=gate,
+            )
 
         options = None
         if model_name:
@@ -301,6 +325,8 @@ class TaskExecutor:
         cancel_token: Optional[Any] = None,
         user_parts: Optional[List[Dict[str, Any]]] = None,
         project_permission_config: Optional[Any] = None,
+        project_permission_matrix: Optional[Any] = None,
+        approval_gate: Optional[Callable[[Dict[str, Any]], bool]] = None,
     ) -> Dict[str, Any]:
         """Jalankan PreparedTask lewat AETHER Runtime (synchronous).
 
@@ -334,6 +360,17 @@ class TaskExecutor:
                 di-enforce oleh PermissionManager EXISTING untuk task project
                 ini saja (project lain tidak terpengaruh). Bila None, perilaku
                 default tidak berubah.
+            project_permission_matrix: Project Permission Matrix project-local
+                opsional (dari `<root>/.aether/permissions.json`). Bila diisi,
+                matrix (aksi x inside/outside) di-enforce pada execution path:
+                DENY menahan eksekusi, ASK menahan + butuh approval. Matrix
+                berlaku untuk project task ini saja. Bila None, perilaku
+                default tidak berubah.
+            approval_gate: gate approval ASK opsional `(context) -> bool`. Bila
+                diisi, action yang butuh approval (ASK) DITAHAN lalu dimintakan
+                keputusan user; True -> dilanjutkan, False -> dibatalkan dan
+                hasil penolakan dikembalikan ke Agent. Bila None, ASK
+                diperlakukan seperti sebelumnya (tidak dijalankan).
 
         Returns:
             Ringkasan hasil: {"status", "result", "error", "iterations"}.
@@ -402,10 +439,18 @@ class TaskExecutor:
             # EXISTING. Dibangun hanya untuk task ini; project lain tidak
             # terpengaruh (policy default tetap dipakai bila None).
             permissions = self.permission_manager
-            if project_permission_config is not None:
+            if project_permission_config is not None or project_permission_matrix is not None:
                 try:
+                    base_config = project_permission_config
+                    if base_config is None:
+                        # Hanya matrix yang diberikan -> ambil config dari manager
+                        # efektif (aksi di luar matrix memakai policy existing).
+                        base_config = self.permission_manager.policy.config
                     permissions = PermissionManager(
-                        policy=PermissionPolicy(config=project_permission_config)
+                        policy=PermissionPolicy(
+                            config=base_config,
+                            matrix=project_permission_matrix,
+                        )
                     )
                 except Exception:  # noqa: BLE001 - fallback ke policy default
                     permissions = self.permission_manager
@@ -417,6 +462,8 @@ class TaskExecutor:
                 cancel_token=cancel_token,
                 change_sink=_change_sink,
                 permission_manager=permissions,
+                project_matrix=project_permission_matrix,
+                approval_gate=approval_gate,
             )
             result = runtime.run(
                 prepared,

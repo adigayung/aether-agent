@@ -52,6 +52,18 @@ class ToolExecutor:
             policy dievaluasi SEBELUM tool dieksekusi; action yang ditolak /
             butuh approval tidak dijalankan. Bila None, executor berperilaku
             persis seperti sebelumnya (backward compatible).
+        workspace_root: root workspace project opsional. Diteruskan ke
+            PermissionManager agar Project Permission Matrix dapat membedakan
+            aksi DI DALAM vs DI LUAR workspace. Bila None, scope = INSIDE
+            (perilaku existing tidak berubah).
+        project_matrix: Project Permission Matrix opsional (project-local).
+            Diteruskan ke PermissionManager sehingga policy project benar-benar
+            berlaku pada execution path.
+        approval_gate: callable opsional ``(context: dict) -> bool``. Dipanggil
+            HANYA saat decision butuh approval (ASK). Bila mengembalikan True,
+            action DILANJUTKAN; bila False/timeout, action dibatalkan dan hasil
+            penolakan dikembalikan ke Agent. Bila None, perilaku existing
+            dipertahankan (ASK = not executed / "Approval Required").
     """
 
     def __init__(
@@ -60,12 +72,54 @@ class ToolExecutor:
         permission_manager: Optional["PermissionManager"] = None,
         *,
         max_parallel_tools: Optional[int] = None,
+        workspace_root: Optional[str] = None,
+        project_matrix: Optional[Any] = None,
+        approval_gate: Optional[Callable[[Dict[str, Any]], bool]] = None,
     ) -> None:
         self.registry = registry or default_registry
         self.permission_manager = permission_manager
+        # Root workspace project (untuk matrix inside/outside). None = tidak
+        # diketahui -> scope INSIDE (boundary tool tetap berlaku).
+        self.workspace_root = str(workspace_root) if workspace_root is not None else None
+        # Matrix project-local opsional (bila project punya `.aether/permissions.json`).
+        self.project_matrix = project_matrix
+        # Gate approval ASK opsional (dipasang pada execution path produksi).
+        # Bila None, ASK diperlakukan seperti sebelumnya (tidak dijalankan).
+        self.approval_gate = approval_gate
         # Tool Execution Coordinator: satu-satunya pengatur batch (sequential/
         # parallel) di atas execute_tool_call(). Bukan executor kedua.
         self.coordinator = ToolExecutionCoordinator(max_parallel=max_parallel_tools)
+
+    def _permission_check(self, action: str, arguments: Dict[str, Any]):
+        """Evaluasi permission dengan konteks workspace + matrix project.
+
+        Memanggil `PermissionManager.check` dengan konteks matrix (workspace_root
+        + project_matrix) BILA manager mendukungnya. Manager duck-typed lama
+        (mis. verifier yang hanya menerima `check(action, arguments)`) tetap
+        bekerja dengan signature lama — backward compatible.
+        """
+        manager = self.permission_manager
+        check = getattr(manager, "check", None)
+        if check is None:
+            raise AttributeError("permission_manager tidak punya method 'check'.")
+        if self.workspace_root is not None or self.project_matrix is not None:
+            try:
+                import inspect
+
+                params = inspect.signature(check).parameters
+                accepts = "workspace_root" in params or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+                )
+            except (TypeError, ValueError):
+                accepts = False
+            if accepts:
+                return check(
+                    action,
+                    arguments,
+                    workspace_root=self.workspace_root,
+                    project_matrix=self.project_matrix,
+                )
+        return check(action, arguments)
 
     # ------------------------------------------------------------------ #
     # Konversi action
@@ -101,25 +155,35 @@ class ToolExecutor:
 
         # Permission Policy (#54): evaluasi SEBELUM eksekusi. Bila policy
         # menolak / butuh approval, tool TIDAK dijalankan. Bila manager tidak
-        # diberikan, langkah ini dilewati (backward compatible).
+        # diberikan, langkah ini dilewati (backward compatible). Untuk ASK,
+        # eksekusi DITAHAN lalu dimintakan approval user via `approval_gate`.
         if self.permission_manager is not None:
-            decision = self.permission_manager.check(
-                action.name, dict(action.arguments or {})
-            )
+            decision = self._permission_check(action.name, dict(action.arguments or {}))
             if not decision.allowed:
-                return AgentObservation(
-                    content=None,
-                    action_id=agent_action.id,
-                    success=False,
-                    error=f"Permission denied: {decision.reason}",
-                    metadata={
-                        "tool": action.name,
-                        "permission_denied": True,
-                        "action_class": decision.action_class.value,
-                        "policy_mode": decision.mode.value,
-                        "requires_approval": decision.requires_approval,
-                    },
+                action_class_value = getattr(
+                    getattr(decision, "action_class", None), "value", None
                 )
+                mode_value = getattr(getattr(decision, "mode", None), "value", None)
+                requires_approval = getattr(decision, "requires_approval", False)
+                approved = False
+                if requires_approval:
+                    approved = self._ask_approval(
+                        action.name, dict(action.arguments or {}), decision
+                    )
+                if not approved:
+                    return AgentObservation(
+                        content=None,
+                        action_id=agent_action.id,
+                        success=False,
+                        error=f"Permission denied: {getattr(decision, 'reason', '')}",
+                        metadata={
+                            "tool": action.name,
+                            "permission_denied": True,
+                            "action_class": action_class_value,
+                            "policy_mode": mode_value,
+                            "requires_approval": requires_approval,
+                        },
+                    )
 
         try:
             result = self.registry.execute(action.name, dict(action.arguments or {}))
@@ -236,17 +300,40 @@ class ToolExecutor:
                 tool_call_id, tool_name, "Tool call tidak punya nama tool."
             )
 
-        # 2) Permission Policy (#54): evaluasi SEBELUM eksekusi. Bila ditolak,
-        #    kembalikan payload error (jangan raise).
+        # 2) Permission Policy (#54): evaluasi SEBELUM eksekusi. Bila ditolak /
+        #    butuh approval, kembalikan payload error (jangan raise). DENY dan
+        #    ASK (require_approval) sama-sama MENAHAN eksekusi; untuk ASK,
+        #    eksekusi DITAHAN lalu dimintakan approval user via `approval_gate`.
+        #    Bila gate mengembalikan True -> action dilanjutkan; bila False/
+        #    timeout -> action dibatalkan dan hasil penolakan dikembalikan.
         if self.permission_manager is not None:
-            decision = self.permission_manager.check(tool_name, dict(arguments))
+            decision = self._permission_check(tool_name, dict(arguments))
             if not decision.allowed:
+                if getattr(decision, "requires_approval", False):
+                    allowed = self._ask_approval(tool_name, arguments, decision)
+                    if not allowed:
+                        return ToolResultPayload.error(
+                            tool_call_id,
+                            tool_name,
+                            "Approval Required: tool "
+                            f"'{tool_name}' requires user approval before execution "
+                            f"({getattr(decision, 'reason', '')})",
+                        )
+                    return self._execute_registered_tool(
+                        tool_call_id, tool_name, arguments
+                    )
                 return ToolResultPayload.error(
                     tool_call_id,
                     tool_name,
                     f"Permission Denied: User/Policy rejected execution of tool '{tool_name}'",
                 )
 
+        return self._execute_registered_tool(tool_call_id, tool_name, arguments)
+
+    def _execute_registered_tool(
+        self, tool_call_id: str, tool_name: str, arguments: Dict[str, Any]
+    ) -> ToolResultPayload:
+        """Jalankan tool yang sudah lolos permission (mekanisme registry existing)."""
         # 3) Eksekusi tool via mekanisme existing (ToolRegistry). Tool error /
         #    exception runtime -> payload error, bukan propagate ke loop.
         try:
@@ -266,6 +353,51 @@ class ToolExecutor:
         if failure is not None:
             return ToolResultPayload.error(tool_call_id, tool_name, failure)
         return ToolResultPayload.success(tool_call_id, tool_name, result)
+
+    def _approval_context(
+        self, tool_name: str, arguments: Dict[str, Any], decision: Any
+    ) -> Dict[str, Any]:
+        """Bangun konteks approval (tool/target/class/scope) dari decision+args.
+
+        Target path/command diambil dari argumen (path/command/...), action_class
+        & mode dari decision policy existing. Dipakai UI approval untuk
+        menampilkan jenis action + target/path yang akan digunakan.
+        """
+        from agent_ai.permission.matrix import describe_target
+
+        matrix_action = getattr(decision, "matrix_action", None)
+        scope = getattr(decision, "scope", None)
+        action_class = getattr(decision, "action_class", None)
+        try:
+            target = describe_target(arguments)
+        except Exception:  # noqa: BLE001 - deskripsi tidak boleh crash
+            target = ""
+        return {
+            "tool": tool_name,
+            "target": target,
+            "action_class": getattr(action_class, "value", None) or "",
+            "matrix_action": getattr(matrix_action, "value", None) or "",
+            "scope": getattr(scope, "value", None) or "",
+            "reason": str(getattr(decision, "reason", "") or ""),
+        }
+
+    def _ask_approval(
+        self, tool_name: str, arguments: Dict[str, Any], decision: Any
+    ) -> bool:
+        """Tahan eksekusi lalu minta approval user (bila gate tersedia).
+
+        Returns:
+            True bila user ALLOW (action boleh dilanjutkan); False bila gate
+            tidak tersedia / user DENY / timeout (action dibatalkan). TIDAK
+            pernah raise: kegagalan gate -> False (aman, tidak auto-allow).
+        """
+        gate = self.approval_gate
+        if gate is None:
+            return False
+        try:
+            return bool(gate(self._approval_context(tool_name, arguments, decision)))
+        except Exception:  # noqa: BLE001 - approval error tidak boleh crash loop
+            return False
 
     def execute_tool_calls(
         self,

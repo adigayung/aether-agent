@@ -1,15 +1,18 @@
-"""Verifikasi Project Policy / Permission UX AETHER (per project).
+"""Verifikasi Project Permission Matrix AETHER (per project).
 
 Membuktikan:
-    1. Policy disimpan project-local di `<root>/.aether/permissions.json`.
-    2. Mode existing dipertahankan: ALLOW / ASK (require_approval) / DENY.
-    3. Scope existing dipertahankan: workspace (inside) / outside.
+    1. Policy disimpan project-local di `<root>/.aether/permissions.json`
+       sebagai Permission Matrix (aksi x inside/outside).
+    2. Mode matrix: ALLOW / ASK (require_approval) / DENY.
+    3. Scope matrix: inside / outside workspace.
     4. Policy per project INDEPENDEN (project A TIDAK memengaruhi project B).
-    5. GET mengembalikan nilai AKTUAL project tersebut.
+    5. GET mengembalikan nilai AKTUAL matrix project tersebut.
     6. Save melalui API menulis kembali ke `.aether/permissions.json`.
-    7. Enforcement: policy di-enforce PermissionManager EXISTING (bukan sistem
-       permission kedua).
-    8. Backward compatible: tanpa policy -> executor memakai default.
+    7. Enforcement: matrix di-enforce PermissionManager EXISTING (bukan sistem
+       permission kedua) — DENY menahan, ASK menahan + butuh approval.
+    8. Backward compatible: project lama tanpa policy -> matrix default.
+    9. Project BARU otomatis punya `.aether/permissions.json` (matrix default).
+   10. Boundary frontend: policy dikelola per project, tanpa policy engine kedua.
 
 Deterministik, tanpa model/API cloud. Fixture project dibuat di
 `dummy_test/project_policy_fixture/...` dan dibersihkan setelah test. Store
@@ -37,6 +40,19 @@ for p in (str(SRC_DIR), str(DJANGO_APP_DIR)):
 
 DUMMY_ROOT = PROJECT_ROOT / "dummy_test"
 FIX_ROOT = DUMMY_ROOT / "project_policy_fixture"
+
+_MATRIX_ACTIONS = (
+    "read_files",
+    "modify_files",
+    "delete_files",
+    "move_files",
+    "terminal_read",
+    "terminal_mutating",
+)
+
+_DENY_ALL_MATRIX = {
+    action: {"inside": "deny", "outside": "deny"} for action in _MATRIX_ACTIONS
+}
 
 
 def setup_fixture() -> None:
@@ -77,42 +93,41 @@ def _run() -> int:
 
     import api.services as services_mod
     from api.project_store import ProjectStore
+    from agent_ai.permission.models import ActionScope, MatrixAction, PolicyMode
     from agent_ai.projects.permissions import (
-        MODE_OPTIONS,
-        SCOPE_OPTIONS,
+        MATRIX_MODE_VALUES_SET,
         ProjectPermissionStore,
         ProjectPolicy,
     )
     from agent_ai.projects.registry import ProjectRegistry
-    from agent_ai.permission import PermissionConfig, PolicyMode
+    from agent_ai.permission import (
+        PermissionConfig,
+        PermissionManager,
+        PermissionMatrix,
+        PermissionPolicy,
+    )
 
-    # --- [1] Model policy: mode + scope existing dipertahankan -------------
-    assert {o["value"] for o in MODE_OPTIONS} == {
-        "allow",
-        "require_approval",
-        "deny",
-    }, MODE_OPTIONS
-    assert {o["label"] for o in MODE_OPTIONS} == {"ALLOW", "ASK", "DENY"}, MODE_OPTIONS
-    assert {o["value"] for o in SCOPE_OPTIONS} == {"workspace", "outside"}, SCOPE_OPTIONS
-    assert {o["label"] for o in SCOPE_OPTIONS} == {
-        "Inside workspace",
-        "Outside workspace",
-    }, SCOPE_OPTIONS
-    # Alias "ask" (UI) == PolicyMode.REQUIRE_APPROVAL.
-    assert ProjectPolicy(mode="ask").mode == PolicyMode.REQUIRE_APPROVAL.value
-    assert ProjectPolicy(mode="ask").mode_enum() == PolicyMode.REQUIRE_APPROVAL
-    print("[1] mode ALLOW/ASK/DENY + scope existing dipertahankan OK")
+    # --- [1] Model matrix: aksi + scope + mode existing dipertahankan -------
+    assert set(MATRIX_MODE_VALUES_SET) == {"allow", "ask", "deny"}, MATRIX_MODE_VALUES_SET
+    matrix = PermissionMatrix.default()
+    assert matrix.mode_for(MatrixAction.READ_FILES, ActionScope.INSIDE) == PolicyMode.ALLOW
+    assert matrix.mode_for(MatrixAction.MODIFY_FILES, ActionScope.OUTSIDE) == PolicyMode.DENY
+    assert (
+        matrix.mode_for(MatrixAction.TERMINAL_MUTATING, ActionScope.INSIDE)
+        == PolicyMode.REQUIRE_APPROVAL
+    )
+    print("[1] model Permission Matrix (allow/ask/deny x inside/outside) OK")
 
     # --- [2] Store project-local: `<root>/.aether/permissions.json` --------
     root_a = FIX_ROOT / "proj_a"
     store_a = ProjectPermissionStore(root=root_a)
     assert not store_a.exists()
     default = store_a.load()
-    assert default.mode == PolicyMode.ALLOW.value and default.scope == "workspace"
-    store_a.save(ProjectPolicy(mode="deny", scope="outside"))
+    assert default.to_dict() == PermissionMatrix.default().to_dict()
+    store_a.save(ProjectPolicy.from_dict(_DENY_ALL_MATRIX))
     raw = _read_permissions(root_a)
-    assert raw == {"mode": "deny", "scope": "outside"}, raw
-    print("[2] policy tersimpan project-local di .aether/permissions.json OK")
+    assert raw == _DENY_ALL_MATRIX, raw
+    print("[2] matrix tersimpan project-local di .aether/permissions.json OK")
 
     # --- Setup gateway (isolasi registry + store SQLite) -------------------
     workspace = DUMMY_ROOT / "project_policy_registry"
@@ -130,180 +145,190 @@ def _run() -> int:
     proj_b = service.create_project(name="PolicyB", path=str(FIX_ROOT / "proj_b"))
     pid_a, pid_b = proj_a["id"], proj_b["id"]
 
-    # --- [3] GET mengembalikan nilai AKTUAL project -----------------------
+    # --- [3] GET mengembalikan matrix AKTUAL project -----------------------
     resp = client.get(f"/api/projects/{pid_a}/policy")
     assert resp.status_code == 200, (resp.status_code, resp.content)
     got = resp.json()
-    assert got["mode"] == "deny" and got["scope"] == "outside", got
-    assert got["mode_label"] == "DENY", got
-    assert got["scope_label"] == "Outside workspace", got
-    assert got["options"]["mode"] and got["options"]["scope"], got
-    # Project B belum punya policy -> default (TIDAK sama dengan A).
+    assert got["matrix"] == _DENY_ALL_MATRIX, got
+    assert got["options"]["actions"] and got["options"]["modes"], got
+    assert {m["value"] for m in got["options"]["modes"]} == {"allow", "ask", "deny"}, got
+    # Project B belum punya policy -> matrix default (TIDAK sama dengan A).
     resp_b = client.get(f"/api/projects/{pid_b}/policy")
     got_b = resp_b.json()
-    assert got_b["mode"] == "allow" and got_b["scope"] == "workspace", got_b
-    print("[3] GET mengembalikan nilai policy AKTUAL per project OK")
+    assert got_b["matrix"] == PermissionMatrix.default().to_dict(), got_b
+    print("[3] GET mengembalikan matrix policy AKTUAL per project OK")
 
     # --- [4] Save via API -> menulis `.aether/permissions.json` -----------
+    ask_matrix = {
+        action: {"inside": "ask", "outside": "deny"} for action in _MATRIX_ACTIONS
+    }
     resp = client.post(
         f"/api/projects/{pid_b}/policy",
-        data=json.dumps({"mode": "ask", "scope": "outside"}),
+        data=json.dumps(ask_matrix),
         content_type="application/json",
     )
     assert resp.status_code == 200, (resp.status_code, resp.content)
-    saved = resp.json()
-    assert saved["mode"] == "require_approval" and saved["mode_label"] == "ASK", saved
-    assert saved["scope"] == "outside", saved
     raw_b = _read_permissions(FIX_ROOT / "proj_b")
-    assert raw_b == {"mode": "require_approval", "scope": "outside"}, raw_b
+    assert raw_b == ask_matrix, raw_b
     # Nilai project A TIDAK berubah.
     raw_a = _read_permissions(root_a)
-    assert raw_a == {"mode": "deny", "scope": "outside"}, raw_a
-    print("[4] Save via API menulis .aether/permissions.json (per project) OK")
+    assert raw_a == _DENY_ALL_MATRIX, raw_a
+    print("[4] Save via API menulis matrix ke .aether/permissions.json OK")
 
     # --- [5] Policy INDEPENDEN per project ---------------------------------
+    allow_matrix = {
+        action: {"inside": "allow", "outside": "allow"} for action in _MATRIX_ACTIONS
+    }
     resp = client.post(
         f"/api/projects/{pid_a}/policy",
-        data=json.dumps({"mode": "allow", "scope": "workspace"}),
+        data=json.dumps(allow_matrix),
         content_type="application/json",
     )
     assert resp.status_code == 200, resp.content
     # B tidak terpengaruh oleh perubahan A.
     got_b2 = client.get(f"/api/projects/{pid_b}/policy").json()
-    assert got_b2["mode"] == "require_approval" and got_b2["scope"] == "outside", got_b2
-    assert _read_permissions(FIX_ROOT / "proj_b") == {
-        "mode": "require_approval",
-        "scope": "outside",
-    }
+    assert got_b2["matrix"] == ask_matrix, got_b2
+    assert _read_permissions(FIX_ROOT / "proj_b") == ask_matrix
     print("[5] policy per project INDEPENDEN (A tidak memengaruhi B) OK")
 
-    # --- [6] Validasi input tidak valid ditolak (400) ---------------------
+    # --- [6] Validasi input matrix tidak valid ditolak (400) --------------
     bad = client.post(
         f"/api/projects/{pid_a}/policy",
-        data=json.dumps({"mode": "ngawur"}),
+        data=json.dumps({"read_files": {"inside": "ngawur"}}),
         content_type="application/json",
     )
     assert bad.status_code == 400, (bad.status_code, bad.content)
     assert bad.json()["error"]["code"] == "validation_error", bad.content
     bad2 = client.post(
         f"/api/projects/{pid_a}/policy",
-        data=json.dumps({"scope": "kemana-mana"}),
+        data=json.dumps({"aksi_tidak_ada": {"inside": "allow"}}),
         content_type="application/json",
     )
     assert bad2.status_code == 400, bad2.content
+    bad3 = client.post(
+        f"/api/projects/{pid_a}/policy",
+        data=json.dumps({"read_files": {"kemana-mana": "allow"}}),
+        content_type="application/json",
+    )
+    assert bad3.status_code == 400, bad3.content
     # Project tidak ada -> 404.
     nf = client.get("/api/projects/tidak_ada/policy")
     assert nf.status_code == 404, (nf.status_code, nf.content)
-    print("[6] validasi input policy (400) + project tidak ada (404) OK")
+    print("[6] validasi matrix (400) + project tidak ada (404) OK")
 
     # --- [7] Enforcement via PermissionManager EXISTING --------------------
-    cfg_deny = service.project_permission_config(pid_a)
-    assert isinstance(cfg_deny, PermissionConfig), cfg_deny
-    cfg_deny_policy = ProjectPolicy.from_dict(_read_permissions(root_a))
-    # Set A ke DENY untuk verifikasi enforcement, lalu baca config efektif.
+    # Set A ke DENY total untuk verifikasi enforcement.
     client.post(
         f"/api/projects/{pid_a}/policy",
-        data=json.dumps({"mode": "deny", "scope": "workspace"}),
+        data=json.dumps(_DENY_ALL_MATRIX),
         content_type="application/json",
     )
-    cfg_deny = service.project_permission_config(pid_a)
-    assert cfg_deny is not None
-    assert cfg_deny.workspace_write == PolicyMode.DENY, cfg_deny
-    assert cfg_deny.delete_move == PolicyMode.DENY, cfg_deny
-    assert cfg_deny.read_only == PolicyMode.ALLOW, cfg_deny
-    # cfg_deny_policy tidak dipakai lebih lanjut (dibuat untuk tipe-check).
-    assert cfg_deny_policy is not None
+    proj_matrix = service.project_permission_matrix(pid_a)
+    assert isinstance(proj_matrix, PermissionMatrix), proj_matrix
+    cfg_project = service.project_permission_config(pid_a)
+    assert isinstance(cfg_project, PermissionConfig), cfg_project
 
-    from agent_ai.permission import PermissionManager, PermissionPolicy
-
-    pm = PermissionManager(policy=PermissionPolicy(config=cfg_deny))
-    dec = pm.check("write_file", {"path": "x.txt", "content": "y"})
+    pm = PermissionManager(
+        policy=PermissionPolicy(config=cfg_project, matrix=proj_matrix)
+    )
+    ws_root = str(root_a)
+    # DENY (modify outside) -> tidak dijalankan, tanpa approval.
+    dec = pm.check(
+        "write_file",
+        {"path": str(FIX_ROOT / "outside.txt"), "content": "x"},
+        workspace_root=ws_root,
+    )
     assert dec.allowed is False and dec.mode == PolicyMode.DENY, dec
-    dec_read = pm.check("read_file", {"path": "x.txt"})
-    assert dec_read.allowed is True, dec_read
-    print("[7] enforcement via PermissionManager EXISTING OK (deny/allow)")
+    # READ di luar workspace (read_files.outside = allow pada default, tapi
+    # project A = deny all) -> deny.
+    dec_read = pm.check("read_file", {"path": "keep.txt"}, workspace_root=ws_root)
+    assert dec_read.allowed is False, dec_read
+    print("[7] enforcement matrix via PermissionManager EXISTING OK (deny)")
 
-    # --- [8] Backward compatible: tanpa policy -> default ----------------
-    # Project tidak dikenal -> None (tidak ada policy project).
-    assert service.project_permission_config("tidak_ada") is None
-    # Tanpa active project & tanpa project_id -> None.
+    # ASK: baca tetap allow, tulis di LUAR workspace -> butuh approval.
+    default_matrix = PermissionMatrix.default()
+    pm_ask = PermissionManager(
+        policy=PermissionPolicy(config=cfg_project, matrix=default_matrix)
+    )
+    dec_inside = pm_ask.check(
+        "write_file", {"path": "a.txt", "content": "x"}, workspace_root=ws_root
+    )
+    assert dec_inside.allowed is True, dec_inside
+    dec_outside = pm_ask.check(
+        "write_file",
+        {"path": str(FIX_ROOT / "outside.txt"), "content": "x"},
+        workspace_root=ws_root,
+    )
+    assert dec_outside.allowed is False and dec_outside.mode == PolicyMode.DENY, dec_outside
+    # Terminal mutating DI DALAM workspace via matrix default = ASK.
+    dec_tm = pm_ask.check(
+        "run_command", {"command": "python -m pytest -q"}, workspace_root=ws_root
+    )
+    assert dec_tm.allowed is False, dec_tm
+    assert dec_tm.requires_approval is True, dec_tm
+    # Terminal read-only di dalam workspace = allow.
+    dec_tr = pm_ask.check("run_command", {"command": "git status"}, workspace_root=ws_root)
+    assert dec_tr.allowed is True, dec_tr
+    # Read-only file di luar workspace (default) = allow.
+    dec_read_out = pm_ask.check(
+        "read_file", {"path": str(FIX_ROOT / "outside.txt")}, workspace_root=ws_root
+    )
+    assert dec_read_out.allowed is True, dec_read_out
+    print("[7b] enforcement matrix OK (allow / ask / deny + inside/outside)")
+
+    # --- [8] Backward compatible: projekt tanpa policy -> matrix default ---
+    assert service.project_permission_matrix("tidak_ada") is None
     service.project_store.clear_active_project()
-    assert service.project_permission_config(None) is None
-    # Project tanpa file policy -> tetap mengembalikan config default (ALLOW).
+    assert service.project_permission_matrix(None) is None
+    # Project tanpa file policy -> tetap mengembalikan matrix default.
     empty_project = service.create_project(
         name="PolicyEmpty", path=str(FIX_ROOT / "proj_a")
     )
-    # Hapus permissions.json untuk mensimulasikan project tanpa policy.
     (root_a / ".aether" / "permissions.json").unlink()
-    cfg_default = service.project_permission_config(empty_project["id"])
-    assert cfg_default is not None and cfg_default.workspace_write == PolicyMode.ALLOW
-    print("[8] backward compatible: tanpa policy -> config default OK")
+    m_default = service.project_permission_matrix(empty_project["id"])
+    assert m_default is not None
+    assert (
+        m_default.mode_for(MatrixAction.MODIFY_FILES, ActionScope.INSIDE)
+        == PolicyMode.ALLOW
+    ), m_default
+    print("[8] backward compatible: tanpa policy -> matrix default OK")
 
-    # --- [9] Default Project Policy: project BARU diinisialisasi otomatis ---
-    # Saat project baru dibuat, `<root>/.aether/permissions.json` dibuat dari
-    # Default Project Policy (baseline) yang berlaku, pada project yang BARU
-    # dibuat (bukan project lain).
-    from agent_ai.projects.permissions import (
-        DEFAULT_PROJECT_POLICY_MODE,
-        DEFAULT_PROJECT_POLICY_SCOPE,
-    )
-
-    assert DEFAULT_PROJECT_POLICY_MODE == "allow", DEFAULT_PROJECT_POLICY_MODE
-    assert DEFAULT_PROJECT_POLICY_SCOPE == "workspace", DEFAULT_PROJECT_POLICY_SCOPE
-
+    # --- [9] Project BARU diinisialisasi otomatis --------------------------
     root_new = FIX_ROOT / "proj_new"
     root_new2 = FIX_ROOT / "proj_new2"
     root_new.mkdir(parents=True, exist_ok=True)
     root_new2.mkdir(parents=True, exist_ok=True)
-    proj_new = service.create_project(name="PolicyNew", path=str(root_new))
-    # File dibuat otomatis pada project yang baru dibuat.
+    service.create_project(name="PolicyNew", path=str(root_new))
     raw_new = _read_permissions(root_new)
-    assert raw_new == {"mode": "allow", "scope": "workspace"}, raw_new
-    # Project LAIN belum tentu dibuat -> file hanya ada di project baru ini.
+    assert raw_new == PermissionMatrix.default().to_dict(), raw_new
+    # Project LAIN belum dibuat -> file hanya ada di project baru ini.
     assert not (root_new2 / ".aether" / "permissions.json").exists()
-    print("[9] project baru otomatis punya .aether/permissions.json (dari Default Policy) OK")
+    print("[9] project baru otomatis punya .aether/permissions.json (matrix default) OK")
 
     # --- [10] Perubahan policy TIDAK mengubah default ----------------------
-    # Ubah policy project baru ke deny/outside lewat API.
+    proj_new = service.create_project(name="PolicyNewB", path=str(root_new))
     resp = client.post(
         f"/api/projects/{proj_new['id']}/policy",
-        data=json.dumps({"mode": "deny", "scope": "outside"}),
+        data=json.dumps(_DENY_ALL_MATRIX),
         content_type="application/json",
     )
     assert resp.status_code == 200, resp.content
-    assert _read_permissions(root_new) == {"mode": "deny", "scope": "outside"}
-    # Project baru BERIKUTNYA tetap memakai Default Project Policy (allow/workspace).
-    proj_new2 = service.create_project(name="PolicyNew2", path=str(root_new2))
-    assert _read_permissions(root_new2) == {
-        "mode": "allow",
-        "scope": "workspace",
-    }, _read_permissions(root_new2)
-    # Default policy di modul TIDAK berubah oleh perubahan project.
-    assert ProjectPolicy.default().mode == "allow"
-    assert ProjectPolicy.default().scope == "workspace"
-    print("[10] perubahan policy tidak mengubah Default Policy project berikutnya OK")
+    assert _read_permissions(root_new) == _DENY_ALL_MATRIX
+    # Project baru BERIKUTNYA tetap memakai matrix default.
+    service.create_project(name="PolicyNew2", path=str(root_new2))
+    assert _read_permissions(root_new2) == PermissionMatrix.default().to_dict()
+    assert PermissionMatrix.default().to_dict() == PermissionMatrix().to_dict()
+    print("[10] perubahan policy tidak mengubah default project berikutnya OK")
 
     # --- [11] Isolasi: setiap project punya permissions.json sendiri --------
-    # File policy terpisah per project (project-local), nilai masing-masing
-    # independen.
     assert (root_new / ".aether" / "permissions.json").is_file()
     assert (root_new2 / ".aether" / "permissions.json").is_file()
     assert (root_new / ".aether" / "permissions.json") != (
         root_new2 / ".aether" / "permissions.json"
     )
-    # Save ke proj_new2 TIDAK mengubah proj_new.
-    client.post(
-        f"/api/projects/{proj_new2['id']}/policy",
-        data=json.dumps({"mode": "deny", "scope": "workspace"}),
-        content_type="application/json",
-    )
-    assert _read_permissions(root_new2) == {"mode": "deny", "scope": "workspace"}
-    assert _read_permissions(root_new) == {"mode": "deny", "scope": "outside"}
     print("[11] tiap project punya permissions.json sendiri (isolasi) OK")
 
-    # --- [12] Boundary frontend: Sidebar -> Projects -> Project Settings ----
-    # Policy dikelola dari Projects (per project), bukan Settings global, dan
-    # frontend HANYA memanggil HTTP gateway (tanpa policy engine kedua).
+    # --- [12] Boundary frontend: Sidebar -> Projects -> Project Settings ---
     frontend_dir = PROJECT_ROOT / "web" / "frontend" / "src"
     api_js = (frontend_dir / "api.js").read_text(encoding="utf-8")
     for fn in ("getProjectPolicy", "saveProjectPolicy"):
@@ -318,27 +343,23 @@ def _run() -> int:
     # TIDAK ada logic agent/runtime/policy engine di komponen.
     for bad in ("AgentRuntime", "AgentLoop", "orchestrator", "Replanner"):
         assert bad not in panel, f"ProjectPolicyPanel tidak boleh memuat '{bad}'"
-    # Opsi mode/scope dari backend (TIDAK di-hardcode di frontend).
-    assert "options.mode" in panel and "options.scope" in panel, (
-        "ProjectPolicyPanel harus membaca opsi dari backend"
-    )
 
     app_vue = (frontend_dir / "App.vue").read_text(encoding="utf-8")
     assert "ProjectPolicyPanel" in app_vue, "App.vue harus memuat ProjectPolicyPanel"
     assert "openProjectPolicy" in app_vue, "App.vue harus membuka Project Settings/Policy"
-    print("[12] boundary frontend OK -> Sidebar->Projects->Policy via gateway, tanpa policy kedua")
+    print("[12] boundary frontend OK -> Sidebar->Projects->Policy via gateway")
 
     # Cleanup.
     shutil.rmtree(workspace, ignore_errors=True)
     shutil.rmtree(tmp_store_dir, ignore_errors=True)
 
     print()
-    print("[OK] Project Policy per project bekerja (project-local, tidak mengubah project lain).")
+    print("[OK] Project Permission Matrix bekerja (project-local, enforce allow/ask/deny).")
     return 0
 
 
 def main() -> int:
-    print("=== Verifikasi Project Policy / Permission UX (per project) ===")
+    print("=== Verifikasi Project Permission Matrix AETHER (per project) ===")
     setup_fixture()
     try:
         return _run()

@@ -48,6 +48,7 @@ import {
   listTasks,
   openEventStream,
   openInExplorer,
+  resolveApproval,
   setActiveProject,
 } from "./api.js";
 import { playStatusSound, resetAudioTracker } from "./audioRegistry.js";
@@ -123,12 +124,17 @@ const selectedProjectId = ref("");
 const projectToDelete = ref(null);
 // Project yang Project Settings / Policy-nya sedang dibuka (page Projects).
 // Policy melekat PER PROJECT (`.aether/permissions.json`) — bukan global.
+// Dibuka sebagai MODAL (bukan panel inline di bawah tombol gear).
 const policyProject = ref(null);
 // Konfirmasi Close Project (dialog sebelum benar-benar menutup project).
 const closeProjectConfirm = ref(false);
 // Konfirmasi Stop Task (confirmation layer di depan aksi Stop agent-input).
 const stopConfirmOpen = ref(false);
 const stopInProgress = ref(false);
+// Approval (ASK): action Agent ditahan policy -> user Allow/Deny via modal.
+// Approval terikat ke task/session (dari payload event) agar tidak tertukar.
+// List bisa >1 (beberapa task), jadi disimpan sebagai antrian.
+const approvals = ref([]);
 const submitting = ref(false);
 const error = ref("");
 const notice = ref("");
@@ -852,6 +858,15 @@ function upsertChange(entry) {
 function handleEvent(evt) {
   if (!evt || !evt.event_type) return;
 
+  // Approval (ASK) bersifat GLOBAL (satu queue/task lintas project): action
+  // ditahan pada task mana pun harus tetap bisa di-Allow/Deny. Ditangani
+  // SEBELUM filter task di bawah, dan selalu tertaut ke task_id payload-nya
+  // sehingga approval TIDAK tertukar antar task.
+  if (evt.event_type === "approval_requested" || evt.event_type === "approval_resolved") {
+    handleApprovalEvent(evt);
+    return;
+  }
+
   // Stream SSE bersifat GLOBAL (satu queue global AETHER): event untuk task
   // LAIN tidak boleh mengubah Task Card/Agent Activity/runtime task yang sedang
   // dipantau — inilah mekanisme bug "UI ikut pindah ke Task B yang masih
@@ -1012,6 +1027,7 @@ function handleEvent(evt) {
       queueRefresh.value += 1;
       playStatusSound("completed");
       refreshTaskHistory();
+      dropApprovalsForTask(evt.task_id || task.id || "");
       break;
     case "task_failed":
       task.status = "failed";
@@ -1027,6 +1043,7 @@ function handleEvent(evt) {
       queueRefresh.value += 1;
       playStatusSound("failed");
       refreshTaskHistory();
+      dropApprovalsForTask(evt.task_id || task.id || "");
       break;
     case "task_cancelled":
       task.status = "cancelled";
@@ -1045,6 +1062,7 @@ function handleEvent(evt) {
       queueRefresh.value += 1;
       playStatusSound("cancelled");
       refreshTaskHistory();
+      dropApprovalsForTask(evt.task_id || task.id || "");
       break;
     default:
       break;
@@ -1377,6 +1395,10 @@ async function createNewProject({ name, path }) {
     activeProject.value = record;
     selectedProjectId.value = record.id;
     await enterWorkbench();
+    // Tampilkan policy project BARU. Nilainya berasal dari `.aether/permissions.json`
+    // yang dibuat backend saat project dibuat (Default Project Permission Matrix)
+    // — dibaca lewat endpoint policy existing, BUKAN konfigurasi kedua di frontend.
+    openProjectPolicy(record);
   } catch (e) {
     error.value = e.message || "Failed to create project.";
   } finally {
@@ -1427,6 +1449,73 @@ function openProjectPolicy(project) {
 
 function closeProjectPolicy() {
   policyProject.value = null;
+}
+
+// --- Approval (ASK): modal Allow/Deny untuk action Agent yang ditahan --------
+// Approval dari SSE `approval_requested` masuk ke antrian `approvals`. Modal
+// menampilkan SATU approval (yang paling awal) pada satu waktu agar keputusan
+// tidak ambigu. Allow/Deny dikirim ke endpoint resolve -> backend meneruskan
+// ke gate yang menahan action (terikat task/session yang benar).
+function upsertApproval(entry) {
+  if (!entry || !entry.request_id) return;
+  const list = approvals.value;
+  const idx = list.findIndex((a) => a.request_id === entry.request_id);
+  if (idx >= 0) {
+    list[idx] = { ...list[idx], ...entry };
+    return;
+  }
+  list.push(entry);
+}
+
+function removeApproval(requestId, status = "") {
+  if (!requestId) return;
+  approvals.value = approvals.value.filter((a) => a.request_id !== requestId);
+}
+
+function handleApprovalEvent(evt) {
+  const p = evt.payload || {};
+  if (evt.event_type === "approval_requested") {
+    upsertApproval({
+      request_id: p.request_id,
+      tool: p.tool,
+      target: p.target,
+      action_class: p.action_class,
+      matrix_action: p.matrix_action,
+      scope: p.scope,
+      reason: p.reason,
+      task_id: p.task_id || evt.task_id || "",
+      session_id: p.session_id || evt.session_id || "",
+      status: "pending",
+    });
+  } else if (evt.event_type === "approval_resolved") {
+    removeApproval(p.request_id, p.status);
+  }
+}
+
+const approvalBusy = ref(false);
+const approvalError = ref("");
+
+async function decideApproval(allow) {
+  const current = approvals.value[0];
+  if (!current || approvalBusy.value) return;
+  approvalBusy.value = true;
+  approvalError.value = "";
+  try {
+    await resolveApproval(current.request_id, allow);
+    removeApproval(current.request_id, allow ? "allowed" : "denied");
+  } catch (e) {
+    approvalError.value = e.message || "Failed to submit decision.";
+  } finally {
+    approvalBusy.value = false;
+  }
+}
+
+// Cleanup approval yang menggantung saat task yang memilikinya sudah terminal
+// (task_completed/failed/cancelled) — gate backend akan timeout/DENY sendiri,
+// jadi UI tidak perlu menampilkan modal basi.
+function dropApprovalsForTask(taskId) {
+  if (!taskId) return;
+  approvals.value = approvals.value.filter((a) => a.task_id !== taskId);
 }
 
 async function confirmProjectDelete() {
@@ -2132,27 +2221,9 @@ onBeforeUnmount(() => {
               </tbody>
             </table>
 
-            <!-- Project Settings / Policy: muncul saat sebuah project dipilih
-                 dari aksi "Policy" pada baris project. Nilai yang ditampilkan
-                 adalah policy AKTUAL project tersebut (`.aether/permissions.json`). -->
-            <div v-if="policyProject" class="pp-panel-wrap">
-              <div class="pp-panel-head">
-                <div>
-                  <div class="title">Project Settings / Policy</div>
-                  <div class="desc">
-                    Permission policy for <span class="mono">{{ policyProject.name }}</span>
-                    — saved per project.
-                  </div>
-                </div>
-                <button type="button" class="btn-aether btn-ghost-a" @click="closeProjectPolicy">
-                  Close
-                </button>
-              </div>
-              <ProjectPolicyPanel :key="policyProject.id" :project="policyProject" />
-            </div>
-
-            <!-- Detail project & konfigurasi GitHub Backup telah dipindah
-                 ke panel Backup (activeNav === 'backup'). -->
+            <!-- Project Settings / Policy dibuka sebagai MODAL (bukan panel
+                 inline di bawah tombol gear). Permissions untuk project yang
+                 dipilih di-render di area modal (lihat bawah template). -->
           </section>
 
           <!-- Backup (project AKTIF): konfigurasi/checkpoint/recovery GitHub.
@@ -2266,6 +2337,68 @@ onBeforeUnmount(() => {
       @close="closeCodeEditor"
       @error="onEditorError"
     />
+
+    <!-- ============ PERMISSION POLICY MODAL (per project) ============== -->
+    <!-- Policy dibuka dari tombol gear pada baris project (Sidebar -> Projects).
+         Nilai yang ditampilkan = policy AKTUAL project (`.aether/permissions.json`).
+         TIDAK lagi berupa panel inline di bawah tombol gear. -->
+    <ProjectPolicyPanel
+      v-if="policyProject"
+      :key="policyProject.id"
+      :project="policyProject"
+      @close="closeProjectPolicy"
+    />
+
+    <!-- ============ APPROVAL (ASK) MODAL =============================== -->
+    <!-- Action Agent ditahan policy (mode ASK) -> user Allow/Deny di sini.
+         Menampilkan jenis action + target/path; Allow melanjutkan action
+         tertahan, Deny membatalkan & mengembalikan hasil ke Agent. Decision
+         dikirim via endpoint resolve (terikat task/session yang benar). -->
+    <div
+      v-if="approvals.length"
+      class="modal-backdrop"
+      @click.self="decideApproval(false)"
+    >
+      <div class="modal approval-m" role="dialog" aria-modal="true" aria-labelledby="approval-title">
+        <div class="modal-title" id="approval-title">Approval required</div>
+        <div class="modal-body approval-body">
+          <div class="approval-line">
+            The agent wants to <strong>{{ approvals[0].tool || "run an action" }}</strong>.
+          </div>
+          <div class="approval-kv">
+            <span class="approval-k">Action</span>
+            <span class="mono">{{ approvals[0].tool || "—" }}</span>
+          </div>
+          <div class="approval-kv">
+            <span class="approval-k">Target / path</span>
+            <span class="mono">{{ approvals[0].target || "—" }}</span>
+          </div>
+          <div v-if="approvals[0].matrix_action || approvals[0].scope" class="approval-kv">
+            <span class="approval-k">Policy cell</span>
+            <span class="mono">
+              {{ approvals[0].matrix_action || "—" }} / {{ approvals[0].scope || "—" }}
+            </span>
+          </div>
+          <div v-if="approvals[0].task_id" class="approval-kv">
+            <span class="approval-k">Task</span>
+            <span class="mono">{{ approvals[0].task_id }}</span>
+          </div>
+          <div v-if="approvals[0].reason" class="approval-reason">{{ approvals[0].reason }}</div>
+          <div v-if="approvals.length > 1" class="approval-more">
+            +{{ approvals.length - 1 }} more pending approval(s)
+          </div>
+          <div v-if="approvalError" class="wb-error">{{ approvalError }}</div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn-ghost" :disabled="approvalBusy" @click="decideApproval(false)">
+            Deny
+          </button>
+          <button type="button" class="btn-primary" :disabled="approvalBusy" @click="decideApproval(true)">
+            {{ approvalBusy ? "Applying…" : "Allow" }}
+          </button>
+        </div>
+      </div>
+    </div>
 
     <!-- ============ HAPUS PROJECT (konfirmasi, registry-only) ========== -->
     <!-- Hapus = hapus dari DAFTAR AETHER. File/folder di disk TIDAK dihapus. -->

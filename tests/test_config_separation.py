@@ -41,6 +41,7 @@ from agent_ai.config.settings import (
     global_settings,
     update_global_settings,
 )
+from agent_ai.permission.matrix import DEFAULT_MATRIX_RULES
 from agent_ai.projects.permissions import (
     PERMISSIONS_FILE_NAME,
     ProjectPermissionStore,
@@ -51,6 +52,12 @@ from agent_ai.projects.registry import ProjectRegistry
 
 def _read(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+#: Matrix custom (semua deny) untuk menguji pemisahan konfigurasi.
+_DENY_ALL_MATRIX = {
+    action: {"inside": "deny", "outside": "deny"} for action in DEFAULT_MATRIX_RULES
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -117,11 +124,11 @@ def test_project_policy_writes_only_project_file(tmp_path):
     root = tmp_path / "proj"
     root.mkdir()
     store = ProjectPermissionStore(root=root)
-    store.save(ProjectPolicy(mode="deny", scope="outside"))
+    store.save(ProjectPolicy.from_dict(_DENY_ALL_MATRIX))
     stored = _read(root / ".aether" / PERMISSIONS_FILE_NAME)
-    # Hanya mode/scope yang tersimpan: TIDAK ada key Global Settings.
-    assert set(stored) == {"mode", "scope"}, stored
-    assert stored == {"mode": "deny", "scope": "outside"}
+    # Hanya aksi matrix yang tersimpan: TIDAK ada key Global Settings.
+    assert set(stored) == set(DEFAULT_MATRIX_RULES), stored
+    assert stored == _DENY_ALL_MATRIX
 
 
 def test_project_policy_does_not_touch_settings_json(tmp_path):
@@ -130,7 +137,7 @@ def test_project_policy_does_not_touch_settings_json(tmp_path):
     before = _read(settings_path)
 
     store = ProjectPermissionStore(root=tmp_path / "proj")
-    store.save(ProjectPolicy(mode="deny", scope="workspace"))
+    store.save(ProjectPolicy.default())
 
     assert _read(settings_path) == before
 
@@ -143,7 +150,7 @@ def test_global_settings_does_not_touch_project_policy(tmp_path, monkeypatch):
     root = tmp_path / "proj"
     root.mkdir()
     store = ProjectPermissionStore(root=root)
-    store.save(ProjectPolicy(mode="deny", scope="outside"))
+    store.save(ProjectPolicy.from_dict(_DENY_ALL_MATRIX))
     policy_path = root / ".aether" / PERMISSIONS_FILE_NAME
     before = _read(policy_path)
 
@@ -165,13 +172,13 @@ def test_policies_isolated_across_projects(tmp_path):
     registry.register(name="A", root=str(root_a))
     registry.register(name="B", root=str(root_b))
 
-    ProjectPermissionStore(root=root_a).save(ProjectPolicy(mode="deny", scope="outside"))
+    ProjectPermissionStore(root=root_a).save(ProjectPolicy.from_dict(_DENY_ALL_MATRIX))
 
     path_a = root_a / ".aether" / PERMISSIONS_FILE_NAME
     path_b = root_b / ".aether" / PERMISSIONS_FILE_NAME
     assert path_a != path_b
-    assert _read(path_a) == {"mode": "deny", "scope": "outside"}
-    assert _read(path_b) == {"mode": "allow", "scope": "workspace"}
+    assert _read(path_a) == _DENY_ALL_MATRIX
+    assert _read(path_b) == DEFAULT_MATRIX_RULES
 
 
 # --------------------------------------------------------------------------- #
@@ -212,12 +219,20 @@ def test_gateway_policy_rejects_global_settings_keys(tmp_path, monkeypatch):
     project = service.create_project(name="P", path=str(root))
     pid = project["id"]
     # Policy valid -> tersimpan.
-    service.save_project_policy(pid, {"mode": "deny", "scope": "outside"})
+    service.save_project_policy(pid, _DENY_ALL_MATRIX)
     policy_path = root / ".aether" / PERMISSIONS_FILE_NAME
     before = _read(policy_path)
 
     # Key Global Settings ditolak (400 ValidationError) & file policy tidak berubah.
-    for bad in ({"port": 9000}, {"compression": {"enabled": True}}, {"mode": "deny", "port": 1}):
+    for bad in ({"port": 9000}, {"compression": {"enabled": True}}, {"port": 1}):
+        with pytest.raises(services_mod.ValidationError):
+            service.save_project_policy(pid, bad)
+    # Nilai matrix tidak valid juga ditolak.
+    for bad in (
+        {"read_files": {"inside": "ngawur"}},
+        {"aksi_aneh": {"inside": "allow"}},
+        {"read_files": {"kemana_mana": "allow"}},
+    ):
         with pytest.raises(services_mod.ValidationError):
             service.save_project_policy(pid, bad)
     assert _read(policy_path) == before

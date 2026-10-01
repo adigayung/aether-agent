@@ -16,8 +16,14 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 from agent_ai.permission.classifier import ActionClassifier
+from agent_ai.permission.matrix import (
+    PermissionMatrix,
+    resolve_matrix_action,
+    resolve_scope,
+)
 from agent_ai.permission.models import (
     ActionClass,
+    ActionScope,
     PermissionConfig,
     PermissionDecision,
     PermissionRequest,
@@ -58,6 +64,17 @@ class PermissionPolicy:
             (mekanisme registrasi Extension existing). Default: resolver yang
             membaca registry tool Extension bersama (generik untuk SEMUA
             Extension, bukan logic khusus Extension tertentu).
+        matrix: Project Permission Matrix opsional (aksi x inside/outside).
+            Bila diberikan, matrix MENJADI sumber keputusan untuk aksi yang
+            tercakup matrix (read/modify/delete/move file + terminal
+            read/mutating); action lain (network/unknown) tetap memakai
+            PermissionConfig. Bila None, perilaku existing tidak berubah.
+
+    Catatan precedence:
+        - Tool Extension enabled -> ALLOW (tidak berubah).
+        - ``config.enabled`` False -> ALLOW (tidak berubah).
+        - ``request.project_matrix`` (project-local) MENANG atas ``self.matrix``
+          (global), sehingga policy project selalu berlaku untuk project itu.
     """
 
     def __init__(
@@ -65,9 +82,11 @@ class PermissionPolicy:
         config: Optional[PermissionConfig] = None,
         classifier: Optional[ActionClassifier] = None,
         extension_tool_resolver: Optional[Callable[[str], bool]] = None,
+        matrix: Optional[PermissionMatrix] = None,
     ) -> None:
         self.config = config or PermissionConfig()
         self.classifier = classifier or ActionClassifier()
+        self.matrix = matrix
         self.extension_tool_resolver = (
             extension_tool_resolver or _default_extension_tool_resolver
         )
@@ -130,6 +149,18 @@ class PermissionPolicy:
                 metadata={"enforced": False},
             )
 
+        # Project Permission Matrix (aksi x inside/outside): berlaku bila matrix
+        # diberikan (project-local menang atas global). Aksi yang tercakup
+        # matrix diputuskan oleh matrix; aksi lain (network/unknown) memakai
+        # PermissionConfig existing.
+        matrix = request.project_matrix or self.matrix
+        if matrix is not None:
+            decision = self._decide_with_matrix(
+                matrix, action_class, request
+            )
+            if decision is not None:
+                return decision
+
         mode = self.config.mode_for(action_class)
         return self._decide(mode, action_class, request)
 
@@ -140,6 +171,39 @@ class PermissionPolicy:
     # ------------------------------------------------------------------ #
     # Internal
     # ------------------------------------------------------------------ #
+    def _decide_with_matrix(
+        self,
+        matrix: PermissionMatrix,
+        action_class: ActionClass,
+        request: PermissionRequest,
+    ) -> Optional[PermissionDecision]:
+        """Keputusan dari Project Permission Matrix, atau None bila tak tercakup.
+
+        Menentukan aksi matrix (read/modify/delete/move file, terminal
+        read/mutating) + scope (inside/outside workspace), lalu membaca mode
+        dari matrix. Mengembalikan None bila aksi di luar lingkup matrix
+        (mis. network/unknown) sehingga pemanggil memakai policy existing.
+        """
+        matrix_action = resolve_matrix_action(
+            request.action, action_class, request.arguments
+        )
+        if matrix_action is None:
+            return None
+        scope = resolve_scope(
+            request.action, action_class, request.arguments, request.workspace_root
+        )
+        mode = matrix.mode_for(matrix_action, scope)
+        decision = self._decide(mode, action_class, request)
+        decision.matrix_action = matrix_action
+        decision.scope = scope
+        decision.metadata = {
+            **decision.metadata,
+            "matrix_action": matrix_action.value,
+            "scope": scope.value,
+            "source": "matrix",
+        }
+        return decision
+
     @staticmethod
     def _decide(
         mode: PolicyMode,
