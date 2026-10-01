@@ -11,6 +11,9 @@
 // Visual (dark AETHER): topbar, New Project,
 // "lanjutkan project terakhir", dan daftar project (tabel).
 import { computed, ref } from "vue";
+// Versi AETHER dari SINGLE SOURCE OF TRUTH `data/version.json` (sama dengan
+// footer Workbench). TIDAK ada version hardcoded di launcher ini.
+import { AETHER_VERSION } from "../version.js";
 
 const props = defineProps({
   projects: { type: Array, default: () => [] },
@@ -88,7 +91,7 @@ function doDelete() {
       </div>
       <div class="pl-topbar-right">
         <span class="pl-pill"><span class="pl-dot"></span> Local</span>
-        <span class="pl-pill">v0.1.0</span>
+        <span class="pl-pill">v{{ AETHER_VERSION }}</span>
       </div>
     </header>
 
