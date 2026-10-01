@@ -33,6 +33,12 @@ const props = defineProps({
   // Penanda refresh panel TASKS (dinaikkan App.vue setelah Run Task / event
   // terminal task). Panel TASKS membaca SATU queue global yang sama.
   queueRefreshKey: { type: Number, default: 0 },
+  // Project aktif (dari App.vue). Panel TASKS di sidebar Consultant hanya
+  // menampilkan task milik project ini — sama persis dengan QueuePanel di
+  // Workbench/Tasks page. Tanpa ini, queue GLOBAL (semua project) tampil dan
+  // task tercampur antar-project. Queue-nya tetap SATU (global); hanya
+  // tampilan yang di-scope ke project aktif.
+  projectId: { type: String, default: "" },
 });
 
 const emit = defineEmits([
@@ -784,6 +790,7 @@ onMounted(() => {
           <QueuePanel
             v-else
             class="consultant-queue"
+            :project-id="projectId || null"
             :refresh-key="queueRefreshKey"
             @stop-task="$emit('stop-task', $event)"
             @view-task="$emit('view-task', $event)"

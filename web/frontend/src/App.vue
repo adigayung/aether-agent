@@ -2186,6 +2186,7 @@ onBeforeUnmount(() => {
       :submitted-task-id="submittedTaskId"
       :terminal-task-id="terminalTaskId"
       :queue-refresh-key="queueRefresh"
+      :project-id="selectedProjectId || null"
       @close="closeConsultant"
       @update:provider-instance-id="selectedProviderInstanceId = $event"
       @update:model-id="selectedModelId = $event"
