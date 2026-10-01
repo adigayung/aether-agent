@@ -19,6 +19,7 @@ from typing import Dict, List, Optional
 
 from agent_ai.projects.intelligence import ProjectIntelligence
 from agent_ai.projects.models import ProjectConfig, _now_iso
+from agent_ai.projects.permissions import ProjectPermissionStore
 
 
 class ProjectError(Exception):
@@ -90,6 +91,14 @@ class ProjectRegistry:
         # (`<root>/.aether/bible/` + index). Knowledge TIDAK ditulis ke
         # workspace AETHER (single source of truth: project-local).
         ProjectIntelligence(project_dir, root=config.root).create()
+
+        # Inisialisasi Default Project Policy untuk project BARU:
+        # `<root>/.aether/permissions.json` dibuat dari baseline default yang
+        # berlaku. File bersifat PROJECT-LOCAL (hanya di root project ini) dan
+        # TIDAK menimpa policy yang sudah ada (idempotent). Setelah dibuat,
+        # policy menjadi milik project tersebut sehingga perubahan lewat UI
+        # TIDAK mengubah default dan TIDAK memengaruhi project lain.
+        ProjectPermissionStore(root=config.root).ensure_default()
         return config
 
     def load(self, project_id: str) -> ProjectConfig:

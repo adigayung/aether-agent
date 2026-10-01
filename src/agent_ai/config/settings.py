@@ -13,6 +13,7 @@ import os
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Dict
 
 from dotenv import load_dotenv
 
@@ -168,6 +169,396 @@ def api_retry_failed_count() -> int:
 def api_retry_failed_sleep() -> float:
     """Waktu tunggu (detik) sebelum setiap pengulangan (default aman 0.0)."""
     return api_retry_config().failed_sleep
+
+
+# ---------------------------------------------------------------------------
+# Sumber konfigurasi GLOBAL AETHER (`data/settings.json`)
+#
+# `data/settings.json` adalah SATU-SATUNYA sumber konfigurasi global AETHER.
+# Fungsi di bawah HANYA membaca/menulis file yang sama dengan loader di atas
+# (tidak ada file konfigurasi kedua, tidak ada skema kedua):
+#   - `global_settings()`   -> nilai AKTUAL (efektif) yang dipakai AETHER,
+#   - `update_global_settings(...)` -> tulis SEBAGIAN key saja, dengan
+#     deep-merge sehingga key/setting lain (termasuk yang belum punya UI)
+#     TIDAK hilang.
+# Penulisan bersifat atomik (tulis ke file sementara lalu `os.replace`) agar
+# file tidak pernah setengah tertulis. Semua batas tipe ada di sini (layer
+# konfigurasi), bukan di view/gateway, sehingga UI tetap tipis.
+# ---------------------------------------------------------------------------
+#: Default port AETHER bila `data/settings.json` tidak memuat `port`. Nilai ini
+#: SAMA dengan default launcher (run.bat / scripts/install_aether.py) sehingga
+#: tidak ada dua nilai default yang berbeda.
+DEFAULT_PORT = 8000
+
+#: Batas maksimum praktis jumlah pengulangan retry API (mencegah UI menulis
+#: angka yang membuat task menggantung praktis tanpa batas).
+MAX_API_RETRY_FAILED_COUNT = 1000
+#: Batas maksimum jeda (detik) antar pengulangan retry API (bounded).
+MAX_API_RETRY_FAILED_SLEEP = 3600.0
+
+#: Key user-facing yang boleh diubah lewat UI Settings (Global). Key lain di
+#: `data/settings.json` TIDAK boleh dihapus/ditimpa.
+_EDITABLE_SETTINGS_KEYS = frozenset(
+    {"port", "compression", "write_log_response_api", "api_retry", "agent"}
+)
+
+#: Key yang MILIK Project Settings / Policy (project-local, disimpan di
+#: `<root>/.aether/permissions.json`) — BUKAN Global Settings AETHER.
+#:
+#: Ditolak eksplisit di layer konfigurasi global agar policy/permission project
+#: TIDAK PERNAH tercampur ke `data/settings.json`. Ini menegakkan pemisahan
+#: konfigurasi: Global Settings vs Project Policy memakai sumber masing-masing.
+_PROJECT_POLICY_KEYS = frozenset(
+    {"mode", "scope", "permission", "permissions", "policy"}
+)
+
+
+class SettingsWriteError(RuntimeError):
+    """Gagal membaca/menulis `data/settings.json` (mis. file bukan JSON valid)."""
+
+
+def _read_settings_document() -> Dict[str, Any]:
+    """Baca `data/settings.json` sebagai object ({} bila absent/korup).
+
+    TIDAK melempar: file yang hilang atau korup diperlakukan sebagai object
+    kosong agar pemanggil dapat memakai default aman.
+    """
+    try:
+        text = SETTINGS_PATH.read_text(encoding="utf-8")
+        data = json.loads(text)
+    except Exception:  # noqa: BLE001 - absent/korup -> object kosong
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def port_setting() -> int:
+    """Baca `port` dari `data/settings.json` (default aman `DEFAULT_PORT`).
+
+    Nilai non-angka atau di luar rentang port valid (1..65535) jatuh ke default
+    sehingga AETHER tetap berjalan. Fungsi ini TIDAK pernah melempar.
+    """
+    raw = _read_settings_document().get("port", DEFAULT_PORT)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_PORT
+    if not (1 <= value <= 65535):
+        return DEFAULT_PORT
+    return value
+
+
+# ---------------------------------------------------------------------------
+# System Prompt Agent (`data/settings.json` -> `agent.system_prompt`)
+#
+# System prompt Agent DAPAT DIKELOLA dari Sidebar -> Settings -> Agent. Sumber
+# konfigurasinya TETAP `data/settings.json` (satu sumber konfigurasi global yang
+# sama) — TIDAK ada file/skema konfigurasi kedua dan TIDAK ada sistem prompt
+# kedua. Nilai default (bila user belum mengaturnya) = isi System Prompt Agent
+# existing di `agent_ai.core.agent_prompt`, sehingga behavior AETHER tetap sama
+# pada pemakaian pertama.
+# ---------------------------------------------------------------------------
+#: Batas maksimum panjang System Prompt Agent yang boleh disimpan lewat UI
+#: (mencegah penulisan nilai tak terbatas ke file konfigurasi).
+MAX_AGENT_SYSTEM_PROMPT_CHARS = 200_000
+
+
+def _default_agent_system_prompt() -> str:
+    """System Prompt Agent BAWAAN (isi existing, dipakai bila belum diatur).
+
+    Sumber default tetap modul prompt Agent yang sudah ada
+    (`agent_ai.core.agent_prompt`) supaya isi bawaan PERSIS sama dengan
+    perilaku sebelumnya. Import SENGAJA lazy dan dibungkus try: layer
+    konfigurasi tidak boleh gagal hanya karena modul prompt bermasalah.
+    """
+    try:
+        from agent_ai.core.agent_prompt import build_agent_system_prompt
+
+        return build_agent_system_prompt()
+    except Exception:  # noqa: BLE001 - default kosong lebih baik daripada crash
+        return ""
+
+
+def agent_system_prompt() -> str:
+    """System Prompt Agent EFEKTIF dari `data/settings.json` -> `agent.system_prompt`.
+
+    Return nilai yang DIKONFIGURASI user bila ada dan tidak kosong (setelah
+    `strip`); selain itu default bawaan (`_default_agent_system_prompt()`),
+    sehingga AETHER berperilaku sama seperti sebelumnya. Fungsi ini TIDAK pernah
+    melempar (file hilang/korup -> default).
+    """
+    raw = _read_settings_document().get("agent", {})
+    if isinstance(raw, dict):
+        value = raw.get("system_prompt")
+        if isinstance(value, str) and value.strip():
+            return value
+    return _default_agent_system_prompt()
+
+
+def global_settings() -> Dict[str, Any]:
+    """Nilai AKTUAL konfigurasi global user-facing dari `data/settings.json`.
+
+    Nilai yang dikembalikan = nilai EFEKTIF yang benar-benar dipakai loader
+    AETHER (lihat `compression_enabled`, `write_log_response_api`,
+    `api_retry_config`, `port_setting`, `agent_system_prompt`), sehingga UI
+    TIDAK PERNAH menampilkan nilai yang berbeda dari yang dipakai runtime.
+
+    Returns:
+        {
+            "port": int,
+            "compression": {"enabled": bool},
+            "write_log_response_api": bool,
+            "api_retry": {"failed_count": int, "failed_sleep": float},
+            "agent": {"system_prompt": str, "default_system_prompt": str},
+        }
+
+    Catatan: `agent.system_prompt` = nilai EFEKTIF yang dipakai Agent
+    (`agent_system_prompt()`), sedangkan `agent.default_system_prompt` = isi
+    System Prompt BAWAAN AETHER (konstanta, bukan setting) yang dipakai UI
+    untuk tombol "Restore default". Keduanya berasal dari satu sumber
+    konfigurasi/prompt yang sama.
+    """
+    retry = api_retry_config()
+    return {
+        "port": port_setting(),
+        "compression": {"enabled": compression_enabled()},
+        "write_log_response_api": write_log_response_api(),
+        "api_retry": {
+            "failed_count": retry.failed_count,
+            "failed_sleep": retry.failed_sleep,
+        },
+        "agent": {
+            "system_prompt": agent_system_prompt(),
+            "default_system_prompt": _default_agent_system_prompt(),
+        },
+    }
+
+
+def _coerce_bool(name: str, value: Any) -> bool:
+    """Validasi & konversi nilai boolean (menerima bool atau 0/1)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    raise SettingsWriteError(f"'{name}' harus berupa boolean (true/false).")
+
+
+def _coerce_int(name: str, value: Any, *, minimum: int, maximum: int) -> int:
+    """Validasi & konversi nilai integer dalam rentang [minimum, maximum]."""
+    if isinstance(value, bool):
+        raise SettingsWriteError(f"'{name}' harus berupa angka bulat.")
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as exc:
+        raise SettingsWriteError(f"'{name}' harus berupa angka bulat.") from exc
+    if not (minimum <= result <= maximum):
+        raise SettingsWriteError(
+            f"'{name}' harus berada di antara {minimum} dan {maximum}."
+        )
+    return result
+
+
+def _coerce_float(name: str, value: Any, *, minimum: float, maximum: float) -> Any:
+    """Validasi & konversi nilai numerik dalam rentang [minimum, maximum].
+
+    Nilai bulat dipertahankan sebagai `int` agar penulisan ulang tidak mengubah
+    gaya penulisan asli file (mis. `3` tidak menjadi `3.0`).
+    """
+    if isinstance(value, bool):
+        raise SettingsWriteError(f"'{name}' harus berupa angka.")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise SettingsWriteError(f"'{name}' harus berupa angka.") from exc
+    if result != result:  # NaN
+        raise SettingsWriteError(f"'{name}' harus berupa angka valid.")
+    if not (minimum <= result <= maximum):
+        raise SettingsWriteError(
+            f"'{name}' harus berada di antara {minimum} dan {maximum}."
+        )
+    if result.is_integer():
+        return int(result)
+    return result
+
+
+def _coerce_agent_system_prompt(value: Any) -> str:
+    """Validasi System Prompt Agent (`agent.system_prompt`) -> string.
+
+    Menerima string non-kosong (setelah `strip`) dengan batas panjang
+    `MAX_AGENT_SYSTEM_PROMPT_CHARS`. Nilai kosong / bukan string / terlalu
+    panjang ditolak sebagai `SettingsWriteError` sehingga file konfigurasi
+    TIDAK pernah menerima nilai yang tidak berarti.
+    """
+    if not isinstance(value, str):
+        raise SettingsWriteError("'agent.system_prompt' harus berupa teks.")
+    if not value.strip():
+        raise SettingsWriteError(
+            "'agent.system_prompt' tidak boleh kosong. "
+            "Gunakan tombol Reset untuk kembali ke default."
+        )
+    if len(value) > MAX_AGENT_SYSTEM_PROMPT_CHARS:
+        raise SettingsWriteError(
+            "'agent.system_prompt' terlalu panjang "
+            f"(maksimum {MAX_AGENT_SYSTEM_PROMPT_CHARS} karakter)."
+        )
+    return value
+
+
+def normalize_global_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
+    """Validasi payload update global settings -> dict bertipe & ternormalisasi.
+
+    HANYA key user-facing yang dikenal yang diproses (`port`,
+    `compression.enabled`, `write_log_response_api`, `api_retry.failed_count`,
+    `api_retry.failed_sleep`, `agent.system_prompt`). Payload boleh PARSIAL
+    (subset key) — key yang tidak dikirim TIDAK akan disentuh.
+
+    Raises:
+        SettingsWriteError: bila tipe/rentang nilai tidak valid atau terdapat
+            key yang tidak dikenal (mencegah typo menulis konfigurasi yang
+            tidak pernah dipakai AETHER).
+
+    Returns:
+        dict siap deep-merge ke `data/settings.json` (mis.
+        `{"port": 8000, "compression": {"enabled": True}}`).
+    """
+    if not isinstance(updates, dict):
+        raise SettingsWriteError("Body update harus berupa object JSON.")
+
+    # Pemisahan konfigurasi: policy/permission adalah milik Project Settings
+    # (`<root>/.aether/permissions.json`), BUKAN Global Settings AETHER. Tolak
+    # dengan pesan yang mengarahkan user ke tempat yang benar (bukan menerima
+    # diam-diam lalu menyimpan konfigurasi project ke file global).
+    migrated = set(updates) & _PROJECT_POLICY_KEYS
+    if migrated:
+        raise SettingsWriteError(
+            "Setting berikut milik Project Settings / Policy (per project), "
+            "bukan Global Settings: "
+            f"{', '.join(sorted(migrated))}. "
+            "Kelola dari Sidebar -> Projects -> Project Settings / Policy."
+        )
+
+    unknown = set(updates) - _EDITABLE_SETTINGS_KEYS
+    if unknown:
+        raise SettingsWriteError(
+            f"Setting tidak dikenal: {', '.join(sorted(unknown))}."
+        )
+
+    normalized: Dict[str, Any] = {}
+
+    if "port" in updates:
+        normalized["port"] = _coerce_int(
+            "port", updates["port"], minimum=1, maximum=65535
+        )
+
+    if "compression" in updates:
+        compression = updates["compression"]
+        if not isinstance(compression, dict):
+            raise SettingsWriteError("'compression' harus berupa object.")
+        extra = set(compression) - {"enabled"}
+        if extra:
+            raise SettingsWriteError(
+                f"Setting tidak dikenal: {', '.join(sorted(extra))}."
+            )
+        if "enabled" in compression:
+            normalized.setdefault("compression", {})["enabled"] = _coerce_bool(
+                "compression.enabled", compression["enabled"]
+            )
+
+    if "write_log_response_api" in updates:
+        normalized["write_log_response_api"] = _coerce_bool(
+            "write_log_response_api", updates["write_log_response_api"]
+        )
+
+    if "api_retry" in updates:
+        retry = updates["api_retry"]
+        if not isinstance(retry, dict):
+            raise SettingsWriteError("'api_retry' harus berupa object.")
+        extra = set(retry) - {"failed_count", "failed_sleep"}
+        if extra:
+            raise SettingsWriteError(
+                f"Setting tidak dikenal: {', '.join(sorted(extra))}."
+            )
+        target = normalized.setdefault("api_retry", {})
+        if "failed_count" in retry:
+            target["failed_count"] = _coerce_int(
+                "api_retry.failed_count",
+                retry["failed_count"],
+                minimum=0,
+                maximum=MAX_API_RETRY_FAILED_COUNT,
+            )
+        if "failed_sleep" in retry:
+            target["failed_sleep"] = _coerce_float(
+                "api_retry.failed_sleep",
+                retry["failed_sleep"],
+                minimum=0.0,
+                maximum=MAX_API_RETRY_FAILED_SLEEP,
+            )
+
+    if "agent" in updates:
+        agent = updates["agent"]
+        if not isinstance(agent, dict):
+            raise SettingsWriteError("'agent' harus berupa object.")
+        extra = set(agent) - {"system_prompt"}
+        if extra:
+            raise SettingsWriteError(
+                f"Setting tidak dikenal: {', '.join(sorted(extra))}."
+            )
+        if "system_prompt" in agent:
+            normalized.setdefault("agent", {})["system_prompt"] = (
+                _coerce_agent_system_prompt(agent["system_prompt"])
+            )
+
+    return normalized
+
+
+def _deep_merge(target: Dict[str, Any], patch: Dict[str, Any]) -> None:
+    """Merge `patch` ke `target` secara rekursif (in-place, tanpa menghapus key).
+
+    Nilai object di-merge; nilai skalar/list menggantikan nilai lama. Key yang
+    TIDAK ada di `patch` dibiarkan APA ADANYA — inilah yang menjamin setting
+    lain (termasuk yang belum punya kontrol UI) tidak hilang.
+    """
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _deep_merge(target[key], value)
+        else:
+            target[key] = value
+
+
+def update_global_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
+    """Simpan SEBAGIAN konfigurasi global ke `data/settings.json`.
+
+    Alur: baca dokumen LENGKAP -> validasi payload -> deep-merge -> tulis
+    atomik. Key lama yang tidak dikirim TIDAK dihapus dan strukturnya
+    dipertahankan (bukan overwrite seluruh file dengan object dari UI).
+
+    Args:
+        updates: payload mentah (subset key user-facing) dari UI/API.
+
+    Raises:
+        SettingsWriteError: payload tidak valid atau penulisan gagal.
+
+    Returns:
+        Nilai global settings AKTUAL setelah penulisan (hasil `global_settings()`).
+    """
+    patch = normalize_global_settings(updates)
+    document = _read_settings_document()
+    _deep_merge(document, patch)
+    _write_settings_document(document)
+    return global_settings()
+
+
+def _write_settings_document(document: Dict[str, Any]) -> None:
+    """Tulis dokumen konfigurasi global secara ATOMIK ke `data/settings.json`."""
+    try:
+        SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        text = json.dumps(document, indent=2, ensure_ascii=False) + "\n"
+        temporary = SETTINGS_PATH.parent / (SETTINGS_PATH.name + ".tmp")
+        temporary.write_text(text, encoding="utf-8")
+        os.replace(temporary, SETTINGS_PATH)
+    except OSError as exc:
+        raise SettingsWriteError(
+            f"Gagal menulis {SETTINGS_PATH.name}: {exc}"
+        ) from exc
 
 
 # ---------------------------------------------------------------------------

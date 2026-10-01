@@ -102,6 +102,28 @@ def config(request: HttpRequest, service: GatewayService) -> JsonResponse:
 
 
 # ---------------------------------------------------------------------------
+# Global Settings (`data/settings.json` — SATU sumber konfigurasi global).
+#
+# View HANYA meneruskan ke facade AETHER (loader `agent_ai.config.settings`).
+# Perubahan MERGE ke file yang sama; key/setting lain tidak hilang.
+# ---------------------------------------------------------------------------
+@require_http_methods(["GET"])
+@_handle
+def global_settings(request: HttpRequest, service: GatewayService) -> JsonResponse:
+    """GET /api/settings -> nilai AKTUAL konfigurasi global `data/settings.json`."""
+    return _json_response(service.get_global_settings())
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@_handle
+def global_settings_update(request: HttpRequest, service: GatewayService) -> JsonResponse:
+    """POST /api/settings -> simpan perubahan konfigurasi global (deep-merge)."""
+    body = _parse_json_body(request)
+    return _json_response(service.update_global_settings(body))
+
+
+# ---------------------------------------------------------------------------
 # LLM Config (halaman Settings; LLMConfigService AETHER existing)
 #
 # Gateway HANYA memanggil facade konfigurasi LLM AETHER. Nilai secret (.env)
@@ -254,6 +276,31 @@ def projects(request: HttpRequest, service: GatewayService) -> JsonResponse:
 def delete_project(request: HttpRequest, service: GatewayService, project_id: str) -> JsonResponse:
     """DELETE /api/projects/<project_id> -> hapus RECORD project (bukan file)."""
     return _json_response(service.delete_project(project_id))
+
+
+# ---------------------------------------------------------------------------
+# Project Policy / Permission (PROJECT-LOCAL: `<root>/.aether/permissions.json`).
+#
+# Satu sumber policy per project. Mode/scope di-enforce oleh PermissionManager
+# EXISTING; TIDAK ada sistem permission kedua. Kelola dari Sidebar -> Projects
+# (Project Settings / Policy), bukan dari Settings global.
+# ---------------------------------------------------------------------------
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+@_handle
+def project_policy(
+    request: HttpRequest, service: GatewayService, project_id: str
+) -> JsonResponse:
+    """GET/POST /api/projects/<project_id>/policy -> Project Policy (per project).
+
+    GET  -> nilai policy AKTUAL project (`<root>/.aether/permissions.json`).
+    POST -> simpan policy (body: {mode, scope}); hanya project ini terpengaruh.
+    """
+    if request.method == "GET":
+        return _json_response(service.get_project_policy(project_id))
+
+    body = _parse_json_body(request)
+    return _json_response(service.save_project_policy(project_id, body))
 
 
 # ---------------------------------------------------------------------------

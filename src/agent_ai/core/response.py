@@ -22,6 +22,85 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 
+def _usage_int(value: Any) -> Optional[int]:
+    """Angka token valid (int >= 0) atau None (bukan angka/kosong/negatif)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float) and value.is_integer():
+        result = int(value)
+        return result if result >= 0 else None
+    return None
+
+
+def response_usage(raw: Any) -> Optional[Dict[str, int]]:
+    """Token usage AKTUAL dari payload mentah provider (provider-agnostic).
+
+    Membaca HANYA angka usage yang SUDAH dilaporkan provider/API — TIDAK ada
+    estimasi tokenizer lokal dan TIDAK ada counter token baru. Mendukung bentuk
+    yang lazim:
+
+        - OpenAI-compatible : ``usage.prompt_tokens`` / ``completion_tokens`` /
+          ``total_tokens``,
+        - Ollama native     : ``prompt_eval_count`` / ``eval_count`` (top-level),
+        - kunci ternormalisasi AETHER : ``prompt`` / ``completion`` / ``total``.
+
+    Args:
+        raw: payload mentah response provider (dict) atau apa pun.
+
+    Returns:
+        dict dengan subset kunci ``{"prompt", "completion", "total"}`` (int),
+        atau ``None`` bila provider tidak melaporkan usage apa pun. Total
+        dilaporkan apa adanya bila tersedia; bila hanya prompt+completion yang
+        ada, ``total`` diisi hasil penjumlahannya (dari angka provider, bukan
+        estimasi).
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    nested = raw.get("usage")
+    usage: Dict[str, int] = {}
+
+    # 1) Bentuk OpenAI-compatible (usage.*_tokens) dan/atau kunci kanonik.
+    if isinstance(nested, dict):
+        prompt = _usage_int(nested.get("prompt_tokens"))
+        if prompt is None:
+            prompt = _usage_int(nested.get("prompt"))
+        completion = _usage_int(nested.get("completion_tokens"))
+        if completion is None:
+            completion = _usage_int(nested.get("completion"))
+        total = _usage_int(nested.get("total_tokens"))
+        if total is None:
+            total = _usage_int(nested.get("total"))
+        if prompt is not None:
+            usage["prompt"] = prompt
+        if completion is not None:
+            usage["completion"] = completion
+        if total is not None:
+            usage["total"] = total
+
+    # 2) Bentuk Ollama native (top-level prompt_eval_count / eval_count).
+    if "prompt" not in usage:
+        prompt_eval = _usage_int(raw.get("prompt_eval_count"))
+        if prompt_eval is not None:
+            usage["prompt"] = prompt_eval
+    if "completion" not in usage:
+        eval_count = _usage_int(raw.get("eval_count"))
+        if eval_count is not None:
+            usage["completion"] = eval_count
+
+    if not usage:
+        return None
+
+    # Total: pakai angka provider bila ada; selain itu jumlahkan prompt+completion
+    # yang memang dilaporkan provider (bukan estimasi baru).
+    if "total" not in usage and ("prompt" in usage or "completion" in usage):
+        usage["total"] = usage.get("prompt", 0) + usage.get("completion", 0)
+
+    return usage
+
+
 class ActionType(str, Enum):
     """Jenis action dalam sebuah LLMResponse."""
 

@@ -200,6 +200,7 @@ function buildAgentHeader(meta) {
   add("Duration", m.duration);
   add("LLM Rounds", m.llmRounds);
   add("Tool Calls", m.toolCalls);
+  add("Tokens", m.tokens);
   return ["AETHER AGENT ACTIVITY", "", "[AGENT]", ...rows].join("\n");
 }
 

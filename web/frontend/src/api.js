@@ -38,6 +38,22 @@ export function getConfig() {
   return request("/config");
 }
 
+// --- Global Settings (`data/settings.json` — SATU sumber konfigurasi global) ---
+// Halaman Settings HANYA membaca/menulis lewat backend; backend memakai loader
+// konfigurasi AETHER yang sudah ada (tidak ada sumber konfigurasi kedua).
+// GET mengembalikan nilai AKTUAL; POST menggabungkan (merge) perubahan ke file
+// yang sama sehingga setting lain tidak hilang.
+export function getGlobalSettings() {
+  return request("/settings");
+}
+
+export function updateGlobalSettings(payload) {
+  return request("/settings/update", {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
 // --- LLM Config / Settings -------------------------------------------------
 // Halaman Settings HANYA memanggil endpoint konfigurasi LLM backend (yang
 // memakai LLMConfigService AETHER existing). Nilai secret TIDAK pernah
@@ -153,6 +169,24 @@ export function createProject(name, path) {
 
 export function deleteProject(projectId) {
   return request(`/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" });
+}
+
+// --- Project Policy / Permission (PROJECT-LOCAL) ---------------------------
+// Policy permission SETIAP project disimpan project-local di
+// `<root>/.aether/permissions.json` (dibuat dari Default Project Policy saat
+// project dibuat). Di-enforce oleh PermissionManager AETHER existing — BUKAN
+// sistem permission kedua. Dikelola dari Sidebar -> Projects -> Project
+// Settings / Policy.
+// Mode/scope di-enforce oleh Permission Policy Layer AETHER existing.
+export function getProjectPolicy(projectId) {
+  return request(`/projects/${encodeURIComponent(projectId)}/policy`);
+}
+
+export function saveProjectPolicy(projectId, { mode, scope }) {
+  return request(`/projects/${encodeURIComponent(projectId)}/policy`, {
+    method: "POST",
+    body: JSON.stringify({ mode, scope }),
+  });
 }
 
 export function getActiveProject() {

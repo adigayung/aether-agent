@@ -29,6 +29,12 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from agent_ai.core.cancel import CancellationToken
+from agent_ai.projects.permissions import (
+    MODE_OPTIONS,
+    SCOPE_OPTIONS,
+    normalize_mode,
+    normalize_scope,
+)
 from agent_ai.projects.registry import (
     ProjectNotFoundError,
     ProjectRegistry,
@@ -367,6 +373,34 @@ class GatewayService:
         return {"instance_id": "", "model_id": ""}
 
     # ------------------------------------------------------------------ #
+    # Global Settings (`data/settings.json` — SATU sumber konfigurasi global)
+    #
+    # Gateway HANYA meneruskan baca/tulis ke loader konfigurasi AETHER yang
+    # sudah ada (`agent_ai.config.settings`). TIDAK ada skema/file konfigurasi
+    # kedua: `data/settings.json` tetap sumber tunggal, dan penulisan bersifat
+    # MERGE (key lain tidak hilang).
+    # ------------------------------------------------------------------ #
+    def get_global_settings(self) -> Dict[str, Any]:
+        """Nilai aktual konfigurasi global user-facing (dari `data/settings.json`)."""
+        from agent_ai.config.settings import global_settings
+
+        return {"settings": global_settings()}
+
+    def update_global_settings(self, updates: Dict[str, Any]) -> Dict[str, Any]:
+        """Simpan perubahan konfigurasi global (deep-merge, tanpa menghapus key).
+
+        Raises:
+            ValidationError: payload tidak valid (tipe/rentang/key tak dikenal).
+        """
+        from agent_ai.config.settings import SettingsWriteError, update_global_settings
+
+        try:
+            updated = update_global_settings(updates if isinstance(updates, dict) else {})
+        except SettingsWriteError as exc:
+            raise ValidationError(str(exc)) from exc
+        return {"settings": updated}
+
+    # ------------------------------------------------------------------ #
     # LLM Config (halaman Settings; LLMConfigService AETHER existing)
     #
     # Gateway HANYA memanggil facade CRUD konfigurasi LLM AETHER
@@ -689,6 +723,121 @@ class GatewayService:
         if not deleted:
             raise NotFoundError(f"Project '{project_id}' tidak ditemukan.")
         return {"deleted": True, "id": project_id}
+
+    # ------------------------------------------------------------------ #
+    # Project Policy / Permission (PROJECT-LOCAL)
+    #
+    # Gateway HANYA mengorkestrasi: policy disimpan di
+    # `<root project target>/.aether/permissions.json` (project-local) memakai
+    # `ProjectPermissionStore` AETHER. TIDAK ada sistem permission kedua:
+    # mode/scope dipetakan ke `PermissionConfig`/`PolicyMode` existing dan
+    # di-enforce oleh PermissionManager yang sudah ada.
+    # ------------------------------------------------------------------ #
+    def _project_policy_store(self, project_id: str):
+        """Store policy project-local untuk project_id (root divalidasi)."""
+        from agent_ai.projects.permissions import ProjectPermissionStore
+
+        return ProjectPermissionStore(root=self._project_root_by_id(project_id))
+
+    def get_project_policy(self, project_id: str) -> Dict[str, Any]:
+        """GET Project Policy aktual dari `<root>/.aether/permissions.json`.
+
+        Mengembalikan nilai policy AKTUAL project tersebut (bukan default
+        global). Bila file belum ada, default aman & backward-compatible.
+
+        Raises:
+            ValidationError: bila project_id kosong.
+            NotFoundError: bila project tidak ditemukan.
+        """
+        store = self._project_policy_store(project_id)
+        policy = store.load()
+        data = policy.to_ui_dict()
+        data["options"] = {
+            "mode": MODE_OPTIONS,
+            "scope": SCOPE_OPTIONS,
+        }
+        data["path"] = str(store.path)
+        data["exists"] = store.exists()
+        data["project_id"] = str(project_id)
+        return data
+
+    def save_project_policy(
+        self, project_id: str, body: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """POST Project Policy -> simpan ke `<root>/.aether/permissions.json`.
+
+        Policy hanya berlaku untuk project ini (project-local); project lain
+        tidak terpengaruh.
+
+        Raises:
+            ValidationError: bila project_id kosong atau mode/scope tidak valid.
+            NotFoundError: bila project tidak ditemukan.
+        """
+        from agent_ai.projects.permissions import (
+            SCOPE_ALIASES_SET,
+            MODE_ALIASES_SET,
+            ProjectPolicy,
+        )
+
+        body = body or {}
+        # Pemisahan konfigurasi: Global Settings AETHER (`data/settings.json`)
+        # TIDAK boleh masuk lewat endpoint Project Policy. Hanya field project
+        # policy (mode/scope) yang diterima; key global ditolak eksplisit.
+        from agent_ai.config.settings import _EDITABLE_SETTINGS_KEYS
+
+        leaked = set(body) & _EDITABLE_SETTINGS_KEYS
+        if leaked:
+            raise ValidationError(
+                "Field berikut milik Global Settings AETHER (bukan Project "
+                f"Policy): {', '.join(sorted(leaked))}. "
+                "Kelola dari Sidebar -> Settings."
+            )
+
+        raw_mode = body.get("mode")
+        raw_scope = body.get("scope")
+        # Validasi eksplisit: bila field dikirim tetapi tidak valid -> tolak
+        # (jangan diam-diam menurunkan ke default).
+        if raw_mode is not None and str(raw_mode).strip().lower() not in MODE_ALIASES_SET:
+            raise ValidationError(
+                "mode harus salah satu dari allow | ask (require_approval) | deny."
+            )
+        if raw_scope is not None and str(raw_scope).strip().lower() not in SCOPE_ALIASES_SET:
+            raise ValidationError(
+                "scope harus salah satu dari workspace (inside) | outside."
+            )
+
+        mode = normalize_mode(raw_mode)
+        scope = normalize_scope(raw_scope)
+        store = self._project_policy_store(project_id)
+        policy = ProjectPolicy(mode=mode, scope=scope)
+        store.save(policy)
+        data = policy.to_ui_dict()
+        data["options"] = {"mode": MODE_OPTIONS, "scope": SCOPE_OPTIONS}
+        data["path"] = str(store.path)
+        data["exists"] = True
+        data["project_id"] = str(project_id)
+        return data
+
+    def project_permission_config(self, project_id: Optional[str]):
+        """PermissionConfig project-local untuk sebuah project (bila ada).
+
+        Dipakai jalur eksekusi task agar policy project benar-benar berlaku.
+        Mengembalikan None bila tidak ada project / policy gagal dibaca
+        (backward compatible: executor memakai default).
+        """
+        candidate = project_id
+        if not candidate:
+            candidate = self.project_store.get_active_project_id()
+        if not candidate:
+            return None
+        try:
+            store = self._project_policy_store(candidate)
+        except GatewayError:
+            return None
+        try:
+            return store.load().to_permission_config()
+        except Exception:  # noqa: BLE001 - policy tidak boleh crash eksekusi
+            return None
 
     def set_active_project(self, project_id: str) -> Dict[str, Any]:
         """Jadikan project sebagai active project (persistent).
@@ -1463,6 +1612,12 @@ class GatewayService:
         # belum mengenal parameter ini (perilaku text-only tidak berubah).
         if user_parts:
             run_kwargs["user_parts"] = user_parts
+        # Policy project-local (`<root>/.aether/permissions.json`) HANYA untuk
+        # project task ini. Hanya dikirim bila policy ADA, agar verifier/
+        # executor lama yang belum mengenal parameter ini tetap bekerja.
+        project_config = self.project_permission_config(record.project_id)
+        if project_config is not None:
+            run_kwargs["project_permission_config"] = project_config
 
         try:
             summary = self.task_executor.run(prepared, **run_kwargs)

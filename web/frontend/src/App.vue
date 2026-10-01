@@ -25,6 +25,7 @@ import GithubBackupPanel from "./components/GithubBackupPanel.vue";
 import QueuePanel from "./components/QueuePanel.vue";
 import ReportViewer from "./components/ReportViewer.vue";
 import SettingsView from "./components/SettingsView.vue";
+import ProjectPolicyPanel from "./components/ProjectPolicyPanel.vue";
 import ConsultantChat from "./components/ConsultantChat.vue";
 import ExtensionManager from "./components/ExtensionManager.vue";
 import {
@@ -51,6 +52,8 @@ import {
 } from "./api.js";
 import { playStatusSound, resetAudioTracker } from "./audioRegistry.js";
 import { createDurationTicker, eventTimeMs, formatDuration } from "./timeUtils.js";
+// Formatter token usage (Sumber = usage AKTUAL provider; tidak ada estimasi).
+import { formatTokens, formatTokensFull, usageTokens } from "./tokenFormat.js";
 // Copy snapshot Agent Activity (frontend-only formatter, batas 45.000 char).
 import { buildAgentActivityCopy } from "./activityCopy.js";
 // Pemisahan "task yang dipantau (viewed/running)" dari "task yang baru dibuat
@@ -118,6 +121,9 @@ const taskHistory = ref([]);
 const selectedProjectId = ref("");
 // Target konfirmasi hapus project (page Projects, registry-only).
 const projectToDelete = ref(null);
+// Project yang Project Settings / Policy-nya sedang dibuka (page Projects).
+// Policy melekat PER PROJECT (`.aether/permissions.json`) — bukan global.
+const policyProject = ref(null);
 // Konfirmasi Close Project (dialog sebelum benar-benar menutup project).
 const closeProjectConfirm = ref(false);
 // Konfirmasi Stop Task (confirmation layer di depan aksi Stop agent-input).
@@ -290,34 +296,11 @@ const taskModel = computed(() => taskProviderModel.value.model);
 //   - LLM Rounds : jumlah event `provider_request` = jumlah pemanggilan
 //                  LLM/provider AKTUAL pada loop task (1 event = 1 invocation).
 //   - Tool Calls : jumlah event `tool_called` = jumlah eksekusi tool AKTUAL.
-//   - Tokens     : token usage AKTUAL dari provider (payload `usage`) bila
-//                  dilaporkan; TIDAK memakai estimasi tokenizer/string lokal.
-//                  Bila provider belum melaporkan usage -> tampil "—"
-//                  (bukan nilai dummy/hardcoded).
-function usageTokens(payload) {
-  const d = payload || {};
-  const u = d.usage && typeof d.usage === "object" ? d.usage : {};
-  const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
-  const total = num(u.total);
-  if (total != null) return total;
-  // Ollama native: prompt_eval_count + eval_count.
-  const pe = num(u.prompt_eval_count);
-  const ec = num(u.eval_count);
-  if (pe != null || ec != null) return (pe || 0) + (ec || 0);
-  // OpenAI-compatible (dinormalisasi): prompt + completion.
-  const p = num(u.prompt);
-  const c = num(u.completion);
-  if (p != null || c != null) return (p || 0) + (c || 0);
-  return null;
-}
-
-// Format ringkas token usage (angka bisa besar) agar baris meta tetap compact.
-function formatTokens(n) {
-  if (n == null || !Number.isFinite(n)) return "—";
-  if (n < 1000) return String(n);
-  if (n < 1000000) return `${(n / 1000).toFixed(n < 10000 ? 1 : 0)}k`;
-  return `${(n / 1000000).toFixed(1)}M`;
-}
+//   - Tokens     : token usage AKTUAL dari provider (payload `usage` pada
+//                  `provider_response`) bila dilaporkan; TIDAK memakai estimasi
+//                  tokenizer/string lokal. Format angka memakai helper murni
+//                  `./tokenFormat.js` (dapat diuji: tokenFormat.test.mjs).
+//                  Bila provider belum melaporkan usage -> tampil "—".
 
 // REDUCE sederhana atas event yang ditampilkan: nilai ikut lifecycle task
 // (naik saat event baru tiba, diam saat task mencapai status final).
@@ -346,6 +329,13 @@ const taskTelemetry = computed(() => {
 const taskLlmRounds = computed(() => taskTelemetry.value.rounds);
 const taskToolCalls = computed(() => taskTelemetry.value.toolCalls);
 const taskTokensLabel = computed(() => formatTokens(taskTelemetry.value.tokens));
+// Tooltip menampilkan angka PENUH (mis. "140,500,000 tokens") bila provider
+// melaporkan usage; selain itu menjelaskan bahwa provider tidak melaporkan.
+const taskTokensTooltip = computed(() => {
+  const n = taskTelemetry.value.tokens;
+  if (n == null) return "Provider token usage not reported";
+  return `Tokens (actual provider usage): ${formatTokensFull(n)}`;
+});
 const showTaskTelemetry = computed(
   () =>
     Boolean(task.id) &&
@@ -384,6 +374,7 @@ async function copyAgentActivity() {
       execution: taskExecutionLabel.value,
       llmRounds: taskLlmRounds.value,
       toolCalls: taskToolCalls.value,
+      tokens: taskTokensLabel.value,
     },
   });
   if (!text) return;
@@ -1415,6 +1406,20 @@ function cancelProjectDelete() {
   projectToDelete.value = null;
 }
 
+// --- Projects page: Project Settings / Policy (PROJECT-LOCAL) --------------
+// Policy disimpan per project di `<root>/.aether/permissions.json`. Hanya
+// project yang dipilih yang terpengaruh; project lain tidak berubah.
+function openProjectPolicy(project) {
+  if (!project || !project.id) return;
+  error.value = "";
+  notice.value = "";
+  policyProject.value = project;
+}
+
+function closeProjectPolicy() {
+  policyProject.value = null;
+}
+
 async function confirmProjectDelete() {
   const project = projectToDelete.value;
   if (!project) return;
@@ -1820,7 +1825,7 @@ onBeforeUnmount(() => {
                         <span class="tm-sep">·</span>
                         <span
                           class="tm-item"
-                          :title="taskTelemetry.tokens == null ? 'Provider token usage not reported' : 'Actual provider token usage'"
+                          :title="taskTokensTooltip"
                         >
                           <svg class="tm-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/></svg>
                           <span class="tm-key">Tokens</span>
@@ -2091,6 +2096,17 @@ onBeforeUnmount(() => {
                   </td>
                   <td><span class="mono">{{ p.root || p.path }}</span></td>
                   <td class="td-actions">
+                    <!-- Project Settings / Policy: policy melekat PER PROJECT
+                         (`.aether/permissions.json`), bukan setting global. -->
+                    <button
+                      type="button"
+                      class="icon-btn policy"
+                      title="Project Settings / Policy"
+                      aria-label="Project Settings / Policy"
+                      @click.stop="openProjectPolicy(p)"
+                    >
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H1a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H7a1.7 1.7 0 0 0 1-1.5V1a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V7a1.7 1.7 0 0 0 1.5 1H23a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+                    </button>
                     <!-- Hapus = hapus RECORD dari daftar AETHER saja.
                          File/folder project di disk TIDAK dihapus. -->
                     <button
@@ -2106,6 +2122,25 @@ onBeforeUnmount(() => {
                 </tr>
               </tbody>
             </table>
+
+            <!-- Project Settings / Policy: muncul saat sebuah project dipilih
+                 dari aksi "Policy" pada baris project. Nilai yang ditampilkan
+                 adalah policy AKTUAL project tersebut (`.aether/permissions.json`). -->
+            <div v-if="policyProject" class="pp-panel-wrap">
+              <div class="pp-panel-head">
+                <div>
+                  <div class="title">Project Settings / Policy</div>
+                  <div class="desc">
+                    Permission policy for <span class="mono">{{ policyProject.name }}</span>
+                    — saved per project.
+                  </div>
+                </div>
+                <button type="button" class="btn-aether btn-ghost-a" @click="closeProjectPolicy">
+                  Close
+                </button>
+              </div>
+              <ProjectPolicyPanel :key="policyProject.id" :project="policyProject" />
+            </div>
 
             <!-- Detail project & konfigurasi GitHub Backup telah dipindah
                  ke panel Backup (activeNav === 'backup'). -->

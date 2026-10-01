@@ -951,6 +951,27 @@ class AgentOrchestrator:
         model = getattr(config, "model", None)
         return model or ""
 
+    def _provider_response_payload(self, response: LLMResponse) -> Dict[str, Any]:
+        """Payload event `provider_response` untuk satu response LLM sukses.
+
+        Menyertakan `usage` (token AKTUAL) BILA provider melaporkannya pada
+        response mentah — TIDAK ada estimasi/counter token baru. Bila provider
+        tidak melaporkan usage, field `usage` TIDAK disertakan sehingga UI
+        menampilkan "—" (bukan angka dummy).
+        """
+        from agent_ai.core.response import response_usage
+
+        payload: Dict[str, Any] = {
+            "provider": response.provider or getattr(self.provider, "name", ""),
+            "model": response.model or self._model_name(),
+            "finish_reason": response.finish_reason.value,
+            "tool_calls": len(response.tool_calls()),
+        }
+        usage = response_usage(getattr(response, "raw", None))
+        if usage:
+            payload["usage"] = usage
+        return payload
+
     @staticmethod
     def _extract_commentary(response: LLMResponse) -> str:
         """Ambil commentary natural dari response LLM (bila bermakna).
@@ -1856,12 +1877,7 @@ class AgentOrchestrator:
             emit_event(
                 self.event_sink,
                 "provider_response",
-                {
-                    "provider": response.provider or getattr(self.provider, "name", ""),
-                    "model": response.model or self._model_name(),
-                    "finish_reason": response.finish_reason.value,
-                    "tool_calls": len(response.tool_calls()),
-                },
+                self._provider_response_payload(response),
             )
 
             # Commentary natural dari LLM (bukan log tool). Hanya diemit bila
@@ -2167,12 +2183,7 @@ class AgentOrchestrator:
             emit_event(
                 self.event_sink,
                 "provider_response",
-                {
-                    "provider": response.provider or getattr(self.provider, "name", ""),
-                    "model": response.model or self._model_name(),
-                    "finish_reason": response.finish_reason.value,
-                    "tool_calls": len(response.tool_calls()),
-                },
+                self._provider_response_payload(response),
             )
 
             # Cooperative cancellation (safe boundary): pembatalan yang datang

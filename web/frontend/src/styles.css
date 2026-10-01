@@ -2550,6 +2550,28 @@ tr:hover .q-copy-btn.hist-copy {
   border-color: rgba(248, 113, 113, 0.45);
   background: rgba(248, 113, 113, 0.12);
 }
+.icon-btn.policy:hover {
+  color: #c4b5fd;
+  border-color: var(--accent);
+  background: rgba(139, 92, 246, 0.14);
+}
+
+/* Project Settings / Policy (page Projects): panel inline per project. */
+.pp-panel-wrap {
+  margin: 18px 0 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+  background: rgba(255, 255, 255, 0.012);
+}
+.pp-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
 .kv {
   display: flex;
   align-items: center;

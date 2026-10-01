@@ -7,7 +7,7 @@
 //
 // Keamanan: backend TIDAK pernah mengirim nilai secret .env — hanya versi
 // `masked`. Frontend tidak menyimpan/menampilkan nilai API key.
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 import {
   getLLMConfig,
   createLLMProvider,
@@ -20,11 +20,22 @@ import {
   deleteLLMCredential,
   testLLMProvider,
 } from "../api";
+import GlobalSettingsPanel from "./GlobalSettingsPanel.vue";
+import AgentSettingsPanel from "./AgentSettingsPanel.vue";
 
 const props = defineProps({
   // Konfigurasi runtime aktif dari AETHER (provider/model/mode + instance).
   config: { type: Object, default: () => ({}) },
 });
+
+// Halaman Settings dipisah menjadi SECTION (tab) agar tidak menjadi satu
+// halaman panjang:
+//   - "general"   : Global Settings AETHER (`data/settings.json`).
+//   - "agent"     : System Prompt / Agent Instructions Agent
+//                   (`data/settings.json` -> `agent.system_prompt`).
+//   - "providers" : konfigurasi provider/model/credential (LLM Config AETHER).
+// Default = General (konfigurasi global aplikasi).
+const activeTab = ref("general");
 
 const loading = ref(false);
 const busy = ref(false);
@@ -256,10 +267,63 @@ function removeCredential(c) {
   run(() => deleteLLMCredential(c.name, used), "Credential dihapus.");
 }
 
-onMounted(load);
+onMounted(() => {
+  // Muat konfigurasi LLM hanya saat section Providers dibuka (lazy): tab
+  // default adalah Global Settings, sehingga jalur read-only tidak terpanggil
+  // tanpa perlu (perilaku LLM Config sendiri tidak diubah).
+  if (activeTab.value === "providers") load();
+});
+
+watch(activeTab, (tab) => {
+  if (tab === "providers" && !providers.value.length && !loading.value) load();
+});
 </script>
 
 <template>
+  <!-- Settings dipisah per SECTION (tab) agar tidak menjadi satu halaman
+       panjang: "General" (Global Settings `data/settings.json`) dan
+       "Providers" (LLM Config AETHER). -->
+  <div class="sv-tabs" role="tablist" aria-label="Settings sections">
+    <button
+      class="sv-tab"
+      :class="{ active: activeTab === 'general' }"
+      type="button"
+      role="tab"
+      :aria-selected="activeTab === 'general'"
+      @click="activeTab = 'general'"
+    >
+      General
+    </button>
+    <button
+      class="sv-tab"
+      :class="{ active: activeTab === 'agent' }"
+      type="button"
+      role="tab"
+      :aria-selected="activeTab === 'agent'"
+      @click="activeTab = 'agent'"
+    >
+      Agent
+    </button>
+    <button
+      class="sv-tab"
+      :class="{ active: activeTab === 'providers' }"
+      type="button"
+      role="tab"
+      :aria-selected="activeTab === 'providers'"
+      @click="activeTab = 'providers'"
+    >
+      Providers
+    </button>
+  </div>
+
+  <!-- ================= GENERAL: Global Settings AETHER ================= -->
+  <GlobalSettingsPanel v-if="activeTab === 'general'" />
+
+  <!-- ================= AGENT: System Prompt Agent ================= -->
+  <AgentSettingsPanel v-else-if="activeTab === 'agent'" />
+
+  <!-- ================= PROVIDERS: LLM Config AETHER ================= -->
+  <template v-else>
   <!-- Runtime aktif (read-only summary dari AETHER). -->
   <section class="panel">
     <div class="panel-head">
@@ -487,9 +551,44 @@ onMounted(load);
       </div>
     </div>
   </section>
+  </template>
 </template>
 
 <style scoped>
+/* Settings sections (tab): General | Providers. Reuse seg-tabs AETHER. */
+.sv-tabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.22);
+  margin-bottom: 14px;
+}
+.sv-tab {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.sv-tab:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.045);
+}
+.sv-tab.active {
+  color: var(--text);
+  background: rgba(139, 92, 246, 0.2);
+  box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.32);
+}
+
 .sv-alert {
   padding: 10px 12px;
   border-radius: 9px;

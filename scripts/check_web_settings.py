@@ -365,6 +365,7 @@ def _run(env_path: Path, cleanup: list[str]) -> int:
         bundle = _read(resp_js)
         assert "API Credentials" in bundle, "bundle tidak memuat SettingsView terbaru"
         assert "Active Provider" in bundle, "bundle tidak memuat SettingsView terbaru"
+        assert "System Prompt Agent" in bundle, "bundle tidak memuat tab Settings -> Agent"
         assert (
             "Provider, model, and workspace currently used by AETHER" not in bundle
         ), "bundle masih memuat UI Settings lama!"

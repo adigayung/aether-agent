@@ -18,6 +18,13 @@ from api import views
 urlpatterns = [
     path("health", views.health, name="health"),
     path("config", views.config, name="config"),
+    # Global Settings (sumber tunggal `data/settings.json`; UI Sidebar Settings).
+    path("settings", views.global_settings, name="global_settings"),
+    path(
+        "settings/update",
+        views.global_settings_update,
+        name="global_settings_update",
+    ),
     # LLM Config / Settings (LLMConfigService AETHER existing).
     path("llm/config", views.llm_config, name="llm_config"),
     path("llm/credentials", views.llm_credentials, name="llm_credentials"),
@@ -58,6 +65,13 @@ urlpatterns = [
         "projects/<str:project_id>/github/restore",
         views.project_github_restore,
         name="project_github_restore",
+    ),
+    # Project Policy / Permission (PROJECT-LOCAL). Mendahului
+    # "projects/<str:project_id>" agar sub-path literal tidak di-shadow.
+    path(
+        "projects/<str:project_id>/policy",
+        views.project_policy,
+        name="project_policy",
     ),
     path("projects/<str:project_id>", views.delete_project, name="delete_project"),
     path("active-project", views.active_project, name="active_project"),

@@ -36,6 +36,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from agent_ai.core.executor import ToolExecutor
 from agent_ai.permission.manager import PermissionManager
+from agent_ai.permission.policy import PermissionPolicy
 from agent_ai.runtime.models import RuntimeStatus
 from agent_ai.runtime.runtime import AgentRuntime
 from agent_ai.session.events import EventType, make_event
@@ -167,6 +168,7 @@ class TaskExecutor:
         model_name: Optional[str] = None,
         cancel_token: Optional[Any] = None,
         change_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
+        permission_manager: Optional[PermissionManager] = None,
     ) -> AgentRuntime:
         """Rakit AgentRuntime dengan ToolExecutor yang punya PermissionManager.
 
@@ -191,7 +193,13 @@ class TaskExecutor:
         filesystem event SEGERA setelah operasi file berhasil (Explorer/
         Changes), tanpa menunggu task selesai. Bila None, tidak ada event live
         (backward compatible).
+
+        permission_manager: PermissionManager efektif opsional. Bila None,
+        memakai `self.permission_manager` (perilaku existing). Dipakai untuk
+        memasang policy project-local (`<root>/.aether/permissions.json`) pada
+        perintah task project tertentu TANPA mengubah jalur lain.
         """
+        effective_pm = permission_manager or self.permission_manager
         if workspace_root:
             from agent_ai.tools.registry import build_registry
 
@@ -212,10 +220,10 @@ class TaskExecutor:
                 cancel_token=cancel_token,
             )
             executor = ToolExecutor(
-                registry=registry, permission_manager=self.permission_manager
+                registry=registry, permission_manager=effective_pm
             )
         else:
-            executor = ToolExecutor(permission_manager=self.permission_manager)
+            executor = ToolExecutor(permission_manager=effective_pm)
 
         options = None
         if model_name:
@@ -292,6 +300,7 @@ class TaskExecutor:
         model_id: Optional[str] = None,
         cancel_token: Optional[Any] = None,
         user_parts: Optional[List[Dict[str, Any]]] = None,
+        project_permission_config: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Jalankan PreparedTask lewat AETHER Runtime (synchronous).
 
@@ -320,6 +329,11 @@ class TaskExecutor:
                 image, format internal AETHER provider-agnostic). Diteruskan ke
                 AgentRuntime -> AgentOrchestrator (user_parts). Kosong (default)
                 = text-only tidak berubah.
+            project_permission_config: PermissionConfig project-local opsional
+                (dari `<root>/.aether/permissions.json`). Bila diisi, policy
+                di-enforce oleh PermissionManager EXISTING untuk task project
+                ini saja (project lain tidak terpengaruh). Bila None, perilaku
+                default tidak berubah.
 
         Returns:
             Ringkasan hasil: {"status", "result", "error", "iterations"}.
@@ -384,6 +398,17 @@ class TaskExecutor:
             provider = self._build_provider(
                 provider_name, resolved_config=resolved_config
             )
+            # Policy project-local (bila ada) di-enforce oleh PermissionManager
+            # EXISTING. Dibangun hanya untuk task ini; project lain tidak
+            # terpengaruh (policy default tetap dipakai bila None).
+            permissions = self.permission_manager
+            if project_permission_config is not None:
+                try:
+                    permissions = PermissionManager(
+                        policy=PermissionPolicy(config=project_permission_config)
+                    )
+                except Exception:  # noqa: BLE001 - fallback ke policy default
+                    permissions = self.permission_manager
             runtime = self._build_runtime(
                 provider,
                 session_id=session_id,
@@ -391,6 +416,7 @@ class TaskExecutor:
                 model_name=effective_model,
                 cancel_token=cancel_token,
                 change_sink=_change_sink,
+                permission_manager=permissions,
             )
             result = runtime.run(
                 prepared,
