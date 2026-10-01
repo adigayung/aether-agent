@@ -616,6 +616,12 @@ watch(activeNav, (nav) => {
     refreshTaskHistory();
   }
 });
+
+// Refresh task list when active project changes
+watch(selectedProjectId, () => {
+  refreshTasks();
+  refreshTaskHistory();
+});
 function openConsultant() {
   consultantOpen.value = true;
 }
@@ -1078,9 +1084,12 @@ function resetWorkspace() {
 }
 
 // --- Data loading ----------------------------------------------------------
+let refreshTasksGen = 0;
 async function refreshTasks() {
+  const cur = ++refreshTasksGen;
   try {
-    const data = await listTasks();
+    const data = await listTasks(selectedProjectId.value || null);
+    if (cur !== refreshTasksGen) return;
     tasks.value = data.tasks || [];
   } catch {
     // Endpoint list mungkin belum tersedia; UI tetap aman.
@@ -1341,6 +1350,9 @@ async function openProject(projectId) {
     const data = await setActiveProject(projectId);
     activeProject.value = data.active_project || null;
     selectedProjectId.value = projectId;
+    // Refresh task list dan history saat project berubah
+    await refreshTasks();
+    await refreshTaskHistory();
     await enterWorkbench();
   } catch (e) {
     error.value = e.message || "Failed to open project.";
@@ -1920,6 +1932,7 @@ onBeforeUnmount(() => {
         <div class="ws-col right">
           <QueuePanel
             class="wb-queue"
+            :project-id="selectedProjectId || null"
             :default-collapsed="true"
             :refresh-key="queueRefresh"
             @stop-task="stopQueueTask"
@@ -1983,6 +1996,7 @@ onBeforeUnmount(() => {
             <QueuePanel
               v-show="taskPageMode === 'queue'"
               class="page-queue"
+              :project-id="selectedProjectId || null"
               :refresh-key="queueRefresh"
               @stop-task="stopQueueTask"
               @view-task="viewQueueTask"

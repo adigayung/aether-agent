@@ -236,8 +236,9 @@ export function cancelTask(taskId) {
 }
 
 // GET /api/tasks -> daftar task (history). Backend in-memory (#53).
-export function listTasks() {
-  return request("/tasks");
+export function listTasks(projectId = null) {
+  const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+  return request(`/tasks${qs}`);
 }
 
 // --- Task Queue (TAMPILAN/kontrol UI antrian) ------------------------------
@@ -245,8 +246,9 @@ export function listTasks() {
 // dengan GET /api/tasks. Ini BUKAN subsystem kedua.
 
 // GET /api/tasks/queue -> antrian task aktif (pending/running/disabled).
-export function listTaskQueue() {
-  return request("/tasks/queue");
+export function listTaskQueue(projectId = null) {
+  const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+  return request(`/tasks/queue${qs}`);
 }
 
 // POST /api/tasks/queue/<id>/disable -> tandai task jangan dieksekusi.

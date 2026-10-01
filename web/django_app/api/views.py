@@ -443,7 +443,8 @@ def tasks(request: HttpRequest, service: GatewayService) -> JsonResponse:
     POST memvalidasi + menyiapkan task via AETHER (TaskPreparation).
     """
     if request.method == "GET":
-        return _json_response({"tasks": service.list_tasks()})
+        project_id = request.GET.get("project_id") or None
+        return _json_response({"tasks": service.list_tasks(project_id=project_id)})
 
     body = _parse_json_body(request)
     task = body.get("task")
@@ -501,7 +502,8 @@ def task_queue(request: HttpRequest, service: GatewayService) -> JsonResponse:
     Satu queue GLOBAL AETHER: sumber data tetap TaskRecord in-memory yang sama
     dengan GET /api/tasks. Endpoint ini hanya memproyeksikan status antrian.
     """
-    return _json_response({"tasks": service.list_queue()})
+    project_id = request.GET.get("project_id") or None
+    return _json_response({"tasks": service.list_queue(project_id=project_id)})
 
 
 @csrf_exempt

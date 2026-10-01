@@ -20,6 +20,8 @@ import {
 const props = defineProps({
   // Penanda refresh dari parent (mis. setelah Run Task / event terminal).
   refreshKey: { type: Number, default: 0 },
+  // Project aktif; bila diset, panel hanya menampilkan task milik project ini.
+  projectId: { type: String, default: null },
   // Default state collapsed saat komponen dipasang. Workbench memakai
   // `true` (TASK tertutup saat pertama dibuka); Consultant tetap `false`
   // agar perilaku panel TASKS di sana tidak berubah.
@@ -34,6 +36,7 @@ const error = ref("");
 // State hanya di frontend selama sesi (tanpa persistence backend/localStorage).
 const collapsed = ref(props.defaultCollapsed);
 const loading = ref(false);
+let loadGeneration = 0;
 
 // Context menu state (reuse pola .ctx-menu existing di project).
 const ctxOpen = ref(false);
@@ -97,16 +100,21 @@ async function copyPrompt(taskItem) {
 }
 
 async function load() {
+  const currentGen = ++loadGeneration;
   loading.value = true;
   try {
-    const data = await listTaskQueue();
+    const data = await listTaskQueue(props.projectId || null);
+    if (currentGen !== loadGeneration) return;
     tasks.value = data.tasks || [];
     error.value = "";
   } catch (e) {
+    if (currentGen !== loadGeneration) return;
     // Endpoint queue mungkin belum tersedia; UI tetap aman.
     error.value = "";
   } finally {
-    loading.value = false;
+    if (currentGen === loadGeneration) {
+      loading.value = false;
+    }
   }
 }
 
@@ -234,6 +242,11 @@ onBeforeUnmount(() => {
 
 watch(
   () => props.refreshKey,
+  () => load()
+);
+
+watch(
+  () => props.projectId,
   () => load()
 );
 </script>

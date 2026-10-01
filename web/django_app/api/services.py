@@ -1594,9 +1594,16 @@ class GatewayService:
             raise NotFoundError(f"Task '{task_id}' tidak ditemukan.")
         return record.to_dict()
 
-    def list_tasks(self) -> List[Dict[str, Any]]:
-        """Daftar task yang dibuat (in-memory)."""
+    def list_tasks(self, project_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Daftar task yang dibuat (in-memory).
+        
+        Args:
+            project_id: Filter task berdasarkan project (opsional). Bila None,
+                mengembalikan semua task (perilaku lama untuk backward compat).
+        """
         with self._lock:
+            if project_id is not None:
+                return [r.to_dict() for r in self._tasks.values() if r.project_id == project_id]
             return [r.to_dict() for r in self._tasks.values()]
 
     # ------------------------------------------------------------------ #
@@ -1608,15 +1615,33 @@ class GatewayService:
     # kedua: sumber data tetap self._tasks (satu queue GLOBAL AETHER).
     _QUEUE_ACTIVE = ("pending", "running", "disabled")
 
-    def list_queue(self) -> List[Dict[str, Any]]:
+    def list_queue(self, project_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Daftar antrian task (aktif saja: pending/running/disabled).
 
-        Task terminal (queue_state == "done") TIDAK masuk antrian; riwayatnya
-        tetap tersedia lewat Task History API (existing).
+        Filter opsional berdasarkan project_id (bila diberikan) untuk diterapkan pada
+        task yang eligible (pending/running/disabled). Task yang tidak memiliki
+        project_id (legacy) dipertahankan untuk ditampilkan bila filter tidak
+        diset.
+
+        Args:
+            project_id: Filter antrian per project (opsional).
+
+        Returns:
+            Daftar dict task yang terfilter.
         """
         with self._lock:
-            records = sorted(self._tasks.values(), key=lambda r: r.queue_order)
-        return [r.to_dict() for r in records if r.queue_state in self._QUEUE_ACTIVE]
+            if project_id is not None:
+                records = [
+                    r for r in self._tasks.values()
+                    if r.queue_state in self._QUEUE_ACTIVE and r.project_id == project_id
+                ]
+            else:
+                records = [
+                    r for r in self._tasks.values() if r.queue_state in self._QUEUE_ACTIVE
+                ]
+            # Urutkan menurut queue_order / FIFO.
+            records.sort(key=lambda r: r.queue_order)
+            return [r.to_dict() for r in records]
 
     def set_queue_state(self, task_id: str, queue_state: str) -> Dict[str, Any]:
         """Set queue_state (disable/enable). TIDAK menyentuh eksekusi Agent.
