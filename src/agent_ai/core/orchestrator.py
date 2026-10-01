@@ -87,6 +87,40 @@ _CONTINUOUS_SAFETY_MAX_STEPS = 1000
 #: pengetahuan. Heuristik sederhana tanpa tokenizer eksternal.
 _KNOWLEDGE_CHARS_PER_TOKEN = 4
 
+#: Total maksimum attempt untuk SATU pemanggilan logis LLM/provider:
+#: 1 attempt awal + 3 retry tambahan = 4 attempt.
+#:
+#: Ini resilience layer GENERIK di atas mekanisme provider/model yang ada
+#: (infrastructure retry 429/5xx tetap berlaku DI DALAM satu attempt). Retry di
+#: sini HANYA mengulang LLM/provider call yang gagal pada iterasi berjalan —
+#: TIDAK mengulang tool, plan, langkah, atau lifecycle yang sudah berhasil, dan
+#: TIDAK meng-hardcode provider/model/endpoint/backend tertentu. Dipakai Agent
+#: maupun Consultant karena keduanya melewati `run_continuous_loop`.
+_MAX_PROVIDER_ATTEMPTS = 4
+
+#: Pola credential yang disamarkan dari teks error provider sebelum dikirim ke
+#: telemetry/activity (jaring pengaman agar secret tidak bocor ke log/UI).
+_CREDENTIAL_PATTERNS = re.compile(
+    r"(?i)("
+    r"bearer\s+[A-Za-z0-9._\-]+"
+    r"|sk-[A-Za-z0-9]{8,}"
+    r"|api[_-]?key['\"]?\s*[:=]\s*['\"]?[A-Za-z0-9._\-]+"
+    r")"
+)
+
+
+def _redact_credentials(text: Any) -> str:
+    """Samarkan pola credential pada teks (untuk telemetry/activity).
+
+    Best-effort & deterministik: menyasar pola umum (header ``Bearer <token>``,
+    prefix kunci ``sk-...``, dan ``api_key=...``). Provider AETHER tidak pernah
+    menambahkan header/API key ke detail error; fungsi ini sekadar jaring
+    pengaman agar retry telemetry tidak pernah membocorkan secret.
+    """
+    if text is None:
+        return ""
+    return _CREDENTIAL_PATTERNS.sub("[redacted]", str(text))
+
 
 @dataclass
 class OrchestratorResult:
@@ -1398,6 +1432,132 @@ class AgentOrchestrator:
         return decision
 
     # ------------------------------------------------------------------ #
+    # Provider call resilience (lifecycle: retry SEBELUM menutup lifecycle)
+    # ------------------------------------------------------------------ #
+    def _generate_with_retry(
+        self,
+        *,
+        loop: AgentLoop,
+        messages: List[Any],
+        options: Optional[GenerateOptions],
+        tools: Optional[List[ToolDefinition]],
+    ) -> Optional[LLMResponse]:
+        """Panggil `provider.generate` dengan retry provider-level (bounded).
+
+        Kontrak GLOBAL (provider/model apa pun; Agent maupun Consultant):
+            - Error pada LLM/provider call TIDAK langsung menutup lifecycle yang
+              sudah aktif. Call diulang sampai `_MAX_PROVIDER_ATTEMPTS` attempt
+              total: 1 attempt awal + 3 retry tambahan.
+            - Retry HANYA mengulang PEMANGGILAN PROVIDER yang gagal. Tool, plan,
+              langkah, dan riwayat yang sudah berhasil TIDAK diulang: helper ini
+              dipanggil SEBELUM tool apa pun dieksekusi pada iterasi tersebut.
+            - Bila salah satu attempt berhasil, response dikembalikan dan loop
+              lanjut normal dari state eksekusi saat itu. Completion tetap murni
+              keputusan LLM; helper ini TIDAK menyelesaikan task.
+            - Bila SELURUH attempt gagal, `loop` di-`fail()` (lifecycle ditutup
+              sebagai FAILED) dan `None` dikembalikan.
+            - Cancellation user BERPRIORITAS: bila pembatalan terdeteksi saat
+              retry, retry dihentikan, `loop` di-`cancel()` (lifecycle ditutup
+              sebagai CANCELLED), dan `None` dikembalikan.
+            - Telemetry retry diemit per attempt (provider/model/attempt +
+              pesan error yang SUDAH disanitasi; TANPA credential/secret).
+
+        Retry ini murni resilience layer: mekanisme provider/model yang ada
+        (mis. infrastructure retry 429/5xx di layer provider dan Provider
+        Fallback) TIDAK diubah — retry di sini berada di atasnya dan tidak
+        meng-hardcode provider/model/endpoint/backend tertentu.
+
+        Returns:
+            `LLMResponse` bila ada attempt yang berhasil; `None` bila seluruh
+            attempt gagal atau dibatalkan (loop sudah difinalkan oleh method ini).
+        """
+        provider_name = getattr(self.provider, "name", "")
+        model_name = self._model_name()
+        max_attempts = _MAX_PROVIDER_ATTEMPTS
+        last_error: Optional[BaseException] = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                gen_result = self.provider.generate(
+                    messages=messages,
+                    options=options,
+                    tools=tools or None,
+                    tool_choice=self.tool_choice,
+                )
+                response: LLMResponse = self.provider.normalize_response(gen_result)
+            except Exception as exc:  # noqa: BLE001 - provider error -> retry lifecycle
+                last_error = exc
+                emit_event(
+                    self.event_sink,
+                    "provider_response",
+                    {
+                        "provider": provider_name,
+                        "model": model_name,
+                        "error": _redact_credentials(f"{type(exc).__name__}: {exc}"),
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                    },
+                )
+                # Cancellation user punya prioritas tertinggi: hentikan retry.
+                if self._cancel_requested():
+                    loop.cancel(self._cancel_reason())
+                    return None
+                # Kuota attempt habis -> lifecycle ditutup sebagai FAILED.
+                if attempt >= max_attempts:
+                    break
+                # Telemetry: attempt gagal, akan dicoba lagi (no credential).
+                emit_event(
+                    self.event_sink,
+                    "provider_retry",
+                    {
+                        "provider": provider_name,
+                        "model": model_name,
+                        "attempt": attempt,
+                        "next_attempt": attempt + 1,
+                        "max_attempts": max_attempts,
+                        "error_type": type(exc).__name__,
+                        "error": _redact_credentials(str(exc)),
+                    },
+                )
+                continue
+
+            # Sukses (attempt awal atau salah satu retry).
+            if attempt > 1:
+                emit_event(
+                    self.event_sink,
+                    "provider_retry_succeeded",
+                    {
+                        "provider": provider_name,
+                        "model": model_name,
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                    },
+                )
+            return response
+
+        # SELURUH attempt gagal -> lifecycle FAILED (ditutup setelah retry habis).
+        error_type = type(last_error).__name__ if last_error is not None else "Error"
+        error_text = _redact_credentials(
+            str(last_error) if last_error is not None else ""
+        )
+        emit_event(
+            self.event_sink,
+            "provider_retry_exhausted",
+            {
+                "provider": provider_name,
+                "model": model_name,
+                "attempts": max_attempts,
+                "error_type": error_type,
+            },
+        )
+        loop.fail(
+            f"Provider '{provider_name}' gagal setelah {max_attempts} attempt "
+            f"(1 attempt awal + {max_attempts - 1} retry): "
+            f"{error_type}: {error_text}"
+        )
+        return None
+
+    # ------------------------------------------------------------------ #
     # Main loop
     # ------------------------------------------------------------------ #
     def run(
@@ -1778,28 +1938,22 @@ class AgentOrchestrator:
                     **context_stats,
                 },
             )
-            try:
-                gen_result = self.provider.generate(
-                    messages=messages,
-                    options=effective_options,
-                    tools=tools or None,
-                    tool_choice=self.tool_choice,
-                )
-                response: LLMResponse = self.provider.normalize_response(gen_result)
-            except Exception as exc:  # noqa: BLE001 - provider error -> FAILED jelas
-                provider_error = True
-                emit_event(
-                    self.event_sink,
-                    "provider_response",
-                    {
-                        "provider": getattr(self.provider, "name", ""),
-                        "model": self._model_name(),
-                        "error": f"{type(exc).__name__}: {exc}",
-                    },
-                )
-                # Error handling existing: hentikan loop dengan pesan jelas,
-                # tanpa mengarang keputusan reasoning pengganti LLM.
-                loop.fail(f"{type(exc).__name__}: {exc}")
+            # Provider call dengan retry lifecycle (1 attempt awal + 3 retry).
+            # Error provider TIDAK menutup lifecycle sebelum retry habis; helper
+            # ini juga menangani cancellation user dan telemetry retry. Completion
+            # tetap murni keputusan LLM (helper tidak menyelesaikan task).
+            response = self._generate_with_retry(
+                loop=loop,
+                messages=messages,
+                options=effective_options,
+                tools=tools,
+            )
+            if response is None:
+                # Lifecycle sudah difinalkan oleh helper: FAILED (seluruh attempt
+                # gagal) atau CANCELLED (user). provider_error hanya untuk
+                # kegagalan provider nyata (bukan cancellation).
+                if loop.status != AgentStatus.CANCELLED:
+                    provider_error = True
                 break
 
             emit_event(
