@@ -1764,8 +1764,10 @@ class GatewayService:
         terbaru -> terlama berdasarkan `last_timestamp` dari isi log
         (BUKAN nama file / UUID / urutan filesystem).
 
-        Pencarian mencakup seluruh candidate root (project_id/active project,
-        AETHER workspace, project terdaftar) lalu di-dedupe per task_id.
+        Isolasi: bila `project_id` diberikan, HANYA log di root project itu yang
+        dibaca (task project lain tidak pernah bocor). Bila `project_id` tidak
+        diberikan, pencarian mencakup seluruh candidate root (project_id/active
+        project, AETHER workspace, project terdaftar) lalu di-dedupe per task_id.
 
         Args:
             project_id: project terkait (opsional).
@@ -1775,8 +1777,24 @@ class GatewayService:
         """
         from agent_ai.projects.aether_store import AetherProjectStore, TaskLogReader
 
+        # Isolasi per project: bila project_id diberikan, HANYA baca root project
+        # ini. JANGAN menambahkan repo root AETHER / project terdaftar lain
+        # (perilaku `_candidate_log_roots`), karena itu membuat task milik
+        # project lain ikut muncul di Sidebar -> Tasks (task "stale" dari
+        # project sebelumnya). Tanpa project_id (perilaku lama / daftar semua)
+        # tetap memakai seluruh candidate root.
+        if project_id is not None:
+            roots: List[str] = []
+            meta = self.project_store.get_project(project_id)
+            if meta is not None:
+                root = meta.get("path") or meta.get("root")
+                if root:
+                    roots.append(str(root))
+        else:
+            roots = self._candidate_log_roots(None)
+
         by_task: Dict[str, Dict[str, Any]] = {}
-        for root in self._candidate_log_roots(project_id):
+        for root in roots:
             try:
                 store = AetherProjectStore(root)
                 log_paths = store.list_task_logs()

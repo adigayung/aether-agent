@@ -458,9 +458,12 @@ const queueCount = computed(() => queueItems.value.length);
 // CATATAN: `terminalTaskId` (task_id terakhir yang mencapai status terminal)
 // dideklarasikan di bagian Consultant di bawah; dipakai juga di sini agar
 // refresh antrian TIDAK memunculkan kembali task yang sudah berhenti.
+let refreshRunningTaskGen = 0;
 async function refreshRunningTask() {
+  const cur = ++refreshRunningTaskGen;
   try {
-    const data = await listTaskQueue();
+    const data = await listTaskQueue(selectedProjectId.value || null);
+    if (cur !== refreshRunningTaskGen) return;
     const items = data.tasks || [];
     queueItems.value = items;
     // Jangan anggap "running" task yang sudah kita ketahui terminal: respons
@@ -570,7 +573,7 @@ const agentStatus = computed(() => {
 const workspaceNav = computed(() => navItems.filter((i) => i.id !== "settings"));
 const settingsItem = computed(() => navItems.find((i) => i.id === "settings") || {});
 function navBadge(id) {
-  if (id === "tasks") return taskHistory.value.length || null;
+  if (id === "tasks") return queueItems.value.length || null;
   if (id === "projects") return projects.value.length || null;
   return null;
 }
@@ -617,10 +620,14 @@ watch(activeNav, (nav) => {
   }
 });
 
-// Refresh task list when active project changes
+// Refresh data task saat project aktif berubah. Sidebar Tasks (queueItems)
+// WAJIB ikut di-refresh: badge sidebar & panel QUEUE membaca queueItems dari
+// endpoint /tasks/queue, bukan `tasks`. Tanpa ini, antrian project sebelumnya
+// tertinggal (stale) saat user berpindah project.
 watch(selectedProjectId, () => {
   refreshTasks();
   refreshTaskHistory();
+  refreshRunningTask();
 });
 function openConsultant() {
   consultantOpen.value = true;

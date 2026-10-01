@@ -51,12 +51,14 @@ def _run() -> int:
     import os
 
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
-    os.environ.setdefault("DJANGO_ALLOWED_HOSTS", "testserver,127.0.0.1,localhost")
+    os.environ.setdefault("DJANGO_ALLOWED_HOSTS", "*")
 
     import django
     django.setup()
     from django.test import Client
 
+    from django.conf import settings
+    settings.ALLOWED_HOSTS.append("testserver")
     client = Client()
 
     # Setup backend
