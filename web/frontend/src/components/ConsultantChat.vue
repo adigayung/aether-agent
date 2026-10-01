@@ -45,6 +45,7 @@ const emit = defineEmits([
 ]);
 
 const messages = ref([]);
+const activeSideTab = ref("sessions");
 const input = ref("");
 const sending = ref(false);
 const error = ref("");
@@ -752,14 +753,42 @@ onMounted(() => {
       </div>
         </div><!-- /consultant-chat -->
 
-        <!-- TASKS panel: SATU queue global AETHER, ditampilkan di sebelah
-             chat Consultant. Bukan queue subsystem kedua. -->
-        <QueuePanel
-          class="consultant-queue"
-          :refresh-key="queueRefreshKey"
-          @stop-task="$emit('stop-task', $event)"
-          @view-task="$emit('view-task', $event)"
-        />
+        <!-- Right sidebar: Sessions (default) | Tasks. -->
+        <aside class="consultant-sidebar" aria-label="Consultant sidebar">
+          <div class="consultant-tabs" role="tablist" aria-label="Consultant sidebar views">
+            <button
+              type="button"
+              class="consultant-tab"
+              :class="{ active: activeSideTab === 'sessions' }"
+              role="tab"
+              :aria-selected="activeSideTab === 'sessions'"
+              @click="activeSideTab = 'sessions'"
+            >Sessions</button>
+            <span class="consultant-tab-divider" aria-hidden="true">|</span>
+            <button
+              type="button"
+              class="consultant-tab"
+              :class="{ active: activeSideTab === 'tasks' }"
+              role="tab"
+              :aria-selected="activeSideTab === 'tasks'"
+              @click="activeSideTab = 'tasks'"
+            >Tasks</button>
+          </div>
+          <div v-if="activeSideTab === 'sessions'" class="consultant-sessions" role="tabpanel">
+            <div class="consultant-session-empty">
+              <span class="session-icon" aria-hidden="true">◌</span>
+              <span>Current session</span>
+              <small>{{ sessionId ? sessionId : 'New consultant session' }}</small>
+            </div>
+          </div>
+          <QueuePanel
+            v-else
+            class="consultant-queue"
+            :refresh-key="queueRefreshKey"
+            @stop-task="$emit('stop-task', $event)"
+            @view-task="$emit('view-task', $event)"
+          />
+        </aside>
       </div><!-- /consultant-body -->
     </div>
   </div>
