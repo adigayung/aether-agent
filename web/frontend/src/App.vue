@@ -134,6 +134,15 @@ const error = ref("");
 const notice = ref("");
 const connected = ref(false);
 
+// Alamat gateway yang DITAMPILKAN di sidebar = origin AKTUAL browser (host + port
+// yang benar-benar dipakai server). Frontend production di-serve oleh gateway
+// yang sama, jadi `window.location` selalu menunjuk port aktual (termasuk saat
+// port dari `data/settings.json` dipakai atau fallback ke port lain). TIDAK ada
+// port hardcode di UI. Aman saat SSR (Node tanpa `window`) -> string kosong.
+const gatewayAddress = computed(() =>
+  typeof window !== "undefined" && window.location ? window.location.host : ""
+);
+
 // Active Project (single-user local app; bukan login/session user).
 const activeProject = ref(null);
 const launcherProjects = ref([]);
@@ -1702,7 +1711,7 @@ onBeforeUnmount(() => {
         </div>
         <div class="sys-row">
           <span class="k"><span class="dot"></span> Gateway</span>
-          <span class="v">127.0.0.1:8000</span>
+          <span class="v">{{ gatewayAddress }}</span>
         </div>
         <div class="sys-row">
           <span class="k"><span class="dot" :class="agentDotClass"></span> Agent</span>

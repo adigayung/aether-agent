@@ -7,8 +7,9 @@
 #
 # Prasyarat:
 #   - Node.js + npm terpasang.
-#   - Backend Django berjalan di http://127.0.0.1:8000 (lihat run_backend.ps1).
-#     Vite mem-proxy /api ke backend (lihat web/frontend/vite.config.js).
+#   - Backend Django berjalan pada port dari `data/settings.json` (lihat
+#     run_backend.ps1). Vite mem-proxy /api ke backend tersebut (lihat
+#     web/frontend/vite.config.js).
 # =============================================================================
 
 param(

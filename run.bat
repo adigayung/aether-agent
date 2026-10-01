@@ -7,8 +7,10 @@ REM    1) Menyiapkan folder AETHER (git clone bila belum ada).
 REM    2) Menyiapkan environment (venv + dependency + frontend production build).
 REM    3) Menjalankan AETHER (Django Gateway + frontend production build).
 REM
-REM  Mode: PRODUCTION BUILD. Hanya SATU proses dan SATU URL:
-REM        http://127.0.0.1:8000/
+REM  Mode: PRODUCTION BUILD. Hanya SATU proses dan SATU URL, memakai port dari
+REM        konfigurasi `data/settings.json` (key `port`); fallback otomatis ke
+REM        port bebas berikutnya bila port tersebut sedang dipakai.
+REM        Override manual: set AETHER_PORT=8478 && run.bat
 REM
 REM  Logika instalasi/verifikasi yang berat berada di skrip Python portable:
 REM        scripts\install_aether.py
@@ -38,7 +40,11 @@ if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 
 set "REPO_URL=https://github.com/adigayung/aether-agent.git"
 set "HOST=127.0.0.1"
-set "PORT=8000"
+REM Port dasar dibaca dari konfigurasi `data/settings.json` (key `port`) oleh
+REM installer (scripts/install_aether.py). JANGAN hardcode 8000 di sini: bila
+REM AETHER_PORT diset, nilai itu dipakai sebagai override eksplisit.
+set "PORT_ARG="
+if defined AETHER_PORT set "PORT_ARG=--port %AETHER_PORT%"
 
 REM Folder default hasil clone bila AETHER belum ada di samping run.bat.
 set "INSTALL_DIR=%SCRIPT_DIR%\aether-agent"
@@ -126,7 +132,7 @@ set "SIM_ARGS="
 if defined SIMULATE set "SIM_ARGS=--simulate"
 
 pushd "%AETHER_DIR%"
-%SYS_PY% "%INSTALLER%" --root "%AETHER_DIR%" --host %HOST% --port %PORT% %SIM_ARGS% %EXTRA_ARGS%
+%SYS_PY% "%INSTALLER%" --root "%AETHER_DIR%" --host %HOST% %PORT_ARG% %SIM_ARGS% %EXTRA_ARGS%
 set "EXITCODE=%ERRORLEVEL%"
 popd
 

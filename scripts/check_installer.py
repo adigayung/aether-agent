@@ -170,18 +170,38 @@ def _run() -> int:
             "--rebuild-frontend harus merencanakan vite build meski dist sudah ada"
         )
         assert "[FRONTEND] AKAN" in output
+        # Tanpa --port: port efektif = `port` dari data/settings.json.
+        import json as _json
+
+        try:
+            _configured_port = int(
+                _json.loads(
+                    (PROJECT_ROOT / "data" / "settings.json").read_text(encoding="utf-8")
+                ).get("port", 8000)
+            )
+        except Exception:  # noqa: BLE001 - file boleh tidak ada/korup -> default
+            _configured_port = 8000
+        output, code, _ = _simulate(
+            module, ["--simulate", "--root", str(PROJECT_ROOT), "--skip-frontend"]
+        )
+        assert code == 0 and f"runserver 127.0.0.1:{_configured_port}" in output, (
+            "tanpa --port, rencana LAUNCH harus memakai port dari data/settings.json"
+        )
         output, code, _ = _simulate(
             module,
-            ["--simulate", "--root", str(PROJECT_ROOT), "--host", "0.0.0.0", "--port", "8001"],
+            ["--simulate", "--root", str(PROJECT_ROOT), "--skip-frontend", "--port", "8001"],
         )
-        assert code == 0 and "runserver 0.0.0.0:8001" in output, (
-            "--host/--port harus tercermin di rencana LAUNCH"
+        assert code == 0 and "runserver 127.0.0.1:8001" in output, (
+            "--port eksplisit harus menimpa port dari data/settings.json"
         )
         # run.bat memakai gate case-insensitive (findstr /i) sehingga flag bisa
         # sampai sebagai --SIMULATE; installer harus menormalkannya.
         output, code, _ = _simulate(module, ["--SIMULATE", "--root", str(PROJECT_ROOT)])
         assert code == 0 and "[SIMULATE]" in output, "--SIMULATE (kapital) harus dinormalisasi"
-        print("[3] flag --skip-frontend/--rebuild-frontend/--host/--port/--SIMULATE tetap berfungsi OK")
+        print(
+            "[3] flag --skip-frontend/--rebuild-frontend/--port (settings & override)/"
+            "--SIMULATE tetap berfungsi OK"
+        )
 
         # ==============================================================
         # [4] Anti-network & anti-mutasi terbukti.

@@ -420,7 +420,13 @@ What it does (idempotent — safe to run repeatedly):
 2. Creates `venv/` and installs `requirements.txt`
 3. Ensures `.env` exists
 4. Builds `web/frontend/dist` if missing (`vite build`)
-5. Starts the gateway at `http://127.0.0.1:8000/` and opens a browser
+5. Starts the gateway on the port from `data/settings.json` (`port`) and opens a browser
+
+The **server port is read from `data/settings.json`** (`port`, e.g. `"port": 8478`);
+`8000` is only the fallback when the file does not set `port`. If the configured
+port is already in use, the launcher automatically falls back to the next free
+port, and the printed/opened URL uses the port actually used. Set `AETHER_PORT`
+to override explicitly.
 
 Useful flags:
 
@@ -428,20 +434,21 @@ Useful flags:
 python scripts/install_aether.py --check          # verify prerequisites only
 python scripts/install_aether.py --no-launch      # setup without starting server
 python scripts/install_aether.py --simulate       # dry-run (no downloads / writes)
+python scripts/install_aether.py --port 8478      # explicit port (overrides settings)
 ```
 
 Manual alternative (after `venv` is ready):
 
 ```bat
 venv\Scripts\activate
-python web\django_app\manage.py runserver 127.0.0.1:8000
+python web\django_app\manage.py runserver 127.0.0.1:8478
 ```
 
 Deployment template: see `deployment.template` (checked in without secrets) for the environment variables consumed in a deployment. The verifier `scripts/check_packaging.py` ensures it contains no real API keys.
 
 ### 4. Create a task
 
-1. Open `http://127.0.0.1:8000/`.
+1. Open the URL printed by the launcher (the actual port, e.g. `http://127.0.0.1:8478/`).
 2. Pick or create a Project in the launcher.
 3. Add a Provider Instance + Model in Settings if none exists.
 4. Click the input bar → Task Composer → write the task, pick **Provider**, **Model**, and **Execution** (`Queue` or `Parallel`), then Send.

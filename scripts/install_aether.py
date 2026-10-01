@@ -12,7 +12,9 @@ Tanggung jawab:
     3. Pastikan dependency runtime terpasang (pip install -r requirements.txt).
     4. Pastikan file konfigurasi .env ada (disalin dari template; TANPA credential).
     5. Pastikan frontend production build ada (web/frontend/dist), build bila perlu.
-    6. Jalankan AETHER (Django Gateway) di http://127.0.0.1:8000/.
+    6. Jalankan AETHER (Django Gateway) pada port yang dibaca dari
+       `<root>/data/settings.json` -> `port` (fallback ke port lain yang bebas
+       bila port tersebut sedang dipakai; default 8000 bila tidak dikonfigurasi).
 
 Sifat IDEMPOTENT: aman dijalankan berulang. Langkah yang sudah selesai
 dilewati (dicek dulu), sehingga menjalankan ulang tidak merusak instalasi.
@@ -47,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import shutil
 import socket
@@ -120,6 +123,15 @@ def frontend_dist_index(root: Path) -> Path:
 
 def django_app_dir(root: Path) -> Path:
     return root / "web" / "django_app"
+
+
+def settings_file(root: Path) -> Path:
+    """File konfigurasi global AETHER (`<root>/data/settings.json`).
+
+    Satu-satunya sumber konfigurasi global (termasuk `port`); installer TIDAK
+    membuat/menulis file ini, hanya membacanya (read-only).
+    """
+    return root / "data" / "settings.json"
 
 
 def _deps_stamp(venv: Path) -> Path:
@@ -354,18 +366,29 @@ def _open_browser_later(url: str, delay: float = 3.0) -> None:
     threading.Thread(target=_open, daemon=True).start()
 
 
-def launch(root: Path, python: Path, host: str, port: int, open_browser: bool = True) -> int:
+def launch(root: Path, python: Path, host: str, port: int | None = None, open_browser: bool = True) -> int:
     app_dir = django_app_dir(root)
     if not (app_dir / "manage.py").exists():
         error(f"manage.py tidak ditemukan di {app_dir}.")
         return 1
+
+    # Port AKTUAL: port dari `data/settings.json` (bila CLI tidak menentukan),
+    # dengan fallback otomatis ke port bebas berikutnya. Dari titik ini seluruh
+    # pesan (URL & perintah runserver) memakai port yang BENAR-BENAR dipakai.
+    actual_port, fallback = resolve_port(root, host, port)
 
     env = os.environ.copy()
     env.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
     # ALLOWED_HOSTS: jangan timpa bila user sudah menyetelnya sendiri.
     env.setdefault("DJANGO_ALLOWED_HOSTS", f"{host},localhost")
 
-    url = f"http://{host}:{port}/"
+    url = f"http://{host}:{actual_port}/"
+    info(f"Port konfigurasi (data/settings.json): {port_from_settings(root)}")
+    if fallback:
+        warn(
+            f"port {port if port is not None else port_from_settings(root)} sedang dipakai; "
+            f"AETHER memakai port alternatif {actual_port}."
+        )
     info("Backend started")
     info("Frontend ready")
     info(f"URL: {url}")
@@ -374,7 +397,7 @@ def launch(root: Path, python: Path, host: str, port: int, open_browser: bool = 
     if open_browser:
         _open_browser_later(url)
 
-    argv = [str(python), "manage.py", "runserver", f"{host}:{port}"]
+    argv = [str(python), "manage.py", "runserver", f"{host}:{actual_port}"]
     try:
         return _run_command(argv, cwd=app_dir, env=env).returncode
     except KeyboardInterrupt:
@@ -413,6 +436,61 @@ def port_in_use(host: str, port: int) -> bool:
         return False
 
 
+def port_from_settings(root: Path) -> int:
+    """Baca `port` dari `<root>/data/settings.json` (default aman `DEFAULT_PORT`).
+
+    Read-only: installer TIDAK pernah menulis file konfigurasi global. Nilai
+    non-angka atau di luar rentang port valid (1..65535) jatuh ke `DEFAULT_PORT`
+    sehingga AETHER tetap dapat dijalankan. Fungsi ini TIDAK pernah melempar.
+    """
+    try:
+        data = json.loads(settings_file(root).read_text(encoding="utf-8"))
+        raw = data.get("port", DEFAULT_PORT)
+    except Exception:  # noqa: BLE001 - absent/korup -> default aman
+        return DEFAULT_PORT
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_PORT
+    if not (1 <= value <= 65535):
+        return DEFAULT_PORT
+    return value
+
+
+#: Jumlah port berurutan yang dicoba saat port konfigurasi sedang dipakai.
+PORT_FALLBACK_ATTEMPTS = 50
+
+
+def resolve_port(root: Path, host: str, port: int | None = None) -> tuple[int, bool]:
+    """Tentukan port AKTUAL untuk runserver (port BEBAS pertama).
+
+    Port dasar (base) ditentukan berurutan: `port` eksplisit (mis. dari CLI
+    `--port`), lalu `port` dari `<root>/data/settings.json`, lalu `DEFAULT_PORT`.
+    Bila port dasar sedang dipakai, fungsi mencari port BERIKUTNYA yang bebas
+    sehingga mekanisme fallback ke port lain tetap terjaga.
+
+    Returns:
+        `(port_aktual, fallback_dipakai)` — `fallback_dipakai` True bila port
+        dasar tidak dapat dipakai dan AETHER pindah ke port lain.
+    """
+    preferred = port if port is not None else port_from_settings(root)
+    if not (1 <= preferred <= 65535):
+        preferred = DEFAULT_PORT
+    if not port_in_use(host, preferred):
+        return preferred, False
+    for offset in range(1, PORT_FALLBACK_ATTEMPTS + 1):
+        candidate = preferred + offset
+        if candidate > 65535:
+            candidate = 1 + (candidate - 65536)
+        if candidate == preferred:
+            break
+        if not port_in_use(host, candidate):
+            return candidate, True
+    # Tidak ada port bebas ditemukan -> pakai port dasar agar konflik dilaporkan
+    # eksplisit oleh runserver (tidak menyembunyikan masalah).
+    return preferred, False
+
+
 def deps_stamp_state(root: Path) -> tuple[str, str]:
     """Status dependency TANPA menjalankan proses apa pun (dipakai mode simulasi)."""
     expected = _requirements_hash(root)
@@ -432,7 +510,7 @@ def deps_stamp_state(root: Path) -> tuple[str, str]:
 def run_simulation(
     root: Path,
     host: str = DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
+    port: int | None = None,
     *,
     skip_frontend: bool = False,
     rebuild_frontend: bool = False,
@@ -444,6 +522,11 @@ def run_simulation(
     npm / vite / runserver, dan tidak ada file yang ditulis.
     """
     counters = {"koneksi": 0, "lokal": 0, "skip": 0}
+
+    # Port EFEKTIF untuk rencana: eksplisit (CLI) atau dari data/settings.json.
+    # Mode simulasi TIDAK mencari fallback (read-only plan); ia hanya melaporkan
+    # port yang akan dipakai beserta status bebas/terpakai.
+    effective_port = port if port is not None else port_from_settings(root)
 
     info("[SIMULATE] Mode simulasi (dry-run, offline) — tidak ada unduhan/mutasi dijalankan.")
 
@@ -565,14 +648,24 @@ def run_simulation(
         info(f"[LAUNCH] TIDAK DAPAT DILANJUTKAN: manage.py tidak ditemukan di {app_dir}")
     else:
         info(
-            f"[LAUNCH] AKAN: {python} manage.py runserver {host}:{port} "
+            f"[LAUNCH] AKAN: {python} manage.py runserver {host}:{effective_port} "
             "(LOKAL, BLOCKING di foreground; dijalankan saat instalasi nyata)"
         )
         counters["lokal"] += 1
-        if port_in_use(host, port):
-            warn(f"[LAUNCH] port {port} sedang dipakai; saat instalasi nyata gunakan --port <alternatif>.")
+        if port is not None:
+            info(f"[LAUNCH] port {effective_port} dari argumen --port (override eksplisit)")
         else:
-            info(f"[LAUNCH] port {port} bebas (tidak ada server lain yang memakai).")
+            info(
+                f"[LAUNCH] port {effective_port} berasal dari data/settings.json "
+                "(fallback otomatis ke port bebas bila sedang dipakai)"
+            )
+        if port_in_use(host, effective_port):
+            warn(
+                f"[LAUNCH] port {effective_port} sedang dipakai; saat instalasi nyata "
+                "AETHER otomatis pindah ke port bebas berikutnya."
+            )
+        else:
+            info(f"[LAUNCH] port {effective_port} bebas (tidak ada server lain yang memakai).")
 
     # --- RINGKASAN --------------------------------------------------------
     info(
@@ -592,7 +685,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--root", default=None, help="Folder root AETHER (default: parent dari scripts/).")
     parser.add_argument("--host", default=DEFAULT_HOST, help="Host bind server (default 127.0.0.1).")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port server (default 8000).")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help=(
+            "Port server. Bila tidak diberikan, port dibaca dari data/settings.json "
+            "(fallback ke port bebas berikutnya bila sedang dipakai; default 8000)."
+        ),
+    )
     parser.add_argument("--check", action="store_true", help="Hanya verifikasi prasyarat (tanpa mengubah apa pun).")
     parser.add_argument(
         "--simulate",
