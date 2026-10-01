@@ -254,9 +254,18 @@ def test_append_keeps_previous_records(tmp_path):
 # --------------------------------------------------------------------------- #
 # Error: partial response terakhir tersimpan
 # --------------------------------------------------------------------------- #
-def test_error_records_partial_response(tmp_path):
+def test_error_records_partial_response(tmp_path, monkeypatch):
     root = tmp_path / "proj"
     root.mkdir()
+    # Retry request API kini dibaca dari `data/settings.json` -> `api_retry`.
+    # Arahkan ke konfigurasi tetap (failed_count=3, failed_sleep=0) agar test ini
+    # tetap DETERMINISTIK & cepat (menguji logging per-attempt, bukan jumlah
+    # retry) dan tidak mewarisi delay nyata dari settings.json mesin pengembang.
+    monkeypatch.setattr(settings_mod, "SETTINGS_PATH", tmp_path / "settings.json")
+    (tmp_path / "settings.json").write_text(
+        json.dumps({"api_retry": {"failed_count": 3, "failed_sleep": 0}}),
+        encoding="utf-8",
+    )
     error = ProviderAPIError(
         "Provider 'x' mengembalikan HTTP 500",
         status_code=500,

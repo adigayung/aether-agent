@@ -27,9 +27,11 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = PROJECT_ROOT / "src"
@@ -167,12 +169,43 @@ def _make_orchestrator(
     )
 
 
+@contextmanager
+def _deterministic_retry_config(
+    failed_count: int = 3, failed_sleep: float = 0.0
+) -> Iterator[None]:
+    """Arahkan loader retry (`data/settings.json` -> api_retry) ke config tetap.
+
+    Jumlah pengulangan retry request API kini DIBACA dari konfigurasi. Agar test
+    lifecycle ini DETERMINISTIK (tidak bergantung pada `data/settings.json`
+    mesin pengembang) dan tidak menunggu delay nyata, config diarahkan ke file
+    sementara `failed_count=3, failed_sleep=0` (behavior lama: 1 attempt awal +
+    3 pengulangan). `SETTINGS_PATH` dipulihkan setelah blok selesai.
+    """
+    from agent_ai.config import settings as settings_mod
+
+    previous = settings_mod.SETTINGS_PATH
+    directory = Path(tempfile.mkdtemp(prefix="aether-retry-test-"))
+    path = directory / "settings.json"
+    path.write_text(
+        json.dumps(
+            {"api_retry": {"failed_count": failed_count, "failed_sleep": failed_sleep}}
+        ),
+        encoding="utf-8",
+    )
+    settings_mod.SETTINGS_PATH = path
+    try:
+        yield
+    finally:
+        settings_mod.SETTINGS_PATH = previous
+
+
 # --------------------------------------------------------------------------- #
 # 1-4. Sukses pada attempt awal / retry ke-1 / ke-2 / ke-3
 # --------------------------------------------------------------------------- #
 def test_success_on_first_attempt() -> None:
     provider = RetryScriptedProvider([_final_turn("selesai")])
-    result = _make_orchestrator(provider).run("task")
+    with _deterministic_retry_config():
+        result = _make_orchestrator(provider).run("task")
     assert result.status == AgentStatus.DONE, result.error
     assert result.result == "selesai"
     assert provider.calls == 1
@@ -183,7 +216,8 @@ def test_success_on_first_retry() -> None:
     provider = RetryScriptedProvider(
         [RuntimeError("boom-1"), _final_turn("pulih")]
     )
-    result = _make_orchestrator(provider).run("task")
+    with _deterministic_retry_config():
+        result = _make_orchestrator(provider).run("task")
     assert result.status == AgentStatus.DONE, result.error
     assert result.result == "pulih"
     assert provider.calls == 2, provider.calls
@@ -197,7 +231,8 @@ def test_success_on_second_retry() -> None:
             _final_turn("pulih"),
         ]
     )
-    result = _make_orchestrator(provider).run("task")
+    with _deterministic_retry_config():
+        result = _make_orchestrator(provider).run("task")
     assert result.status == AgentStatus.DONE, result.error
     assert result.result == "pulih"
     assert provider.calls == 3, provider.calls
@@ -212,7 +247,8 @@ def test_success_on_third_retry() -> None:
             _final_turn("pulih"),
         ]
     )
-    result = _make_orchestrator(provider).run("task")
+    with _deterministic_retry_config():
+        result = _make_orchestrator(provider).run("task")
     assert result.status == AgentStatus.DONE, result.error
     assert result.result == "pulih"
     assert provider.calls == 4, provider.calls
@@ -223,7 +259,8 @@ def test_success_on_third_retry() -> None:
 # --------------------------------------------------------------------------- #
 def test_all_attempts_fail_closes_lifecycle_failed() -> None:
     provider = RetryScriptedProvider([RuntimeError("koneksi gagal")])
-    result = _make_orchestrator(provider).run("task")
+    with _deterministic_retry_config():
+        result = _make_orchestrator(provider).run("task")
     assert result.status == AgentStatus.FAILED
     assert result.provider_error is True
     # Tepat 4 attempt (1 awal + 3 retry) — tidak lebih (bounded).
@@ -240,7 +277,8 @@ def test_cancellation_during_retry() -> None:
         [RuntimeError("boom"), _final_turn("tidak boleh tercapai")],
         on_error=lambda: token.request("user stop"),
     )
-    result = _make_orchestrator(provider, cancel_token=token).run("task")
+    with _deterministic_retry_config():
+        result = _make_orchestrator(provider, cancel_token=token).run("task")
     assert result.status == AgentStatus.CANCELLED, result.status
     # Retry dihentikan segera setelah pembatalan: tidak ada attempt tambahan.
     assert provider.calls == 1, provider.calls
@@ -258,7 +296,8 @@ def test_successful_tool_not_repeated_on_retry() -> None:
         _final_turn("selesai"),
     ]
     provider = RetryScriptedProvider(script)
-    result = _make_orchestrator(provider, tool).run("task")
+    with _deterministic_retry_config():
+        result = _make_orchestrator(provider, tool).run("task")
 
     assert result.status == AgentStatus.DONE, result.error
     assert result.result == "selesai"
@@ -284,7 +323,8 @@ def test_retry_budget_is_per_provider_call() -> None:
         _final_turn("selesai"),
     ]
     provider = RetryScriptedProvider(script)
-    result = _make_orchestrator(provider, tool).run("task")
+    with _deterministic_retry_config():
+        result = _make_orchestrator(provider, tool).run("task")
 
     assert result.status == AgentStatus.DONE, result.error
     assert result.result == "selesai"
@@ -300,7 +340,8 @@ def test_retry_telemetry_no_credential_leak() -> None:
     events: List[Dict[str, Any]] = []
     secret_error = RuntimeError("Gagal ke provider: Bearer sk-supersecret1234567890")
     provider = RetryScriptedProvider([secret_error, _final_turn("ok")])
-    result = _make_orchestrator(provider, events=events).run("task")
+    with _deterministic_retry_config():
+        result = _make_orchestrator(provider, events=events).run("task")
 
     assert result.status == AgentStatus.DONE, result.error
 
@@ -326,7 +367,8 @@ def test_retry_telemetry_no_credential_leak() -> None:
 def test_retry_exhausted_telemetry_present() -> None:
     events: List[Dict[str, Any]] = []
     provider = RetryScriptedProvider([RuntimeError("gagal terus")])
-    result = _make_orchestrator(provider, events=events).run("task")
+    with _deterministic_retry_config():
+        result = _make_orchestrator(provider, events=events).run("task")
 
     assert result.status == AgentStatus.FAILED
     exhausted = [e for e in events if e["type"] == "provider_retry_exhausted"]
@@ -344,7 +386,8 @@ def test_retry_exhausted_telemetry_present() -> None:
 def test_run_continuous_loop_direct_has_retry() -> None:
     provider = RetryScriptedProvider([RuntimeError("boom"), _final_turn("ok")])
     orch = _make_orchestrator(provider)
-    result = orch.run_continuous_loop("task consultant")
+    with _deterministic_retry_config():
+        result = orch.run_continuous_loop("task consultant")
     assert result.status == AgentStatus.DONE, result.error
     assert result.result == "ok"
     assert provider.calls == 2, provider.calls

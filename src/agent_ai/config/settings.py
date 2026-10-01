@@ -95,6 +95,82 @@ def write_log_response_api() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Retry request API LLM (`data/settings.json` -> api_retry)
+# ---------------------------------------------------------------------------
+#: Default retry request API LLM bila konfigurasi tidak tersedia. Nilai default
+#: ini SENGAJA mempertahankan behavior lama (1 attempt awal + 3 pengulangan,
+#: tanpa jeda tambahan di layer pemanggilan provider), sehingga ketika
+#: `data/settings.json` tidak ada / tidak memuat `api_retry`, AETHER berjalan
+#: PERSIS seperti sebelumnya.
+DEFAULT_API_RETRY_FAILED_COUNT = 3
+DEFAULT_API_RETRY_FAILED_SLEEP = 0.0
+
+
+@dataclass(frozen=True)
+class ApiRetryConfig:
+    """Konfigurasi retry request API LLM (`data/settings.json` -> `api_retry`).
+
+    Attributes:
+        failed_count: jumlah pengulangan maksimum SETELAH request API gagal
+            (>= 0). Total attempt = 1 attempt awal + `failed_count`.
+        failed_sleep: waktu tunggu (detik) SEBELUM setiap pengulangan (>= 0.0).
+    """
+
+    failed_count: int = DEFAULT_API_RETRY_FAILED_COUNT
+    failed_sleep: float = DEFAULT_API_RETRY_FAILED_SLEEP
+
+
+def api_retry_config() -> ApiRetryConfig:
+    """Baca objek `api_retry` dari `data/settings.json` dengan default AMAN.
+
+    Membaca field `failed_count` (int) dan `failed_sleep` (float). Bila file
+    tidak ada, field tidak ada, atau nilainya tidak valid (bukan angka /
+    negatif), field tersebut jatuh ke default aman sehingga behavior lama tetap
+    berjalan. Fungsi ini TIDAK pernah melempar: selalu mengembalikan
+    `ApiRetryConfig` valid, berapa pun isi `data/settings.json`.
+    """
+    default = ApiRetryConfig()
+    try:
+        text = SETTINGS_PATH.read_text(encoding="utf-8")
+        raw = json.loads(text).get("api_retry", {})
+    except Exception:  # noqa: BLE001 - default aman bila file korup/absent
+        return default
+    if not isinstance(raw, dict):
+        return default
+
+    failed_count = default.failed_count
+    failed_sleep = default.failed_sleep
+
+    if "failed_count" in raw:
+        try:
+            value = int(raw["failed_count"])
+        except (TypeError, ValueError):
+            value = None
+        if value is not None and value >= 0:
+            failed_count = value
+
+    if "failed_sleep" in raw:
+        try:
+            value_f = float(raw["failed_sleep"])
+        except (TypeError, ValueError):
+            value_f = None
+        if value_f is not None and value_f >= 0.0:
+            failed_sleep = value_f
+
+    return ApiRetryConfig(failed_count=failed_count, failed_sleep=failed_sleep)
+
+
+def api_retry_failed_count() -> int:
+    """Jumlah pengulangan maksimum setelah request API gagal (default aman 3)."""
+    return api_retry_config().failed_count
+
+
+def api_retry_failed_sleep() -> float:
+    """Waktu tunggu (detik) sebelum setiap pengulangan (default aman 0.0)."""
+    return api_retry_config().failed_sleep
+
+
+# ---------------------------------------------------------------------------
 # Konfigurasi per provider
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)

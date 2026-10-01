@@ -2,5 +2,9 @@
   "compression": {
     "enabled": false
   },
-  "write_log_response_api": true
+  "write_log_response_api": true,
+  "api_retry": {
+    "failed_count": 12,
+    "failed_sleep": 3
+  }
 }

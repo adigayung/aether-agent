@@ -87,8 +87,11 @@ _CONTINUOUS_SAFETY_MAX_STEPS = 1000
 #: pengetahuan. Heuristik sederhana tanpa tokenizer eksternal.
 _KNOWLEDGE_CHARS_PER_TOKEN = 4
 
-#: Total maksimum attempt untuk SATU pemanggilan logis LLM/provider:
-#: 1 attempt awal + 3 retry tambahan = 4 attempt.
+#: Total attempt DEFAULT untuk SATU pemanggilan logis LLM/provider bila
+#: konfigurasi retry request API (`data/settings.json` -> `api_retry`) tidak
+#: tersedia: 1 attempt awal + 3 pengulangan = 4 attempt. Nilai AKTUAL dihitung
+#: dari `api_retry.failed_count` + 1 attempt awal (lihat `_api_retry_policy`),
+#: sehingga jumlah pengulangan TIDAK lagi di-hardcode di sini.
 #:
 #: Ini resilience layer GENERIK di atas mekanisme provider/model yang ada
 #: (infrastructure retry 429/5xx tetap berlaku DI DALAM satu attempt). Retry di
@@ -96,7 +99,7 @@ _KNOWLEDGE_CHARS_PER_TOKEN = 4
 #: TIDAK mengulang tool, plan, langkah, atau lifecycle yang sudah berhasil, dan
 #: TIDAK meng-hardcode provider/model/endpoint/backend tertentu. Dipakai Agent
 #: maupun Consultant karena keduanya melewati `run_continuous_loop`.
-_MAX_PROVIDER_ATTEMPTS = 4
+_DEFAULT_MAX_PROVIDER_ATTEMPTS = 4
 
 #: Pola credential yang disamarkan dari teks error provider sebelum dikirim ke
 #: telemetry/activity (jaring pengaman agar secret tidak bocor ke log/UI).
@@ -1591,6 +1594,37 @@ class AgentOrchestrator:
         )
         return response
 
+    def _api_retry_policy(self) -> Tuple[int, float]:
+        """Baca kebijakan retry request API LLM dari `data/settings.json`.
+
+        Sumber tunggal: objek `api_retry` (field `failed_count` dan
+        `failed_sleep`) lewat loader di `config.settings`. Import SENGAJA
+        lazy agar perubahan config/patched loader terambil saat RUN (konsisten
+        dengan `compression_enabled`).
+
+        Bila konfigurasi tidak tersedia / tidak valid, nilai default AMAN
+        dipakai (mempertahankan behavior lama) sehingga retry request API
+        TIDAK pernah menggagalkan task karena config buruk.
+
+        Returns:
+            (failed_count, failed_sleep) -- failed_count = jumlah pengulangan
+            maksimum setelah request gagal (>= 0); failed_sleep = jeda detik
+            sebelum setiap pengulangan (>= 0.0).
+        """
+        fallback = (_DEFAULT_MAX_PROVIDER_ATTEMPTS - 1, 0.0)
+        try:
+            from agent_ai.config.settings import (
+                api_retry_failed_count,
+                api_retry_failed_sleep,
+            )
+
+            return (
+                max(0, int(api_retry_failed_count())),
+                max(0.0, float(api_retry_failed_sleep())),
+            )
+        except Exception:  # noqa: BLE001 - default aman: behavior lama
+            return fallback
+
     def _generate_with_retry(
         self,
         *,
@@ -1603,8 +1637,11 @@ class AgentOrchestrator:
 
         Kontrak GLOBAL (provider/model apa pun; Agent maupun Consultant):
             - Error pada LLM/provider call TIDAK langsung menutup lifecycle yang
-              sudah aktif. Call diulang sampai `_MAX_PROVIDER_ATTEMPTS` attempt
-              total: 1 attempt awal + 3 retry tambahan.
+              sudah aktif. Call diulang sampai `failed_count + 1` attempt total:
+              1 attempt awal + `failed_count` pengulangan. Jumlah pengulangan
+              (`failed_count`) dan jeda antar pengulangan (`failed_sleep`)
+              dibaca dari `data/settings.json` -> `api_retry` (default aman
+              mempertahankan behavior lama: 3 pengulangan, tanpa jeda).
             - Retry HANYA mengulang PEMANGGILAN PROVIDER yang gagal. Tool, plan,
               langkah, dan riwayat yang sudah berhasil TIDAK diulang: helper ini
               dipanggil SEBELUM tool apa pun dieksekusi pada iterasi tersebut.
@@ -1630,7 +1667,14 @@ class AgentOrchestrator:
         """
         provider_name = getattr(self.provider, "name", "")
         model_name = self._model_name()
-        max_attempts = _MAX_PROVIDER_ATTEMPTS
+        # Retry request API LLM: jumlah pengulangan & jeda dibaca dari
+        # konfigurasi (`data/settings.json` -> `api_retry`). Counter retry
+        # dimulai dari 1 untuk SETIAP pemanggilan provider (per request), jadi
+        # setelah satu request berhasil, request berikutnya kembali mulai dari
+        # attempt 1 (counter otomatis reset).
+        failed_count, failed_sleep = self._api_retry_policy()
+        # Total attempt = 1 attempt awal + `failed_count` pengulangan.
+        max_attempts = failed_count + 1
         last_error: Optional[BaseException] = None
         # Nomor round untuk log response API: satu round = satu percobaan
         # logis LLM (attempt pertama + retry berada pada round yang sama).
@@ -1679,6 +1723,10 @@ class AgentOrchestrator:
                         "error": _redact_credentials(str(exc)),
                     },
                 )
+                # Jeda konfigurabel SEBELUM pengulangan berikutnya
+                # (`api_retry.failed_sleep`). 0.0 = tanpa jeda (behavior lama).
+                if failed_sleep > 0:
+                    time.sleep(failed_sleep)
                 continue
 
             # Sukses (attempt awal atau salah satu retry).
