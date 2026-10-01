@@ -78,6 +78,22 @@ def compression_enabled() -> bool:
         return True
 
 
+def write_log_response_api() -> bool:
+    """Baca `write_log_response_api` dari `data/settings.json`.
+
+    Global switch ON/OFF untuk logging response mentah API LLM per task ke
+    `<root project target>/.aether/log/response/<task_id>.json`. Default False
+    (backward compatible): bila file/field tidak ada, atau terjadi error baca,
+    return False sehingga AETHER berjalan PERSIS seperti sekarang (tanpa
+    menulis response API). Hanya nilai eksplisit `true` yang mengaktifkan.
+    """
+    try:
+        text = SETTINGS_PATH.read_text(encoding="utf-8")
+        return bool(json.loads(text).get("write_log_response_api", False))
+    except Exception:  # noqa: BLE001 - default aman (OFF) bila file korup/absent
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Konfigurasi per provider
 # ---------------------------------------------------------------------------

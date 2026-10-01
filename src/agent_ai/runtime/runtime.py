@@ -122,6 +122,10 @@ class AgentRuntime:
         self.project_root = project_root
         self.project_brain_enabled = project_brain
         self._task_log: Optional[Any] = None
+        # Log response API LLM project-local (`.aether/log/response/<task_id>.json`).
+        # Dibuat per task HANYA bila `data/settings.json` -> `write_log_response_api`
+        # aktif. Default None = tidak ada logging (perilaku sekarang).
+        self._response_log: Optional[Any] = None
         self._brain: Optional[Any] = None
         # Environment Context project-local (`<project_root>/.aether/ENVIRONMENT.md`).
         # Dibuat/dimuat SEKALI per session (instance runtime); hasilnya di-cache
@@ -662,6 +666,7 @@ class AgentRuntime:
         """
         self._task_log = None
         self._brain = None
+        self._response_log = None
         if not self.project_root:
             return
         try:
@@ -672,6 +677,19 @@ class AgentRuntime:
             self._current_task_id = self._task_log.task_id
         except Exception:  # noqa: BLE001 - logging tidak boleh menggagalkan task
             self._task_log = None
+        # Log response API LLM (opt-in via `data/settings.json`).
+        # Best-effort: kegagalan menyiapkan logger TIDAK menggagalkan task.
+        try:
+            from agent_ai.config.settings import write_log_response_api
+
+            if write_log_response_api():
+                from agent_ai.projects.aether_store import ResponseLog
+
+                self._response_log = ResponseLog(
+                    self.project_root, task_id=self._current_task_id
+                )
+        except Exception:  # noqa: BLE001 - logging tidak boleh menggagalkan task
+            self._response_log = None
         self._log(
             "task_requested",
             {"prompt": prepared.task, "task_id": getattr(prepared, "task_id", None)},
@@ -730,6 +748,7 @@ class AgentRuntime:
             use_continuous_loop=self.use_continuous_loop,
             environment_context=self._current_environment_context,
             cancel_token=self.cancel_token,
+            response_log=self._response_log,
         )
 
     def _session_environment_context(self) -> Optional[str]:

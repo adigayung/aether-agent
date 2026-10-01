@@ -122,6 +122,29 @@ def _redact_credentials(text: Any) -> str:
     return _CREDENTIAL_PATTERNS.sub("[redacted]", str(text))
 
 
+def _extract_partial_response(error: BaseException) -> Optional[str]:
+    """Ambil partial response terakhir yang sudah diterima sebelum error.
+
+    Defensif & provider-agnostic: mencoba atribut diagnostik yang lazim dipakai
+    provider AETHER (`ProviderAPIError.response_body` memuat potongan body yang
+    benar-benar diterima; beberapa error lain dapat memuat `partial`/`body`).
+    Bila tidak ada partial yang tersedia (mis. connection error murni tanpa
+    body) -> None. Selalu disanitasi dari credential.
+    """
+    for attr in ("response_body", "partial_response", "partial", "body"):
+        value = getattr(error, attr, None)
+        if isinstance(value, str) and value.strip():
+            return _redact_credentials(value)
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                decoded = bytes(value).decode("utf-8", errors="replace")
+            except Exception:  # noqa: BLE001 - diagnostik tidak boleh crash
+                continue
+            if decoded.strip():
+                return _redact_credentials(decoded)
+    return None
+
+
 @dataclass
 class OrchestratorResult:
     """Hasil akhir orkestrasi."""
@@ -186,6 +209,7 @@ class AgentOrchestrator:
         environment_context: Optional[str] = None,
         cancel_token: Optional[CancellationToken] = None,
         context_budget_tokens: Optional[int] = None,
+        response_log: Optional[Any] = None,
     ) -> None:
         self.provider = provider
         self.executor = executor or ToolExecutor()
@@ -227,6 +251,18 @@ class AgentOrchestrator:
         # dikirim mentah setiap round. None + fallback None = tanpa batas
         # (perilaku lama).
         self.context_budget_tokens = context_budget_tokens
+        # Log response API LLM (opsional, dari `data/settings.json` ->
+        # `write_log_response_api`). Bila diisi (objek duck-typed dengan
+        # `append(record)`), SETIAP response mentah yang benar-benar diterima
+        # AETHER dari provider dicatat per round ke
+        # `.aether/log/response/<task_id>.json`. Bila None (default), TIDAK ada
+        # penulisan apa pun (AETHER berjalan seperti sekarang). Ini murni
+        # observability: TIDAK mengubah loop/lifecycle/provider.
+        self.response_log = response_log
+        # Counter round LLM (per task; satu orchestrator = satu task). Dipakai
+        # sebagai nomor `round` pada log response agar tiap request LLM dalam
+        # task dapat diurutkan.
+        self._llm_round = 0
 
     # ------------------------------------------------------------------ #
     # Tool definitions
@@ -1434,6 +1470,127 @@ class AgentOrchestrator:
     # ------------------------------------------------------------------ #
     # Provider call resilience (lifecycle: retry SEBELUM menutup lifecycle)
     # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    # Response API logging (observability, opt-in)
+    # ------------------------------------------------------------------ #
+    def _next_llm_round(self) -> int:
+        """Naikkan & kembalikan nomor round LLM (per task)."""
+        self._llm_round += 1
+        return self._llm_round
+
+    def _record_llm_response(self, record: Optional[Dict[str, Any]]) -> None:
+        """Catat satu record response API ke log (best-effort, tidak pernah crash)."""
+        log = getattr(self, "response_log", None)
+        if log is None or record is None:
+            return
+        try:
+            log.append(record)
+        except Exception:  # noqa: BLE001 - logging tidak boleh menggagalkan task
+            return
+
+    def _response_record_success(
+        self, *, round_index: int, attempt: int, response: LLMResponse
+    ) -> Dict[str, Any]:
+        """Record log untuk satu response LLM yang BERHASIL diterima."""
+        from agent_ai.projects.models import _now_iso
+
+        return {
+            "round": int(round_index),
+            "attempt": int(attempt),
+            "timestamp": _now_iso(),
+            "provider": response.provider or getattr(self.provider, "name", ""),
+            "model": response.model or self._model_name(),
+            "status": "success",
+            "finish_reason": getattr(response.finish_reason, "value", None),
+            "truncated": bool(getattr(response, "truncated", False)),
+            "incomplete_tool_calls": int(getattr(response, "incomplete_tool_calls", 0)),
+            "text": response.text or "",
+            "tool_calls": [action.to_dict() for action in response.tool_calls()],
+            "error": None,
+            "partial_response": None,
+            # `response` = payload mentah APA ADANYA yang diterima AETHER dari
+            # provider (GenerateResult.raw), untuk audit kasus API terputus.
+            "response": getattr(response, "raw", None),
+        }
+
+    def _response_record_error(
+        self, *, round_index: int, attempt: int, error: BaseException
+    ) -> Dict[str, Any]:
+        """Record log untuk satu pemanggilan provider yang GAGAL (partial)."""
+        from agent_ai.projects.models import _now_iso
+
+        return {
+            "round": int(round_index),
+            "attempt": int(attempt),
+            "timestamp": _now_iso(),
+            "provider": getattr(self.provider, "name", ""),
+            "model": self._model_name(),
+            "status": "error",
+            "finish_reason": None,
+            "truncated": False,
+            "incomplete_tool_calls": 0,
+            "text": "",
+            "tool_calls": [],
+            "error": {
+                "type": type(error).__name__,
+                "message": _redact_credentials(str(error)),
+            },
+            # Partial response terakhir yang sudah diterima sebelum error
+            # (bila provider menyediakannya, mis. `ProviderAPIError.response_body`).
+            "partial_response": _extract_partial_response(error),
+            "response": None,
+        }
+
+    def _call_provider(
+        self,
+        *,
+        messages: List[Any],
+        options: Optional[GenerateOptions],
+        tools: Optional[List[ToolDefinition]],
+        round_index: int,
+        attempt: int = 1,
+    ) -> LLMResponse:
+        """Panggil provider + catat response mentah (bila logging aktif).
+
+        Mengikuti alur LLM existing: satu titik pemanggilan provider
+        (`provider.generate` + `normalize_response`). Bila logging NONAKTIF,
+        perilakunya PERSIS seperti pemanggilan langsung (tanpa overhead dict/
+        timestamp). Bila AKTIF, response yang berhasil dicatat apa adanya; bila
+        provider melempar, record error (termasuk partial response bila
+        tersedia) dicatat LEBIH DULU, lalu exception diteruskan apa adanya ke
+        penanganan loop yang sudah ada.
+        """
+        if getattr(self, "response_log", None) is None:
+            gen_result = self.provider.generate(
+                messages=messages,
+                options=options,
+                tools=tools or None,
+                tool_choice=self.tool_choice,
+            )
+            return self.provider.normalize_response(gen_result)
+
+        try:
+            gen_result = self.provider.generate(
+                messages=messages,
+                options=options,
+                tools=tools or None,
+                tool_choice=self.tool_choice,
+            )
+            response: LLMResponse = self.provider.normalize_response(gen_result)
+        except Exception as exc:  # noqa: BLE001 - diteruskan ke penanganan existing
+            self._record_llm_response(
+                self._response_record_error(
+                    round_index=round_index, attempt=attempt, error=exc
+                )
+            )
+            raise
+        self._record_llm_response(
+            self._response_record_success(
+                round_index=round_index, attempt=attempt, response=response
+            )
+        )
+        return response
+
     def _generate_with_retry(
         self,
         *,
@@ -1475,16 +1632,19 @@ class AgentOrchestrator:
         model_name = self._model_name()
         max_attempts = _MAX_PROVIDER_ATTEMPTS
         last_error: Optional[BaseException] = None
+        # Nomor round untuk log response API: satu round = satu percobaan
+        # logis LLM (attempt pertama + retry berada pada round yang sama).
+        round_index = self._next_llm_round()
 
         for attempt in range(1, max_attempts + 1):
             try:
-                gen_result = self.provider.generate(
+                response = self._call_provider(
                     messages=messages,
                     options=options,
-                    tools=tools or None,
-                    tool_choice=self.tool_choice,
+                    tools=tools,
+                    round_index=round_index,
+                    attempt=attempt,
                 )
-                response: LLMResponse = self.provider.normalize_response(gen_result)
             except Exception as exc:  # noqa: BLE001 - provider error -> retry lifecycle
                 last_error = exc
                 emit_event(
@@ -1621,13 +1781,13 @@ class AgentOrchestrator:
                 },
             )
             try:
-                gen_result = self.provider.generate(
+                response = self._call_provider(
                     messages=messages,
                     options=self.options,
-                    tools=tools or None,
-                    tool_choice=self.tool_choice,
+                    tools=tools,
+                    round_index=self._next_llm_round(),
+                    attempt=1,
                 )
-                response: LLMResponse = self.provider.normalize_response(gen_result)
             except Exception as exc:  # noqa: BLE001 - provider error -> reliability
                 provider_error = True
                 emit_event(

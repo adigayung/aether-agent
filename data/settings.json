@@ -1,5 +1,6 @@
 {
   "compression": {
     "enabled": false
-  }
+  },
+  "write_log_response_api": true
 }

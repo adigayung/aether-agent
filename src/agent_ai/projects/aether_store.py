@@ -56,6 +56,10 @@ from agent_ai.projects.models import (
 AETHER_DIR_NAME = ".aether"
 #: Subfolder log task.
 LOG_DIR_NAME = "log"
+#: Subfolder (di dalam `log/`) untuk log response mentah API LLM per task.
+RESPONSE_LOG_DIR_NAME = "response"
+#: Suffix file log response API LLM (satu file per task).
+RESPONSE_LOG_SUFFIX = ".json"
 #: Subfolder AI Project Bible.
 BIBLE_DIR_NAME = "bible"
 #: Nama file manifest Bible.
@@ -150,6 +154,7 @@ class AetherProjectStore:
         self.root = Path(root).resolve()
         self.aether_dir = self.root / AETHER_DIR_NAME
         self.log_dir = self.aether_dir / LOG_DIR_NAME
+        self.response_log_dir = self.log_dir / RESPONSE_LOG_DIR_NAME
         self.bible_dir = self.aether_dir / BIBLE_DIR_NAME
 
     def ensure(self) -> bool:
@@ -169,6 +174,14 @@ class AetherProjectStore:
         """Path log task untuk `task_id` (task_id dibuat bila kosong)."""
         name = safe_task_id(task_id) or new_task_id()
         return self.log_dir / f"{name}.log"
+
+    def response_log_path(self, task_id: Any) -> Path:
+        """Path log response API LLM untuk `task_id` (task_id dibuat bila kosong).
+
+        Satu file per task: `<root>/.aether/log/response/<task_id>.json`.
+        """
+        name = safe_task_id(task_id) or new_task_id()
+        return self.response_log_dir / f"{name}{RESPONSE_LOG_SUFFIX}"
 
     def bible_path(self, category: str) -> Path:
         """Path file kategori Bible (alias dinormalisasi)."""
@@ -262,6 +275,96 @@ class TaskLog:
             line = json.dumps(record, ensure_ascii=False, default=str)
             with open(self.path, "a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
+            return True
+        except Exception:  # noqa: BLE001 - log tidak boleh menggagalkan task
+            return False
+
+
+class ResponseLog:
+    """Writer log response mentah API LLM per task (best-effort).
+
+    Satu file per task: `<root>/.aether/log/response/<task_id>.json`. File
+    berisi SATU objek JSON dengan kunci `responses` = daftar record untuk
+    SETIAP round/request LLM dalam task tersebut (append-only secara semantik;
+    record lama dipertahankan).
+
+    Tujuan: mencatat APA yang benar-benar diterima AETHER dari API LLM —
+    termasuk response yang diterima sebelum error (partial response bila
+    tersedia) — sehingga kasus API terputus dapat dianalisis dari file log.
+
+    Layout file::
+
+        {
+          "task_id": "<task_id>",
+          "created_at": "<iso>",
+          "updated_at": "<iso>",
+          "responses": [ { "round": 1, "provider": ..., ... }, ... ]
+        }
+
+    Semua kegagalan (folder tidak bisa dibuat, disk penuh, JSON tidak valid,
+    dsb.) ditelan dan hanya menghasilkan `False` agar logging TIDAK pernah
+    menggagalkan eksekusi task. Directory `.aether/log/response/` dibuat
+    otomatis saat diperlukan.
+    """
+
+    def __init__(self, root: Union[str, Path, AetherProjectStore], task_id: Any = None) -> None:
+        self.store = root if isinstance(root, AetherProjectStore) else AetherProjectStore(root)
+        self.task_id = safe_task_id(task_id) or new_task_id()
+        self.store.ensure()
+        self.path = self.store.response_log_path(self.task_id)
+        self._loaded = False
+        self._created_at: Optional[str] = None
+        self._responses: List[Dict[str, Any]] = []
+
+    @staticmethod
+    def resolve_task_id(task_id: Any) -> str:
+        """Gunakan task_id yang ada, atau buat baru bila kosong/tidak valid."""
+        return safe_task_id(task_id) or new_task_id()
+
+    def _load(self) -> None:
+        """Muat record yang sudah ada (sekali) agar append tidak menghilangkan data."""
+        if self._loaded:
+            return
+        self._loaded = True
+        if not self.path.exists():
+            return
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - file rusak -> mulai dari kosong
+            return
+        if isinstance(data, dict):
+            created = data.get("created_at")
+            if isinstance(created, str) and created:
+                self._created_at = created
+            responses = data.get("responses")
+            if isinstance(responses, list):
+                self._responses = [r for r in responses if isinstance(r, dict)]
+        elif isinstance(data, list):  # toleran terhadap format array lama
+            self._responses = [r for r in data if isinstance(r, dict)]
+
+    def append(self, record: Dict[str, Any]) -> bool:
+        """Tambahkan SATU record response ke file task (best-effort).
+
+        Returns:
+            True bila tertulis, False bila gagal (tidak pernah melempar).
+        """
+        try:
+            self._load()
+            if not isinstance(record, dict):
+                return False
+            if self._created_at is None:
+                self._created_at = _now_iso()
+            self._responses.append(dict(record))
+            payload: Dict[str, Any] = {
+                "task_id": self.task_id,
+                "created_at": self._created_at,
+                "updated_at": _now_iso(),
+                "responses": self._responses,
+            }
+            _atomic_write(
+                self.path,
+                json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+            )
             return True
         except Exception:  # noqa: BLE001 - log tidak boleh menggagalkan task
             return False
