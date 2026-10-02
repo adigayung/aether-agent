@@ -34,4 +34,7 @@ __all__ = [
     "ValidationOutcome",
     "ValidationRunner",
     "CommandValidator",
+    "VerificationStrategy",
+    "strategy_for_mode",
+    "format_verification_activity",
 ]

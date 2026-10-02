@@ -25,6 +25,13 @@ const TOOL_VERB = {
   run_command: "Running command",
 };
 
+// Mode label untuk activity copy
+const MODE_LABEL_COPY = {
+  fast: "Fast",
+  balanced: "Balanced",
+  deep: "Deep",
+};
+
 // Waktu event -> HH:MM:SS (mendukung epoch detik/ms dan ISO string).
 function formatTime(raw) {
   if (raw == null) return "";
@@ -115,6 +122,21 @@ function describeLine(e) {
       return `${prefix}Recovery started.`;
     case "recovery_completed":
       return `${prefix}Recovery completed.`;
+    case "policy_applied": {
+      const req = MODE_LABEL_COPY[d.requested_mode] || d.requested_mode || "Balanced";
+      const eff = MODE_LABEL_COPY[d.effective_mode] || d.effective_mode || "Balanced";
+      if (d.escalated) {
+        const reason = d.reason ? ` · Reason: ${oneLine(d.reason, 120)}` : "";
+        return `${prefix}[POLICY] Requested Mode: ${req} · Effective Mode: ${eff}${reason}`;
+      }
+      return `${prefix}[POLICY] Requested Mode: ${req} · Effective Mode: ${eff}`;
+    }
+    case "policy_escalated": {
+      const from = MODE_LABEL_COPY[d.from_mode] || d.from_mode || "Fast";
+      const to = MODE_LABEL_COPY[d.to_mode] || d.to_mode || "Deep";
+      const reason = d.reason ? ` · Reason: ${oneLine(d.reason, 120)}` : "";
+      return `${prefix}[POLICY] Escalated: ${from} → ${to}${reason}`;
+    }
     case "tool_called": {
       const tool = String(d.tool || "");
       const target = d.target ? String(d.target) : "";

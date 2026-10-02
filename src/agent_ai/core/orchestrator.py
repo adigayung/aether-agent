@@ -40,7 +40,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from agent_ai.core.bible_lifecycle import (
     BibleContextState,
@@ -213,6 +213,8 @@ class AgentOrchestrator:
         cancel_token: Optional[CancellationToken] = None,
         context_budget_tokens: Optional[int] = None,
         response_log: Optional[Any] = None,
+        execution_policy: Optional[Dict[str, Any]] = None,
+        policy_escalator: Optional[Callable[[str, str | None], Any]] = None,
     ) -> None:
         self.provider = provider
         self.executor = executor or ToolExecutor()
@@ -266,6 +268,16 @@ class AgentOrchestrator:
         # sebagai nomor `round` pada log response agar tiap request LLM dalam
         # task dapat diurutkan.
         self._llm_round = 0
+        # Agent Execution Policy (fast/balanced/deep) — INFORMASI/strategi kerja,
+        # BUKAN hard limit dan BUKAN penggerak keputusan loop. Berisi
+        # ExecutionPolicyState.to_dict() (requested_mode/effective_mode/reason).
+        # None (default) = policy tidak aktif -> perilaku persis seperti
+        # sebelumnya (Agent & Consultant; consultant TIDAK mengirim policy).
+        self.execution_policy = dict(execution_policy) if execution_policy else None
+        # Callback escalation opsional `(reason, target_mode) -> Any` yang
+        # disediakan pemanggil (runtime). Bila None, orchestrator tidak dapat
+        # memicu escalation (mekanisme tetap ada di runtime/gateway).
+        self.policy_escalator = policy_escalator
 
     # ------------------------------------------------------------------ #
     # Tool definitions
@@ -280,6 +292,78 @@ class AgentOrchestrator:
             return []
         specs = self.executor.registry.specs()
         return [ToolDefinition.from_spec(spec) for spec in specs]
+
+    # ------------------------------------------------------------------ #
+    # Agent Execution Policy (fast/balanced/deep)
+    # ------------------------------------------------------------------ #
+    @property
+    def effective_mode(self) -> Optional[str]:
+        """Mode policy efektif saat ini (None bila policy tidak aktif)."""
+        if not isinstance(self.execution_policy, Mapping):
+            return None
+        value = self.execution_policy.get("effective_mode")
+        return str(value) if value else None
+
+    @property
+    def requested_mode(self) -> Optional[str]:
+        """Mode policy yang diminta user/metadata (None bila tidak aktif)."""
+        if not isinstance(self.execution_policy, Mapping):
+            return None
+        value = self.execution_policy.get("requested_mode")
+        return str(value) if value else None
+
+    def request_policy_escalation(
+        self,
+        reason: str,
+        target_mode: Optional[str] = None,
+    ) -> Any:
+        """Minta escalation policy kepada pemanggil (mekanisme, bukan rule).
+
+        Orkestrator TIDAK memutuskan escalation dan TIDAK membaca keyword task:
+        ia hanya menyediakan jalur agar keputusan Agent/LLM (atau pemanggil)
+        dapat MENAIKKAN mode. Bila pemanggil tidak menyediakan `policy_escalator`
+        atau policy tidak aktif, hasilnya None (no-op; loop tidak terpengaruh).
+
+        Args:
+            reason: alasan escalation (wajib non-kosong).
+            target_mode: mode tujuan opsional (default: satu tingkat di atas).
+
+        Returns:
+            Hasil dari escalator pemanggil (mis. state policy terbaru), atau
+            None bila mekanisme tidak tersedia.
+        """
+        callback = self.policy_escalator
+        if callback is None:
+            return None
+        result = callback(reason, target_mode)
+        # Segarkan snapshot policy lokal agar informasi yang dipegang
+        # orchestrator (effective_mode) mengikuti escalation terbaru. Ini
+        # murni metadata: TIDAK mengubah keputusan loop.
+        try:
+            to_dict = getattr(result, "to_dict", None)
+            if callable(to_dict):
+                self.execution_policy = dict(to_dict())
+        except Exception:  # noqa: BLE001 - metadata tidak boleh menggagalkan task
+            pass
+        return result
+
+    def _policy_event_fields(self) -> Dict[str, Any]:
+        """Field policy untuk event (kosong bila policy tidak aktif).
+
+        Additive & aman: hanya menambahkan kunci bila policy aktif, sehingga
+        payload/event lama TIDAK berubah bentuknya. Nilai murni metadata.
+        """
+        if not isinstance(self.execution_policy, Mapping):
+            return {}
+        fields: Dict[str, Any] = {}
+        for key in ("requested_mode", "effective_mode"):
+            value = self.execution_policy.get(key)
+            if value:
+                fields[key] = str(value)
+        escalated = self.execution_policy.get("escalated")
+        if escalated is not None:
+            fields["policy_escalated"] = bool(escalated)
+        return fields
 
     # ------------------------------------------------------------------ #
     # Cooperative cancellation (safe boundary)
@@ -1847,6 +1931,7 @@ class AgentOrchestrator:
                     "model": self._model_name(),
                     "iteration": loop.iteration,
                     "tool_count": len(tools),
+                    **self._policy_event_fields(),
                 },
             )
             try:
@@ -2160,6 +2245,7 @@ class AgentOrchestrator:
                     "iteration": loop.iteration,
                     "tool_count": len(tools),
                     **context_stats,
+                    **self._policy_event_fields(),
                 },
             )
             # Provider call dengan retry lifecycle (1 attempt awal + 3 retry).

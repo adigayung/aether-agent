@@ -1666,7 +1666,9 @@ onMounted(async () => {
   }
   try {
     config.value = await getConfig();
-    selectedMode.value = config.value.mode || "balanced";
+    // Normalisasi: 'minimal' (legacy) -> 'fast' (kanonik)
+    const rawMode = config.value.mode || "balanced";
+    selectedMode.value = rawMode === "minimal" ? "fast" : rawMode;
   } catch {
     config.value = {};
   }

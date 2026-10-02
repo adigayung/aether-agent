@@ -69,12 +69,14 @@ def test_global_settings_reads_actual_values(settings_file):
         "compression": {"enabled": False},
         "write_log_response_api": True,
         "api_retry": {"failed_count": 12, "failed_sleep": 3.0},
-        # Section `agent` (System Prompt Agent) baru: `system_prompt` = nilai
+        # Section `agent` (System Prompt Agent): `system_prompt` = nilai
         # efektif (default = prompt bawaan `agent_ai.core.agent_prompt`),
         # `default_system_prompt` = konstanta bawaan untuk tombol Restore.
+        # `default_mode` = Default Execution Mode (fast/balanced/deep).
         "agent": {
             "system_prompt": build_agent_system_prompt(),
             "default_system_prompt": build_agent_system_prompt(),
+            "default_mode": "balanced",
         },
     }
 

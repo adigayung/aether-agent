@@ -84,9 +84,16 @@ function removeAttachment(index) {
   attachments.value.splice(index, 1);
 }
 
-// Label mode ramah-user dari retrieval profile AETHER (#40).
-const MODE_LABELS = { minimal: "Fast", balanced: "Balanced", deep: "Deep" };
-const modes = computed(() => props.config.modes || ["minimal", "balanced", "deep"]);
+// Label mode ramah-user: Fast / Balanced / Deep.
+// Pastikan harus mengirim nilai mode 'fast/balanced/deep' ke backend, bukan 'minimal'.
+const MODE_LABELS = { fast: "Fast", balanced: "Balanced", deep: "Deep" };
+// Config mungkin masih mengembalikan 'fast' + 'modes: ["fast","balanced","deep"]' (Task 05).
+const modes = computed(() => {
+  // Prioritaskan nilai 'fast' bila config masih mengembalikan 'minimal' (legacy).
+  // Ini membersihkan nilai sebelum dikirim ke backend.
+  const rawModes = props.config.modes || ["minimal", "balanced", "deep"];
+  return rawModes.map(m => (m === "minimal" ? "fast" : m));
+});
 
 // Provider Instance dari konfigurasi LLM tersimpan (SQLite). Hanya instance
 // enabled yang ditampilkan (instance disabled tidak bisa dipakai task).
@@ -221,8 +228,14 @@ function submit() {
       <!-- Mode selector: routing profile AETHER (Fast/Balanced/Deep). -->
       <label class="composer-select">
         <span class="cs-label">Mode</span>
-        <select class="input-a" :disabled="disabled" :value="mode" @change="emit('update:mode', $event.target.value)">
-          <option v-for="m in modes" :key="m" :value="m">{{ MODE_LABELS[m] || m }}</option>
+        <select class="input-a" :disabled="disabled" :value="mode" @change="emit('update:mode', $event.target.value === 'minimal' ? 'fast' : $event.target.value)">
+          <option
+            v-for="m in modes"
+            :key="m"
+            :value="m"
+          >
+            {{ MODE_LABELS[m] || m }}
+          </option>
         </select>
       </label>
 

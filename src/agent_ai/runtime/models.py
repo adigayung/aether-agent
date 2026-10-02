@@ -82,6 +82,11 @@ class RuntimeResult:
     validation: Optional[Dict[str, Any]] = None
     # Jumlah siklus validation/replan yang dijalankan (0 bila tidak ada).
     validation_cycles: int = 0
+    # Execution Policy (fast/balanced/deep) — informasi/strategi kerja, BUKAN
+    # keputusan loop. Berisi ExecutionPolicyState.to_dict() (requested_mode,
+    # effective_mode, reason, escalations). None bila policy tidak di-resolve
+    # (mis. runtime/fake lama) -> backward compatible.
+    policy: Optional[Dict[str, Any]] = None
 
     @property
     def success(self) -> bool:
@@ -97,4 +102,5 @@ class RuntimeResult:
             "iterations": self.iterations,
             "validation": self.validation,
             "validation_cycles": self.validation_cycles,
+            "policy": self.policy,
         }

@@ -20,6 +20,7 @@ class ContextRequest:
         include_intelligence: sertakan Project Intelligence/Bible.
         include_brain: sertakan Brain context bila tersedia.
         intelligence_categories: kategori intelligence opsional.
+        mode: mode execution policy (fast/balanced/deep) untuk strategi context.
     """
 
     task: str
@@ -28,6 +29,7 @@ class ContextRequest:
     include_intelligence: bool = True
     include_brain: bool = True
     intelligence_categories: Optional[List[str]] = None
+    mode: Optional[str] = None
 
 
 @dataclass

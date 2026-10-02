@@ -261,6 +261,10 @@ def port_setting() -> int:
 #: (mencegah penulisan nilai tak terbatas ke file konfigurasi).
 MAX_AGENT_SYSTEM_PROMPT_CHARS = 200_000
 
+#: Nilai mode execution policy Agent yang valid (fast/balanced/deep).
+#: Mode lama 'minimal' dipetakan ke 'fast' agar tetap kompatibel.
+AGENT_MODE_VALUES = ("fast", "balanced", "deep")
+
 
 def _default_agent_system_prompt() -> str:
     """System Prompt Agent BAWAAN (isi existing, dipakai bila belum diatur).
@@ -294,6 +298,46 @@ def agent_system_prompt() -> str:
     return _default_agent_system_prompt()
 
 
+def _normalize_agent_mode(value: Any) -> str:
+    """Normalisasi nilai mode Agent -> 'fast' | 'balanced' | 'deep'.
+
+    Single source of truth: memakai normalizer policy Agent existing sehingga
+    aturan alias (mis. 'minimal' -> 'fast'), fallback default ('balanced'), dan
+    penolakan nilai tak dikenal IDENTIK di settings, gateway, dan runtime.
+    """
+    try:
+        from agent_ai.runtime.policy import DEFAULT_MODE, normalize_mode
+
+        return normalize_mode(value, DEFAULT_MODE)
+    except Exception:  # noqa: BLE001 - konfigurasi tidak boleh gagal karena import
+        # Fallback minimal bila modul policy tidak tersedia (mis. impor parsial).
+        modes = {"fast", "balanced", "deep"}
+        text = str(value).strip().lower() if value is not None else ""
+        if text == "minimal":
+            text = "fast"
+        return text if text in modes else "balanced"
+
+
+#: Mode default AETHER bila user tidak mengaturnya (backward compatible).
+DEFAULT_AGENT_MODE = _normalize_agent_mode(None)
+
+
+def agent_default_mode() -> str:
+    """Default Execution Mode Agent dari `data/settings.json` -> `agent.default_mode`.
+
+    Nilai yang dikembalikan = mode yang BENAR-BENAR dipakai AETHER sebagai
+    default bila user tidak memilih mode pada task (fallback 'balanced').
+    Fungsi ini TIDAK pernah melempar (file hilang/korup/nilai tak dikenal ->
+    'balanced'). Sumber TETAP `data/settings.json` (tidak ada storage kedua).
+    """
+    raw = _read_settings_document().get("agent", {})
+    if isinstance(raw, dict):
+        value = raw.get("default_mode")
+        if value is not None and str(value).strip():
+            return _normalize_agent_mode(value)
+    return DEFAULT_AGENT_MODE
+
+
 def global_settings() -> Dict[str, Any]:
     """Nilai AKTUAL konfigurasi global user-facing dari `data/settings.json`.
 
@@ -308,7 +352,8 @@ def global_settings() -> Dict[str, Any]:
             "compression": {"enabled": bool},
             "write_log_response_api": bool,
             "api_retry": {"failed_count": int, "failed_sleep": float},
-            "agent": {"system_prompt": str, "default_system_prompt": str},
+            "agent": {"system_prompt": str, "default_system_prompt": str,
+            "default_mode": str},
         }
 
     Catatan: `agent.system_prompt` = nilai EFEKTIF yang dipakai Agent
@@ -329,6 +374,7 @@ def global_settings() -> Dict[str, Any]:
         "agent": {
             "system_prompt": agent_system_prompt(),
             "default_system_prompt": _default_agent_system_prompt(),
+            "default_mode": agent_default_mode(),
         },
     }
 
@@ -378,6 +424,18 @@ def _coerce_float(name: str, value: Any, *, minimum: float, maximum: float) -> A
     if result.is_integer():
         return int(result)
     return result
+
+
+def _coerce_agent_default_mode(value: Any) -> str:
+    """Validasi & normalisasi agent.default_mode -> 'fast' | 'balanced' | 'deep'."""
+    if value is None:
+        return DEFAULT_AGENT_MODE
+    if not isinstance(value, str):
+        raise SettingsWriteError("'agent.default_mode' harus berupa teks.")
+    text = value.strip().lower()
+    if not text:
+        return DEFAULT_AGENT_MODE
+    return _normalize_agent_mode(text)
 
 
 def _coerce_agent_system_prompt(value: Any) -> str:
@@ -497,7 +555,7 @@ def normalize_global_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
         agent = updates["agent"]
         if not isinstance(agent, dict):
             raise SettingsWriteError("'agent' harus berupa object.")
-        extra = set(agent) - {"system_prompt"}
+        extra = set(agent) - {"system_prompt", "default_mode"}
         if extra:
             raise SettingsWriteError(
                 f"Setting tidak dikenal: {', '.join(sorted(extra))}."
@@ -505,6 +563,10 @@ def normalize_global_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
         if "system_prompt" in agent:
             normalized.setdefault("agent", {})["system_prompt"] = (
                 _coerce_agent_system_prompt(agent["system_prompt"])
+            )
+        if "default_mode" in agent:
+            normalized.setdefault("agent", {})["default_mode"] = (
+                _coerce_agent_default_mode(agent["default_mode"])
             )
 
     return normalized

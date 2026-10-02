@@ -33,7 +33,7 @@ TIDAK dipakai oleh jalur normal.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
 
 from agent_ai.core.cancel import CancellationToken
 from agent_ai.core.executor import ToolExecutor
@@ -42,11 +42,21 @@ from agent_ai.core.models import AgentStatus
 from agent_ai.planning.models import PlanStep, StepStatus, TaskPlan
 from agent_ai.providers.base import BaseProvider, GenerateOptions
 from agent_ai.runtime.models import RuntimeProgress, RuntimeResult, RuntimeStatus
+from agent_ai.runtime.policy import (
+    ExecutionPolicyResolver,
+    ExecutionPolicyState,
+    policy_activity_text,
+)
 from agent_ai.task.models import PreparedTask
 from agent_ai.validation.models import (
     ValidationOutcome,
     ValidationRequest,
     ValidationResult,
+)
+from agent_ai.validation.strategy import (
+    VerificationStrategy,
+    format_verification_activity,
+    strategy_for_mode,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - hanya untuk type hint, hindari import cycle
@@ -75,6 +85,13 @@ class AgentRuntime:
             Calling; task tidak dipecah menjadi TaskStep, dan plan (bila ada)
             hanya menjadi context advisory opsional. Bila False, jalur legacy
             (eksekusi per step plan + recovery/fallback/validation) dipakai.
+        policy_resolver: ExecutionPolicyResolver opsional (fast/balanced/deep).
+            Default: resolver standar. Policy hanya INFORMASI/STRATEGI kerja —
+            bukan hard limit dan tidak mengubah keputusan loop LLM.
+        requested_mode: mode policy yang diminta user/metadata (opsional).
+            Bila kosong, dibaca dari metadata PreparedTask
+            (`agent_mode`/`policy_mode`/`mode`); bila tetap kosong, policy
+            tidak diaktifkan (perilaku lama tidak berubah).
     """
 
     def __init__(
@@ -99,6 +116,8 @@ class AgentRuntime:
         project_brain: bool = True,
         use_continuous_loop: bool = True,
         cancel_token: Optional[CancellationToken] = None,
+        policy_resolver: Optional[ExecutionPolicyResolver] = None,
+        requested_mode: Optional[str] = None,
     ) -> None:
         if provider is None:
             raise ValueError("AgentRuntime butuh provider (BaseProvider).")
@@ -142,6 +161,22 @@ class AgentRuntime:
         # frontend lewat event `phase_changed`. Di-reset per task di `run()`.
         # `None` = belum ada aktivitas yang diklasifikasi untuk task ini.
         self._activity_phase: Optional[str] = None
+
+        # Agent Execution Policy (fast/balanced/deep) — PREferensi STRATEGI kerja,
+        # BUKAN hard limit dan BUKAN penggerak loop. `requested_mode` = mode yang
+        # diminta user/metadata; `effective_mode` = mode yang benar-benar dipakai
+        # (dapat naik lewat escalation yang diputuskan Agent/LLM). Resolver murni
+        # deterministik (tanpa heuristic keyword/scoring). Tidak ada state global:
+        # policy hidup per-run dan di-reset di `run()`. `None` = policy tidak
+        # aktif (runtime lama/uji) -> perilaku persis seperti sebelumnya.
+        self.policy_resolver = policy_resolver or ExecutionPolicyResolver()
+        self.requested_mode = requested_mode
+        self.policy: Optional[ExecutionPolicyState] = None
+        # Verification strategy (advisory) yang mengikuti effective_mode.
+        # Di-resolve dari policy bila policy aktif; None bila tidak ada mode.
+        # TIDAK membuat pipeline validation baru: hanya preferensi/check list
+        # yang diberikan ke validation layer (metadata) dan ke Agent (advisory).
+        self.verification_strategy: Optional[VerificationStrategy] = None
 
         # Validation <-> Runtime Integration (#42), semuanya OPSIONAL.
         # Bila validation_runner/validation_request tidak diberikan, runtime
@@ -240,6 +275,12 @@ class AgentRuntime:
         # Project-local storage (Task 5): Task Log + AI Project Bible.
         # Best-effort: kegagalan di sini TIDAK boleh menggagalkan eksekusi.
         self._setup_project_storage(prepared)
+
+        # Agent Execution Policy: resolve requested_mode -> effective_mode.
+        # Murni informasi/strategi (bukan hard limit, bukan penggerak loop):
+        # effective_mode SELALU dimulai sama dengan requested_mode; kenaikan
+        # hanya lewat escalation eksplisit oleh Agent/LLM. Di-reset per task.
+        self._resolve_policy(prepared)
 
         # Observability (#55): catat task dimulai (bila session store tersedia).
         self._emit_event("task_started", {"task": prepared.task})
@@ -573,6 +614,16 @@ class AgentRuntime:
         """
         request = self.validation_request
         assert request is not None  # dijaga oleh validation_enabled
+        if self.verification_strategy is not None:
+            meta = dict(request.metadata)
+            meta["verification_strategy"] = self.verification_strategy.to_dict()
+            meta["effective_mode"] = self.verification_strategy.mode
+            request = ValidationRequest(
+                target=request.target,
+                command=request.command,
+                timeout=request.timeout,
+                metadata=meta,
+            )
         try:
             return self.validation_runner.run(request)
         except Exception as exc:  # noqa: BLE001 - validator error -> execution_error
@@ -751,6 +802,12 @@ class AgentRuntime:
             environment_context=self._current_environment_context,
             cancel_token=self.cancel_token,
             response_log=self._response_log,
+            # Agent Execution Policy (fast/balanced/deep): metadata/strategi
+            # (bukan hard limit). Diteruskan agar orchestrator TAHU preferensi
+            # kerja aktif dan dapat membagikan policy terbaru ke pemanggil
+            # (escalation in-place). Tidak mengubah keputusan loop LLM.
+            execution_policy=self._policy_for_orchestrator(),
+            policy_escalator=self.escalate_policy,
         )
 
     def _session_environment_context(self) -> Optional[str]:
@@ -878,6 +935,151 @@ class AgentRuntime:
         self._activity_phase = phase
         self._emit_event("phase_changed", {"phase": phase})
 
+    # ------------------------------------------------------------------ #
+    # Agent Execution Policy (fast/balanced/deep) — informasi/strategi
+    # ------------------------------------------------------------------ #
+    def _resolve_policy(self, prepared: PreparedTask) -> Optional[ExecutionPolicyState]:
+        """Resolve requested_mode -> effective_mode untuk task ini (per-run).
+
+        Mode dibaca dari argumen runtime (`requested_mode`) atau metadata
+        PreparedTask (kunci `agent_mode`/`policy_mode`/`mode`), lalu
+        dinormalisasi oleh `ExecutionPolicyResolver` (default: balanced).
+        Bila tidak ada sumber mode apa pun, policy TIDAK diaktifkan (None) agar
+        perilaku runtime lama persis seperti sebelumnya (backward compatible).
+
+        Policy BUKAN hard limit dan tidak menggerakkan keputusan loop: ia hanya
+        metadata/strategi. Escalation terjadi lewat `_escalate_policy` yang
+        dipanggil dari keputusan Agent/LLM (bukan heuristic).
+        """
+        if self.policy_resolver is None:
+            self.policy = None
+            return None
+        metadata: Dict[str, Any] = {}
+        prepared_metadata = getattr(prepared, "metadata", None)
+        if isinstance(prepared_metadata, dict):
+            metadata = prepared_metadata
+        requested = self.requested_mode
+        if (requested is None or not str(requested).strip()) and not any(
+            isinstance(metadata.get(key), str) and metadata.get(key).strip()
+            for key in ("agent_mode", "policy_mode", "mode")
+        ):
+            # Tidak ada mode dari mana pun -> policy tidak aktif (behavior lama).
+            self.policy = None
+            return None
+        state = self.policy_resolver.resolve(requested, metadata=metadata)
+        state = self._apply_policy_escalation(state, metadata)
+        self.policy = state
+        self.verification_strategy = strategy_for_mode(state.effective_mode)
+        self._emit_verification_strategy(self.verification_strategy)
+        self._emit_policy_applied(state)
+        return state
+
+    def _apply_policy_escalation(
+        self,
+        state: ExecutionPolicyState,
+        metadata: Mapping[str, Any],
+    ) -> ExecutionPolicyState:
+        """Terapkan escalation DEKLARATIF dari metadata, bila ada.
+
+        Metadata `escalate_to` (+ `escalate_reason`) adalah MEKANISME yang
+        dipakai pemanggil/Agent untuk MENYATAKAN permintaan escalation. Ini
+        bukan rule/heuristic: tidak ada pembacaan keyword task di sini.
+
+        Best-effort: permintaan tidak valid TIDAK menggagalkan task; hanya
+        diabaikan (task tetap berjalan dengan mode sebelumnya).
+        """
+        target = metadata.get("escalate_to") if isinstance(metadata, Mapping) else None
+        if not (isinstance(target, str) and target.strip()):
+            return state
+        reason = metadata.get("escalate_reason")
+        if not (isinstance(reason, str) and reason.strip()):
+            reason = "Escalation diminta oleh task metadata."
+        try:
+            self.policy_resolver.escalate(state, str(reason), target_mode=target)
+        except Exception:  # noqa: BLE001 - permintaan tidak valid tidak boleh crash
+            return state
+        return state
+
+    def _emit_policy_applied(self, state: ExecutionPolicyState) -> None:
+        """Emit event `policy_applied` (event system existing; best-effort).
+
+        Payload memuat ringkasan policy + `activity` (blok teks siap baca pada
+        activity/log, termasuk blok escalation bila ada).
+        """
+        try:
+            payload = state.to_dict()
+            payload["activity"] = policy_activity_text(state)
+            self._emit_event("policy_applied", payload)
+        except Exception:  # noqa: BLE001 - observability tidak boleh crash
+            return
+
+    def escalate_policy(
+        self,
+        reason: str,
+        target_mode: Optional[str] = None,
+    ) -> Optional[ExecutionPolicyState]:
+        """Mekanisme escalation policy: naikkan effective_mode + emit event.
+
+        Dipanggil oleh Agent/LLM (keputusan), BUKAN oleh rule otomatis AETHER:
+        runtime hanya MENYEDIAKAN mekanismenya, termasuk memperbarui policy yang
+        dipakai orchestrator pada putaran berikutnya (state hidup di satu
+        instance `ExecutionPolicyState` yang dibagikan runtime <-> orchestrator).
+        De-escalation TIDAK didukung (bukan escalation).
+
+        Args:
+            reason: alasan escalation (wajib non-kosong).
+            target_mode: mode tujuan opsional (default: satu tingkat di atas).
+
+        Returns:
+            State policy yang sudah diperbarui (untuk traceability), atau None
+            bila policy tidak aktif.
+
+        Raises:
+            PolicyEscalationError: alasan kosong / arah tidak maju.
+        """
+        state = self.policy
+        if state is None:
+            return None
+        previous = state.effective_mode
+        state = self.policy_resolver.escalate(state, reason, target_mode=target_mode)
+        self.policy = state
+        self.verification_strategy = strategy_for_mode(state.effective_mode)
+        # Metadata escalation untuk observability/UI (tanpa menyentuh loop).
+        payload = state.to_dict()
+        payload.update(
+            {
+                "from_mode": previous,
+                "to_mode": state.effective_mode,
+                "reason": state.reason,
+                "activity": policy_activity_text(state, previous_mode=previous),
+            }
+        )
+        self._emit_event("policy_escalated", payload)
+        self._emit_verification_strategy(self.verification_strategy, previous_mode=previous)
+        return state
+
+    def _emit_verification_strategy(
+        self,
+        strategy: VerificationStrategy,
+        previous_mode: Optional[Any] = None,
+    ) -> None:
+        """Emit telemetry [VERIFY] untuk strategi mode yang sedang aktif."""
+        try:
+            payload = strategy.to_dict()
+            payload["activity"] = format_verification_activity(
+                strategy, previous_mode=previous_mode
+            )
+            self._emit_event("verification_strategy_applied", payload)
+        except Exception:  # noqa: BLE001 - telemetry tidak boleh menggagalkan task
+            return
+
+    def _policy_for_orchestrator(self) -> Optional[Dict[str, Any]]:
+        """Policy yang diteruskan ke orchestrator (dict ringkas) atau None."""
+        state = self.policy
+        if state is None:
+            return None
+        return state.to_dict()
+
     def _lifecycle_finalize(self, lifecycle: Optional["TaskLifecycle"], result: RuntimeResult) -> None:
         """Sinkronkan status akhir runtime ke lifecycle + emit event terminal.
 
@@ -886,6 +1088,15 @@ class AgentRuntime:
         yang sudah ada (bila session store tersedia).
         """
         cancelled = result.status == RuntimeStatus.CANCELLED
+
+        # Execution Policy (fast/balanced/deep): lampirkan ringkasan policy
+        # (requested vs effective) ke hasil runtime. Metadata-only; tidak
+        # mengubah status/loop. None bila policy tidak aktif.
+        try:
+            if hasattr(result, "policy"):
+                result.policy = self._policy_for_orchestrator()
+        except Exception:  # noqa: BLE001 - metadata tidak boleh menggagalkan task
+            pass
 
         # Final Agent Report = output final LLM. Ini SATU-SATUNYA field yang
         # dikirim verbatim (tanpa pemotongan sanitasi): report yang ditampilkan
@@ -1166,6 +1377,9 @@ class AgentRuntime:
         context_text = prepared.context_text()
         if context_text:
             parts.append("\n# Context\n" + context_text)
+        verification_advisory = self._verification_advisory()
+        if verification_advisory:
+            parts.append("\n# Strategi verifikasi (advisory, tidak mengikat)\n" + verification_advisory)
         return "\n".join(parts)
 
     def _build_step_task(self, prepared: PreparedTask, step: PlanStep) -> str:
@@ -1198,7 +1412,41 @@ class AgentRuntime:
         advisory = self._advisory_context(prepared)
         if advisory:
             parts.append("\n# Saran pendekatan (advisory, tidak mengikat)\n" + advisory)
+        verification_advisory = self._verification_advisory()
+        if verification_advisory:
+            parts.append(
+                "\n# Strategi verifikasi (advisory, tidak mengikat)\n" + verification_advisory
+            )
         return "\n".join(parts)
+
+    def _verification_advisory(self) -> str:
+        """Saran verifikasi berdasarkan mode efektif (advisory-only).
+
+        Tidak mengubah keputusan loop maupun completion: hanya memberikan
+        preferensi check kepada Agent (LLM). None bila policy tidak aktif
+        (backward compatible).
+        """
+        strategy = self.verification_strategy
+        if strategy is None:
+            return ""
+        lines = [
+            f"Mode: {strategy.mode.title()}",
+            "Preferensi verifikasi (tidak mengikat; LLM tetap menentukan langkah):",
+        ]
+        for check in strategy.checks:
+            lines.append(f"- {check}")
+        if strategy.mode == "fast":
+            lines.append(
+                "Fast tidak menghalangi test tambahan bila memang dibutuhkan; "
+                "hindari regression besar secara default kecuali ada alasan kuat."
+            )
+        elif strategy.mode == "deep":
+            lines.append(
+                "Untuk perubahan besar, pertimbangkan membuat Git checkpoint "
+                "(stash/commit) sebelum mengubah, lihat diff yang lebih luas, "
+                "dan review impact area sebelum final."
+            )
+        return "\n".join(lines)
 
     @staticmethod
     def _advisory_context(prepared: PreparedTask) -> str:

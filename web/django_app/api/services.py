@@ -151,6 +151,17 @@ class TaskRecord:
     # Execution mode (Task 01 — hanya parameter/niat execution, belum parallel).
     # Nilai valid: "queue" | "parallel". Default "queue" agar task lama kompatibel.
     execution_mode: str = _DEFAULT_EXECUTION_MODE
+    # Agent Execution Policy (fast/balanced/deep) — INFORMASI/strategi kerja,
+    # TERPISAH dari `status`/`execution_mode` di atas. requested_mode = mode
+    # yang diminta user; effective_mode = mode yang benar-benar dipakai Agent
+    # (dapat naik setelah assessment). SENGAJA field gateway (bukan enum
+    # TaskStatus core) agar TaskState/TaskLifecycle/.aether log/SSE tidak
+    # terpengaruh. None = policy tidak aktif (perilaku lama).
+    requested_mode: Optional[str] = None
+    effective_mode: Optional[str] = None
+    policy_reason: Optional[str] = None
+    policy_escalated: bool = False
+    policy_escalations: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -167,6 +178,11 @@ class TaskRecord:
             "queue_state": self.queue_state,
             "queue_order": self.queue_order,
             "execution_mode": self.execution_mode,
+            "requested_mode": self.requested_mode,
+            "effective_mode": self.effective_mode,
+            "policy_reason": self.policy_reason,
+            "policy_escalated": self.policy_escalated,
+            "policy_escalations": [dict(item) for item in self.policy_escalations],
         }
 
 
@@ -386,13 +402,16 @@ class GatewayService:
         # Consultant & runtime; lihat `_select_default_llm`).
         selection = self._select_default_llm(instances)
 
+        from agent_ai.config.settings import agent_default_mode
+        from agent_ai.runtime.policy import available_modes
+
         return {
             "providers": registry.list_providers(),
             "provider_instances": instances,
             "provider_instance_id": selection["instance_id"],
             "model_id": selection["model_id"],
-            "mode": settings.context.retrieval_profile,
-            "modes": ["minimal", "balanced", "deep"],
+            "mode": agent_default_mode(),
+            "modes": available_modes(),
         }
 
     @staticmethod
@@ -1711,6 +1730,15 @@ class GatewayService:
                 task_id, record.session_id
             )
 
+        # Agent Execution Policy (fast/balanced/deep): mode dari metadata task
+        # diteruskan sampai runtime (requested_mode). Metadata/strategi saja dan
+        # TIDAK mengubah keputusan loop LLM. Dikirim HANYA bila executor
+        # mendukungnya; nilai dibaca lewat helper policy existing agar
+        # normalisasi mode TIDAK diduplikasi di gateway.
+        requested_mode = self._task_requested_mode(meta)
+        if requested_mode and self._run_accepts("requested_mode"):
+            run_kwargs["requested_mode"] = requested_mode
+
         try:
             summary = self.task_executor.run(prepared, **run_kwargs)
         except Exception as exc:  # noqa: BLE001 - jangan biarkan thread crash
@@ -1735,6 +1763,58 @@ class GatewayService:
                 rec.runtime = {
                     "iterations": summary.get("iterations", 0),
                 }
+                # Ringkasan policy (INFO) pada record runtime, bila tersedia.
+                # Additive: ringkasan dari executor lama tanpa kunci ini -> None.
+                policy_summary = summary.get("policy") if isinstance(summary, dict) else None
+                if isinstance(policy_summary, dict):
+                    self._apply_policy_summary(rec, policy_summary)
+
+    @staticmethod
+    def _task_requested_mode(metadata: Dict[str, Any]) -> Optional[str]:
+        """Ambil mode policy (fast/balanced/deep) dari metadata task.
+
+        Menerima kunci `agent_mode`/`policy_mode`/`mode` (prioritas berurutan)
+        dan menormalisasi memakai resolver policy existing (alias mis.
+        "minimal" -> "fast"), sehingga gateway TIDAK menduplikasi aturan mode.
+        Mengembalikan None bila metadata tidak membawa mode (perilaku lama).
+        """
+        from agent_ai.runtime.policy import (
+            DEFAULT_MODE,
+            ExecutionPolicyResolver,
+            MODE_METADATA_KEYS,
+        )
+
+        if not isinstance(metadata, dict):
+            return None
+        raw = None
+        for key in MODE_METADATA_KEYS:
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                raw = value
+                break
+        if raw is None:
+            return None
+        state = ExecutionPolicyResolver().resolve(raw)
+        return state.requested_mode or DEFAULT_MODE
+
+    @staticmethod
+    def _apply_policy_summary(record: "TaskRecord", policy_summary: Dict[str, Any]) -> None:
+        """Simpan ringkasan policy efektif pada TaskRecord (metadata tampilan).
+
+        request/effective + alasan/escalation disimpan apa adanya; tidak ada
+        nilai yang diinterpretasi ulang dan tidak ada status task yang diubah.
+        """
+        requested = policy_summary.get("requested_mode")
+        effective = policy_summary.get("effective_mode")
+        record.requested_mode = str(requested) if requested else None
+        record.effective_mode = str(effective) if effective else None
+        reason = policy_summary.get("reason")
+        record.policy_reason = str(reason) if reason else None
+        record.policy_escalated = bool(policy_summary.get("escalated"))
+        escalations = policy_summary.get("escalations")
+        record.policy_escalations = [
+            dict(item) for item in escalations if isinstance(item, dict)
+        ] if isinstance(escalations, list) else []
 
     def _validate_provider_selection(self, metadata: Dict[str, Any]) -> None:
         """Validasi provider_instance_id / model_id dari metadata task.

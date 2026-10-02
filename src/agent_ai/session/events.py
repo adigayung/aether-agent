@@ -38,6 +38,17 @@ class EventType(str, Enum):
     # event system existing (session store), BUKAN channel/message bus kedua.
     APPROVAL_REQUESTED = "approval_requested"
     APPROVAL_RESOLVED = "approval_resolved"
+    # Agent Execution Policy (fast/balanced/deep): informasi/strategi kerja,
+    # bukan keputusan loop. Ditulis lewat event system existing (session store +
+    # Task Log), BUKAN channel/bus kedua. Hanya observability: policy TIDAK
+    # mengubah keputusan LLM maupun status task.
+    POLICY_APPLIED = "policy_applied"
+    POLICY_ESCALATED = "policy_escalated"
+    # Verification strategy (mode-aware): preferensi check sesuai effective_mode
+    # (fast/balanced/deep). Informasi/advisory saja; tidak mengubah keputusan
+    # loop maupun completion. Dipancarkan saat policy di-resolve dan saat
+    # escalation mengubah effective_mode.
+    VERIFICATION_STRATEGY_APPLIED = "verification_strategy_applied"
     TASK_COMPLETED = "task_completed"
     TASK_FAILED = "task_failed"
     TASK_CANCELLED = "task_cancelled"

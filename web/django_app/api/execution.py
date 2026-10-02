@@ -175,6 +175,7 @@ class TaskExecutor:
         permission_manager: Optional[PermissionManager] = None,
         project_matrix: Optional[Any] = None,
         approval_gate: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        requested_mode: Optional[str] = None,
     ) -> AgentRuntime:
         """Rakit AgentRuntime dengan ToolExecutor yang punya PermissionManager.
 
@@ -212,6 +213,12 @@ class TaskExecutor:
         approval_gate: gate approval ASK opsional (dari gateway). Diteruskan ke
         ToolExecutor agar action yang butuh approval (ASK) DITAHAN lalu dimintakan
         keputusan user. Bila None, ASK diperlakukan seperti sebelumnya.
+
+        requested_mode: mode Agent Execution Policy (fast/balanced/deep) yang
+        diminta task (dari metadata). OPSIONAL & metadata-only: diteruskan ke
+        AgentRuntime sebagai preferensi strategi kerja; TIDAK mengubah keputusan
+        loop LLM. Bila None, runtime memakai default 'balanced' hanya bila
+        metadata task memang membawa mode.
         """
         effective_pm = permission_manager or self.permission_manager
         matrix = project_matrix
@@ -283,6 +290,10 @@ class TaskExecutor:
             # Cooperative cancellation: token dibagikan gateway -> runtime ->
             # orchestrator agar loop berhenti di safe boundary saat user Stop.
             cancel_token=cancel_token,
+            # Agent Execution Policy (fast/balanced/deep): mode yang diminta
+            # task (metadata) sebagai preferensi strategi kerja. Metadata-only:
+            # TIDAK mengubah keputusan loop LLM.
+            requested_mode=requested_mode,
         )
 
     # ------------------------------------------------------------------ #
@@ -327,6 +338,7 @@ class TaskExecutor:
         project_permission_config: Optional[Any] = None,
         project_permission_matrix: Optional[Any] = None,
         approval_gate: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        requested_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Jalankan PreparedTask lewat AETHER Runtime (synchronous).
 
@@ -371,6 +383,10 @@ class TaskExecutor:
                 keputusan user; True -> dilanjutkan, False -> dibatalkan dan
                 hasil penolakan dikembalikan ke Agent. Bila None, ASK
                 diperlakukan seperti sebelumnya (tidak dijalankan).
+            requested_mode: mode Agent Execution Policy (fast/balanced/deep)
+                yang diminta task. OPSIONAL; metadata/strategi saja dan TIDAK
+                mengubah keputusan loop LLM. Bila None, tidak ada policy yang
+                dipaksa (perilaku task lama tidak berubah).
 
         Returns:
             Ringkasan hasil: {"status", "result", "error", "iterations"}.
@@ -464,6 +480,7 @@ class TaskExecutor:
                 permission_manager=permissions,
                 project_matrix=project_permission_matrix,
                 approval_gate=approval_gate,
+                requested_mode=requested_mode,
             )
             result = runtime.run(
                 prepared,
@@ -532,11 +549,16 @@ class TaskExecutor:
         if on_status is not None:
             on_status(status, result.result, result.error)
 
+        # Ringkasan execution policy (INFO/strategi) bila runtime menyediakannya.
+        # Additive: runtime/fake lama tanpa `.policy` tetap mengembalikan bentuk
+        # respons yang sama seperti sebelumnya (kunci `policy` = None).
+        policy_summary = getattr(result, "policy", None)
         return {
             "status": status,
             "result": result.result,
             "error": result.error,
             "iterations": result.iterations,
+            "policy": policy_summary if isinstance(policy_summary, dict) else None,
         }
 
 

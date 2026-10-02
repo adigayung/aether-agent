@@ -207,4 +207,41 @@ assert.equal(rep.items[0].count, 2);
 const linesOnly = formatActivityLines([{ event_type: "change_detected", payload: {} }]);
 assert.deepEqual(linesOnly, [], "event non-timeline tidak masuk baris ACTIVITY");
 
+// --- Policy telemetry: requested vs effective mode ---------------------------
+const policyApplied = [
+  {
+    event_type: "policy_applied",
+    timestamp: 1700000001,
+    payload: {
+      requested_mode: "fast",
+      effective_mode: "fast",
+      escalated: false,
+      activity: "[POLICY]\nRequested Mode: Fast\nEffective Mode: Fast",
+    },
+  },
+];
+const policyLines = formatActivityLines(policyApplied);
+assert.equal(policyLines.length, 1, "policy_applied menghasilkan satu baris");
+assert.ok(policyLines[0].includes("[POLICY]"), "baris policy mengandung [POLICY]");
+assert.ok(policyLines[0].includes("Requested Mode: Fast"), "menampilkan requested mode");
+assert.ok(policyLines[0].includes("Effective Mode: Fast"), "menampilkan effective mode");
+
+const policyEscalated = [
+  {
+    event_type: "policy_escalated",
+    timestamp: 1700000005,
+    payload: {
+      from_mode: "fast",
+      to_mode: "deep",
+      reason: "Architecture impact detected",
+      activity: "[POLICY]\nEscalated:\nFast → Deep\n\nReason:\nArchitecture impact detected",
+    },
+  },
+];
+const escalationLines = formatActivityLines(policyEscalated);
+assert.equal(escalationLines.length, 1, "policy_escalated menghasilkan satu baris");
+assert.ok(escalationLines[0].includes("[POLICY]"), "baris escalation mengandung [POLICY]");
+assert.ok(escalationLines[0].includes("Escalated: Fast → Deep"), "menampilkan escalation");
+assert.ok(escalationLines[0].includes("Reason: Architecture impact detected"), "menampilkan reason");
+
 console.log(`[OK] activityCopy: format benar, urutan kronologis, truncation dari OLDEST, total <= ${MAX}.`);

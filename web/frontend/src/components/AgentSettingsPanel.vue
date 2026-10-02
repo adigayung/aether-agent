@@ -22,13 +22,16 @@ const error = ref("");
 const notice = ref("");
 
 // Nilai AKTUAL dari backend (sumber kebenaran tampilan; bukan nilai lokal UI).
-const actual = ref({ system_prompt: "", default_system_prompt: "" });
+const actual = ref({ system_prompt: "", default_system_prompt: "", default_mode: "balanced" });
 // Draft editor (diisi dari `actual` setiap kali load/save).
 const draft = ref("");
+const draftMode = ref("balanced");
 
 const maxChars = 200000;
 
-const dirty = computed(() => draft.value !== actual.value.system_prompt);
+const dirty = computed(
+  () => draft.value !== actual.value.system_prompt || draftMode.value !== actual.value.default_mode
+);
 const charCount = computed(() => draft.value.length);
 const canSave = computed(
   () => !busy.value && dirty.value && !!draft.value.trim() && charCount.value <= maxChars
@@ -45,8 +48,10 @@ function applyActual(settings) {
   actual.value = {
     system_prompt: agent.system_prompt || "",
     default_system_prompt: agent.default_system_prompt || "",
+    default_mode: agent.default_mode || "balanced",
   };
   draft.value = actual.value.system_prompt;
+  draftMode.value = actual.value.default_mode;
 }
 
 async function load() {
@@ -62,18 +67,21 @@ async function load() {
   }
 }
 
-// Simpan PARSIAL: hanya `agent.system_prompt` yang dikirim. Backend melakukan
-// deep-merge ke `data/settings.json` sehingga key lain dipertahankan.
+// Simpan PARSIAL: `agent.system_prompt` dan `agent.default_mode` yang dikirim.
+// Backend melakukan deep-merge ke `data/settings.json` sehingga key lain dipertahankan.
 async function save() {
   busy.value = true;
   error.value = "";
   notice.value = "";
   try {
     const data = await updateGlobalSettings({
-      agent: { system_prompt: draft.value },
+      agent: {
+        system_prompt: draft.value,
+        default_mode: draftMode.value,
+      },
     });
     applyActual(data.settings || {});
-    notice.value = "System Prompt Agent disimpan.";
+    notice.value = "Pengaturan Agent berhasil disimpan.";
   } catch (e) {
     error.value = e.message || String(e);
   } finally {
@@ -84,6 +92,7 @@ async function save() {
 // Batalkan perubahan yang belum disimpan (kembali ke nilai AKTUAL backend).
 function reset() {
   draft.value = actual.value.system_prompt;
+  draftMode.value = actual.value.default_mode;
   notice.value = "";
   error.value = "";
 }
@@ -91,6 +100,7 @@ function reset() {
 // Isi draft dengan System Prompt bawaan AETHER (belum tersimpan sampai Save).
 function restoreDefault() {
   draft.value = actual.value.default_system_prompt || "";
+  draftMode.value = "balanced";
   notice.value = "";
   error.value = "";
 }
@@ -120,11 +130,12 @@ onMounted(load);
         <span class="as-scope-badge">Global AETHER Settings</span>
         <span class="as-scope-note">
           Disimpan di <span class="mono">data/settings.json</span> ->
-          <span class="mono">agent.system_prompt</span>.
+          <span class="mono">agent.system_prompt</span> /
+          <span class="mono">agent.default_mode</span>.
         </span>
       </div>
 
-      <div v-if="loading" class="wb-empty">Memuat System Prompt…</div>
+      <div v-if="loading" class="wb-empty">Memuat pengaturan Agent…</div>
       <template v-else>
         <div class="as-row">
           <div class="as-label">
@@ -154,6 +165,28 @@ onMounted(load);
           <span class="mono">{{ charCount }} / {{ maxChars }} karakter</span>
           <span v-if="dirty" class="as-dirty">perubahan belum disimpan</span>
           <span v-else class="as-clean">tersimpan</span>
+        </div>
+
+        <!-- Mode selector on Settings -> Agent -->
+        <div class="as-row as-mode-row">
+          <div class="as-label">
+            <div class="as-name">Default Execution Mode</div>
+            <div class="as-help">
+              Preferensi strategi eksekusi untuk task baru. Task dapat mengubah mode sebelum dijalankan; effective mode tetap ditentukan oleh Agent Policy System.
+            </div>
+          </div>
+          <div class="as-control">
+            <select v-model="draftMode" class="input-a" :disabled="busy">
+              <option value="fast">Fast</option>
+              <option value="balanced">Balanced</option>
+              <option value="deep">Deep</option>
+            </select>
+          </div>
+        </div>
+        <div class="as-mode-help">
+          <div><strong>Fast</strong> — Strategi cepat untuk perubahan kecil</div>
+          <div><strong>Balanced</strong> — Strategi default AETHER untuk pekerjaan umum</div>
+          <div><strong>Deep</strong> — Strategi analisis mendalam untuk perubahan kompleks</div>
         </div>
 
         <div class="as-actions">
@@ -192,6 +225,10 @@ onMounted(load);
           {{ actual.system_prompt.length }} karakter ·
           {{ isCustom ? "custom" : "default (bawaan)" }}
         </span>
+      </div>
+      <div class="kv">
+        <span class="k mono">agent.default_mode</span>
+        <span class="v mono">{{ actual.default_mode }}</span>
       </div>
     </div>
   </section>
@@ -311,6 +348,29 @@ onMounted(load);
   margin-top: 8px;
   font-size: 11.5px;
   color: var(--text-faint);
+}
+
+.as-mode-row {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.as-mode-help {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(139, 92, 246, 0.06);
+  border: 1px solid rgba(139, 92, 246, 0.15);
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+.as-mode-help div {
+  margin: 2px 0;
+}
+.as-mode-help strong {
+  color: var(--text);
 }
 
 .status-tag.ok {
