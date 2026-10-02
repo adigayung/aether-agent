@@ -51,6 +51,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from agent_ai.projects.venv_resolver import VenvResolver
 from agent_ai.tools.base import BaseTool, ToolExecutionError, ToolValidationError
 from agent_ai.tools.filesystem import _DEFAULT_ROOT
 
@@ -359,6 +360,7 @@ def _run_process(
     timeout: float,
     shell: bool,
     cancel_token: Optional[Any] = None,
+    env: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Jalankan proses dengan timeout yang BENAR-BENAR menghentikan process tree.
 
@@ -385,6 +387,8 @@ def _run_process(
         "text": True,
         "shell": bool(shell),
     }
+    if env is not None:
+        popen_kwargs["env"] = env
     if os.name == "nt":
         # Proses pada grup baru: memisahkan sinyal Ctrl+C dan memudahkan
         # terminasi tree (taskkill /T).
@@ -552,6 +556,7 @@ class RunCommandTool(BaseTool):
         root: Optional[Path] = None,
         *,
         cancel_token: Optional[Any] = None,
+        enable_venv: bool = True,
     ) -> None:
         self.root = Path(root) if root else _DEFAULT_ROOT
         # Token cancel kooperatif (opsional). Bila diisi, run_command
@@ -559,6 +564,14 @@ class RunCommandTool(BaseTool):
         # timeout) sehingga Stop benar-benar membebaskan slot queue. Bila None,
         # perilaku persis seperti sebelumnya (backward compatible).
         self._cancel_token = cancel_token
+        # Resolver virtualenv project: otomatis memprioritaskan
+        # <root>/<bin> (Scripts|bin) ke depan PATH sehingga command
+        # `python`/`pip`/`pytest` memakai interpreter venv. Cache-nya
+        # dinamis — tidak pernah "final-None" — jadi bila venv dibuat
+        # di tengah task, command berikutnya langsung memakainya tanpa
+        # restart. Bisa dimatikan via enable_venv=False.
+        self._enable_venv = bool(enable_venv)
+        self._venv_resolver = VenvResolver(self.root) if self._enable_venv else None
 
     def execute(self, **arguments: Any) -> Dict[str, Any]:
         command = arguments.get("command")
@@ -611,8 +624,26 @@ class RunCommandTool(BaseTool):
         # bisa menggantung permanen bila ada grandchild pemegang pipe).
         argv: Optional[List[str]] = None
         target: Any = str(command)
+        # Resolusi venv dilakukan SEKALI per command (fresh) lalu dipakai
+        # untuk env + resolusi executable. Cache resolver tidak pernah
+        # final-None sehingga venv yang baru dibuat langsung terdeteksi.
+        venv_dir: Optional[Path] = None
+        if self._venv_resolver is not None:
+            venv_dir = self._venv_resolver.resolve()
         if not use_shell:
             argv = _split_command(str(command))
+            # Prioritaskan interpreter/executable dari venv project. Pada
+            # Windows `CreateProcess` (shell=False) mencari executable lewat
+            # PATH milik PROSES INDUK, bukan `env` yang kita berikan, jadi
+            # `python` polos tetap memakai interpreter global tanpa langkah
+            # ini. Hanya nama polos (tanpa path separator) yang di-resolve,
+            # dan hanya bila benar-benar ada di folder venv.
+            if venv_dir is not None and self._venv_resolver is not None:
+                prog = argv[0]
+                if prog and not any(sep in prog for sep in ("/", "\\")):
+                    venv_exe = self._venv_resolver.resolve_executable(prog)
+                    if venv_exe:
+                        argv[0] = venv_exe
             # Windows: resolusi shim .cmd/.bat yang tidak ditangani
             # CreateProcess (mis. npm -> npm.CMD). Tanpa ini, command
             # yang hanya ada sebagai shim batch gagal dijalankan.
@@ -623,6 +654,11 @@ class RunCommandTool(BaseTool):
             target = argv
 
         start = time.perf_counter()
+        # Bangun environment subprocess: venv project diberi prioritas
+        # PATH. Bila venv belum ada, base_env = os.environ (perilaku lama).
+        env: Optional[Dict[str, str]] = None
+        if self._venv_resolver is not None:
+            env = self._venv_resolver.build_env(venv=venv_dir)
         try:
             outcome = _run_process(
                 target,
@@ -630,6 +666,7 @@ class RunCommandTool(BaseTool):
                 timeout=timeout,
                 shell=use_shell,
                 cancel_token=self._cancel_token,
+                env=env,
             )
         except FileNotFoundError as exc:
             duration = time.perf_counter() - start
