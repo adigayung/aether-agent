@@ -981,6 +981,113 @@ def consultant_consult(request: HttpRequest, service: GatewayService) -> JsonRes
     )
 
 
+# ---------------------------------------------------------------------------
+# Consultant Session API (list / get / create / rename / delete / reset)
+# ---------------------------------------------------------------------------
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+@_handle
+def consultant_sessions(
+    request: HttpRequest, service: GatewayService
+) -> JsonResponse:
+    """GET /api/consultant/sessions -> list consultant sessions (newest first).
+
+    Query params:
+        project_id (opsional): filter sessions by project.
+
+    POST /api/consultant/sessions -> create a new consultant session.
+
+    Body JSON (opsional):
+        project_id: project terkait (default active project).
+        title: judul sesi (default auto dari pesan user pertama).
+    """
+    if request.method == "GET":
+        project_id = request.GET.get("project_id") or None
+        sessions = service.list_consultant_sessions(project_id=project_id)
+        # Light metadata for the list (UI hanya butuh judul/waktu/turn count).
+        items = []
+        for s in sessions:
+            turns = s.get("turns") or []
+            items.append(
+                {
+                    "session_id": s.get("session_id"),
+                    "project_id": s.get("project_id"),
+                    "title": s.get("title"),
+                    "created_at": s.get("created_at"),
+                    "updated_at": s.get("updated_at"),
+                    "turn_count": len(turns),
+                }
+            )
+        return _json_response({"sessions": items})
+
+    body = _parse_json_body(request)
+    project_id = body.get("project_id") or None
+    title = body.get("title") or None
+    if not project_id:
+        try:
+            project_id = service.project_store.get_active_project_id() or None
+        except Exception:  # noqa: BLE001
+            project_id = None
+    session = service.create_consultant_session(project_id=project_id, title=title)
+    return _json_response(session, status=201)
+
+
+@csrf_exempt
+@require_http_methods(["GET", "PATCH", "DELETE"])
+@_handle
+def consultant_session_detail(
+    request: HttpRequest, service: GatewayService, session_id: str
+) -> JsonResponse:
+    """GET /api/consultant/sessions/<id> -> get full session (incl. turns).
+
+    PATCH /api/consultant/sessions/<id> -> rename (body: {\"title\": \"...\"}).
+
+    DELETE /api/consultant/sessions/<id> -> delete session.
+    """
+    # project_id filter (opsional, agar scope per-project konsisten)
+    project_id = request.GET.get("project_id") or None
+    if not project_id:
+        try:
+            project_id = service.project_store.get_active_project_id() or None
+        except Exception:  # noqa: BLE001
+            project_id = None
+
+    if request.method == "GET":
+        session = service.get_consultant_session(session_id, project_id=project_id)
+        if session is None:
+            from api.services import NotFoundError
+
+            raise NotFoundError("Session not found")
+        return _json_response(session)
+
+    if request.method == "PATCH":
+        body = _parse_json_body(request)
+        title = body.get("title")
+        if not title or not str(title).strip():
+            from api.services import ValidationError
+
+            raise ValidationError("Field 'title' wajib diisi.")
+        updated = service.rename_consultant_session(
+            session_id, str(title).strip(), project_id=project_id
+        )
+        if updated is None:
+            from api.services import NotFoundError
+
+            raise NotFoundError("Session not found")
+        return _json_response(updated)
+
+    # DELETE
+    if project_id:
+        deleted = service.delete_consultant_session(session_id, project_id=project_id)
+    else:
+        deleted = service.delete_consultant_session(session_id)
+    if not deleted:
+        from api.services import NotFoundError
+
+        raise NotFoundError("Session not found")
+    return _json_response({"deleted": True, "session_id": session_id})
+
+
 @require_http_methods(["GET"])
 def events(request: HttpRequest) -> StreamingHttpResponse:
     """GET /api/events -> SSE stream event AETHER (server -> client).

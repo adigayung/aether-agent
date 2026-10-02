@@ -1285,8 +1285,6 @@ button {
   width: 100%;
   padding: 6px 10px;
   font-size: 12px;
-  max-height: 200px;
-  overflow-y: auto;
 }
 
 .close-x {
@@ -1543,6 +1541,7 @@ button {
 select.input-a {
   appearance: none;
   cursor: pointer;
+  color-scheme: dark;
 }
 .send-btn {
   width: 38px;
@@ -2327,8 +2326,6 @@ select.input-a {
   width: 100%;
   padding: 7px 11px;
   font-size: 12.5px;
-  max-height: 220px;
-  overflow-y: auto;
 }
 .composer-actions {
   display: flex;
@@ -3762,6 +3759,103 @@ tr:hover .q-copy-btn.hist-copy {
   overflow-y: auto;
   overflow-x: hidden;
   padding: 10px;
+}
+.consultant-sessions-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.cs-hdr-title {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+.cs-new-btn {
+  font-size: 12px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-raised);
+  color: var(--accent);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.cs-new-btn:hover {
+  background: var(--bg-hover);
+}
+.consultant-session-loading {
+  font-size: 13px;
+  color: var(--text-faint);
+  padding: 14px 10px;
+}
+.consultant-session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.consultant-session-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+.consultant-session-item:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-soft);
+}
+.consultant-session-item.active {
+  background: var(--bg-selected, rgba(99, 102, 241, 0.12));
+  border-color: var(--accent);
+}
+.cs-item-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.cs-item-title {
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cs-item-meta {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.cs-item-del {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+.consultant-session-item:hover .cs-item-del {
+  opacity: 1;
+}
+.cs-item-del:hover {
+  background: var(--bg-hover);
+  color: var(--err, #f87171);
 }
 .consultant-session-empty {
   display: flex;

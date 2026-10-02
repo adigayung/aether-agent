@@ -603,6 +603,13 @@ function closeComposer() {
 // context dijalankan backend (endpoint Consultant). App hanya membuka modal dan
 // mengirim Task Proposal yang dihasilkan ke alur task Agent yang sudah ada.
 const consultantOpen = ref(false);
+// Persist active consultant session ID across reloads (localStorage).
+const activeConsultantSessionId = ref("");
+// Load from localStorage on startup.
+try {
+  const stored = window.localStorage.getItem("aether-active-consultant-session");
+  if (stored) activeConsultantSessionId.value = stored;
+} catch (_) {/* ignore */}
 // Panel TASKS di Consultant (SATU queue global AETHER). Penanda refresh untuk
 // QueuePanel; dinaikkan setelah Run Task / event terminal task.
 const queueRefresh = ref(0);
@@ -639,7 +646,24 @@ function openConsultant() {
   consultantOpen.value = true;
 }
 function closeConsultant() {
+  // Persist active session when closing modal.
+  try {
+    window.localStorage.setItem(
+      "aether-active-consultant-session",
+      activeConsultantSessionId.value
+    );
+  } catch (_) {/* ignore */}
   consultantOpen.value = false;
+}
+
+function onConsultantSessionChange(id) {
+  activeConsultantSessionId.value = id || "";
+  try {
+    window.localStorage.setItem(
+      "aether-active-consultant-session",
+      activeConsultantSessionId.value
+    );
+  } catch (_) {/* ignore */}
 }
 
 // Task Proposal dari Consultant -> task Agent (alur task existing submitTask).
@@ -2311,9 +2335,11 @@ onBeforeUnmount(() => {
       :terminal-task-id="terminalTaskId"
       :queue-refresh-key="queueRefresh"
       :project-id="selectedProjectId || null"
+      :active-session-id="activeConsultantSessionId"
       @close="closeConsultant"
       @update:provider-instance-id="selectedProviderInstanceId = $event"
       @update:model-id="selectedModelId = $event"
+      @update:active-session-id="onConsultantSessionChange"
       @run-task="runConsultantTask"
       @stop-task="stopQueueTask"
       @view-task="viewQueueTask"

@@ -349,6 +349,43 @@ class GatewayService:
             self._consultant_service = ConsultantService()
         return self._consultant_service
 
+    # ------------------------------------------------------------------ #
+    # Consultant Session Management (pass-through to ConsultantService)
+    # ------------------------------------------------------------------ #
+    def list_consultant_sessions(self, project_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List consultant sessions, newest first, optionally filtered by project_id."""
+        return self.consultant_service.list_sessions(project_id=project_id)
+
+    def get_consultant_session(
+        self, session_id: str, project_id: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Get a consultant session by ID, optionally scoped to a project."""
+        return self.consultant_service.get_session(session_id, project_id=project_id)
+
+    def create_consultant_session(
+        self, project_id: Optional[str] = None, title: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Create a new consultant session (scoped to project if given)."""
+        return self.consultant_service.create_session(project_id=project_id, title=title)
+
+    def rename_consultant_session(
+        self, session_id: str, title: str, project_id: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Rename a consultant session."""
+        return self.consultant_service.rename_session(session_id, title, project_id=project_id)
+
+    def delete_consultant_session(
+        self, session_id: str, project_id: Optional[str] = None
+    ) -> bool:
+        """Delete a consultant session."""
+        return self.consultant_service.delete_session(session_id, project_id=project_id)
+
+    def reset_consultant_session(
+        self, session_id: str, project_id: Optional[str] = None
+    ) -> bool:
+        """Clear a consultant session's turns (keep metadata)."""
+        return self.consultant_service.reset_session(session_id, project_id=project_id)
+
     @property
     def github_backup_service(self) -> Any:
         """GithubBackupService (lazy) — fitur OPTIONAL per project.

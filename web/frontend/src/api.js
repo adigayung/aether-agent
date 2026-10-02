@@ -393,6 +393,43 @@ export function consult(
   return request("/consultant/consult", { method: "POST", body: JSON.stringify(body) });
 }
 
+// Consultant session management: persistent transcripts.
+export function listConsultantSessions(projectId = null) {
+  const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+  return request(`/consultant/sessions${qs}`);
+}
+
+export function getConsultantSession(sessionId, projectId = null) {
+  const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+  return request(`/consultant/sessions/${encodeURIComponent(sessionId)}${qs}`);
+}
+
+export function createConsultantSession({ projectId = null, title = null } = {}) {
+  const body = {};
+  if (projectId) body.project_id = projectId;
+  if (title) body.title = title;
+  return request("/consultant/sessions", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function renameConsultantSession(sessionId, title, projectId = null) {
+  const body = { title };
+  if (projectId) body.project_id = projectId;
+  return request(`/consultant/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+export function deleteConsultantSession(sessionId, projectId = null) {
+  const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+  return request(`/consultant/sessions/${encodeURIComponent(sessionId)}${qs}`, {
+    method: "DELETE",
+  });
+}
+
 // --- Extension Management (Task 07) - generic management API (thin over ExtensionManager) ---
 export function listExtensions() {
   return request("/extensions");

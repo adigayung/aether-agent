@@ -19,6 +19,7 @@ from __future__ import annotations
 import re
 import threading
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent_ai.consultant.guard import (
@@ -40,6 +41,7 @@ from agent_ai.core.orchestrator import AgentOrchestrator
 # Consultant maupun Agent Task). Satu implementasi tunggal; alias dipertahankan
 # agar pemanggil lama tetap bekerja.
 from agent_ai.vision.parts import build_image_parts as _build_image_parts
+from agent_ai.consultant.store import ConsultantSessionStore
 
 #: Batas langkah reasoning/tool per giliran konsultasi (safety, bukan target).
 _DEFAULT_MAX_STEPS = 40
@@ -95,15 +97,29 @@ class ConsultantSession:
         session_id: Optional[str] = None,
         project_id: Optional[str] = None,
         title: Optional[str] = None,
+        created_at: Optional[float] = None,
+        updated_at: Optional[float] = None,
+        turns: Optional[List[ConsultantTurn]] = None,
+        on_change: Optional[Any] = None,
     ) -> None:
         import time
 
         self.session_id = session_id or uuid.uuid4().hex
         self.project_id: Optional[str] = project_id
         self.title: str = title or "New Chat"
-        self.created_at: float = time.time()
-        self.updated_at: float = self.created_at
-        self.turns: List[ConsultantTurn] = []
+        now = time.time()
+        self.created_at: float = created_at if created_at is not None else now
+        self.updated_at: float = updated_at if updated_at is not None else self.created_at
+        self.turns: List[ConsultantTurn] = list(turns or [])
+        # Optional callback invoked whenever session state mutates (write-through).
+        self._on_change = on_change
+
+    def _notify(self) -> None:
+        if self._on_change is not None:
+            try:
+                self._on_change(self)
+            except Exception:  # noqa: BLE001 - persistensi tidak boleh menggagalkan operasi
+                pass
 
     def touch(self) -> None:
         """Perbarui timestamp sesi (dipanggil pada setiap interaksi)."""
@@ -120,23 +136,24 @@ class ConsultantSession:
         return None
 
     def add(self, role: str, text: str) -> None:
-        """Tambahkan satu giliran ke konteks sesi (bounded)."""
+        """Tambahkan satu giliran ke konteks sesi (full retention)."""
         self.turns.append(ConsultantTurn(role=role, text=text or ""))
         self.touch()
         # Auto-title: jika masih default & ada pesan user pertama, turunkan
         # dari teks user pertama (hanya sekali).
         if self.title == "New Chat" and role == "user" and text and text.strip():
             self.title = _auto_title(text)
-        if len(self.turns) > _MAX_CONTEXT_TURNS * 2:
-            # Simpan hanya N pasangan turn terakhir (hindari konteks tanpa batas).
-            self.turns = self.turns[-_MAX_CONTEXT_TURNS * 2 :]
+        # Retain every turn. Context bounding is applied only when building the
+        # task sent to the LLM, so the UI can always resume the full transcript.
+        self._notify()
 
     def build_task(self, message: str) -> str:
-        """Bangun teks task untuk loop, menyertakan konteks sesi sebelumnya."""
+        """Build task with only the bounded recent context window."""
         if not self.turns:
             return message
+        effective_turns = self.turns[-_MAX_CONTEXT_TURNS * 2 :]
         lines = ["# Percakapan konsultasi sebelumnya", ""]
-        for turn in self.turns:
+        for turn in effective_turns:
             who = "User" if turn.role == "user" else "Consultant"
             lines.append(f"{who}: {turn.text}")
         lines.append("")
@@ -154,6 +171,24 @@ class ConsultantSession:
             "turns": [t.to_dict() for t in self.turns],
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ConsultantSession":
+        """Restore a ConsultantSession from a serialized dict."""
+        raw_turns = data.get("turns") or []
+        turns = [
+            ConsultantTurn(role=t.get("role", ""), text=t.get("text", ""))
+            for t in raw_turns
+            if isinstance(t, dict)
+        ]
+        return cls(
+            session_id=data.get("session_id"),
+            project_id=data.get("project_id"),
+            title=data.get("title"),
+            created_at=data.get("created_at"),
+            updated_at=data.get("updated_at"),
+            turns=turns,
+        )
+
 
 class ConsultantService:
     """Menjalankan satu giliran konsultasi memakai komponen AETHER existing.
@@ -162,16 +197,25 @@ class ConsultantService:
         max_steps: batas langkah reasoning/tool per giliran (safety).
     """
 
-    def __init__(self, max_steps: int = _DEFAULT_MAX_STEPS) -> None:
+    def __init__(self, max_steps: int = _DEFAULT_MAX_STEPS, store_path: Optional[str] = None) -> None:
         self.max_steps = max_steps
-        # Sesi di-key oleh (project_id, session_id) agar TERISOLASI per project:
-        # id sesi yang sama pada project berbeda tidak pernah berbagi konteks.
+        # Persistent store for Consultant sessions (write-through JSON).
+        self._store = ConsultantSessionStore(store_path)
+        # In-memory cache keyed by (project_id, session_id) for fast access.
+        # Loaded from store at init; kept in sync via write-through.
         self._sessions: Dict[Tuple[str, str], ConsultantSession] = {}
         self._lock = threading.Lock()
+        self._load_sessions_from_store()
 
     # ------------------------------------------------------------------ #
     # Sessions
     # ------------------------------------------------------------------ #
+    def _make_persist_callback(self):
+        """Create a write-through callback for ConsultantSession.add()."""
+        def _persist(session: ConsultantSession) -> None:
+            self._store.save_session(session.to_dict())
+        return _persist
+
     def _get_session(
         self, session_id: Optional[str], project_id: Optional[str] = None
     ) -> ConsultantSession:
@@ -189,6 +233,16 @@ class ConsultantService:
                 existing = self._sessions.get((project_key, session_id))
                 if existing is not None:
                     return existing
+                # Fallback: restore from persistent store (e.g. after restart or
+                # when the session was created under a different in-memory map).
+                stored = self._store.get_session(
+                    session_id, project_id=project_id if project_id else None
+                )
+                if stored is not None:
+                    session = ConsultantSession.from_dict(stored)
+                    session._on_change = self._make_persist_callback()
+                    self._sessions[(project_key, session_id)] = session
+                    return session
                 # Adopsi sesi anonim (project belum ditetapkan) dengan session_id
                 # yang sama, lalu kaitkan ke project sekarang. Menjaga kontinuitas
                 # sesi yang dibuat lewat create_session() tanpa project.
@@ -197,8 +251,13 @@ class ConsultantService:
                     anonymous.project_id = project_id
                     self._sessions[(project_key, session_id)] = anonymous
                     return anonymous
-            session = ConsultantSession(session_id=session_id, project_id=project_id)
+            session = ConsultantSession(
+                session_id=session_id,
+                project_id=project_id,
+                on_change=self._make_persist_callback(),
+            )
             self._sessions[(project_key, session.session_id)] = session
+            self._store.save_session(session.to_dict())
             return session
 
     def _find_session(
@@ -206,19 +265,76 @@ class ConsultantService:
     ) -> Optional[ConsultantSession]:
         """Cari objek sesi (project_id None = cari lintas project)."""
         if project_id is not None:
-            return self._sessions.get((project_id, session_id))
+            session = self._sessions.get((project_id, session_id))
+            if session is not None:
+                return session
+            stored = self._store.get_session(session_id, project_id=project_id)
+            if stored is not None:
+                session = ConsultantSession.from_dict(stored)
+                session._on_change = self._make_persist_callback()
+                self._sessions[(project_id, session_id)] = session
+                return session
+            return None
         for session in self._sessions.values():
             if session.session_id == session_id:
                 return session
+        stored = self._store.get_session(session_id)
+        if stored is not None:
+            session = ConsultantSession.from_dict(stored)
+            session._on_change = self._make_persist_callback()
+            self._sessions[(stored.get("project_id") or "", session.session_id)] = session
+            return session
         return None
+
+    def _load_sessions_from_store(self) -> None:
+        """Muat sesi dari persistent store ke cache in-memory (saat init)."""
+        try:
+            metas = self._store.list_sessions()
+        except Exception:  # noqa: BLE001 - store tidak boleh menggagalkan startup
+            return
+        persist_cb = self._make_persist_callback()
+        for meta in metas:
+            sid = meta.get("session_id")
+            pid = meta.get("project_id") or ""
+            if not sid:
+                continue
+            if (pid, sid) in self._sessions:
+                continue
+            data = self._store.get_session(sid, project_id=pid if pid else None)
+            if data:
+                session = ConsultantSession.from_dict(data)
+                session._on_change = persist_cb
+                self._sessions[(pid, sid)] = session
+
+    def _load_sessions_from_store(self) -> None:
+        """Muat sesi dari persistent store ke cache in-memory (saat init)."""
+        try:
+            metas = self._store.list_sessions()
+        except Exception:  # noqa: BLE001 - store tidak boleh menggagalkan startup
+            return
+        for meta in metas:
+            sid = meta.get("session_id")
+            pid = meta.get("project_id") or ""
+            if not sid:
+                continue
+            if (pid, sid) in self._sessions:
+                continue
+            data = self._store.get_session(sid, project_id=pid if pid else None)
+            if data:
+                self._sessions[(pid, sid)] = ConsultantSession.from_dict(data)
 
     def create_session(
         self, project_id: Optional[str] = None, title: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Buat sesi Consultant in-memory baru (ter-scope ke project)."""
+        """Buat sesi Consultant baru (ter-scope ke project) dan simpan ke disk."""
         with self._lock:
-            session = ConsultantSession(project_id=project_id, title=title)
+            session = ConsultantSession(
+                project_id=project_id,
+                title=title,
+                on_change=self._make_persist_callback(),
+            )
             self._sessions[(project_id or "", session.session_id)] = session
+            self._store.save_session(session.to_dict())
             return session.to_dict()
 
     def list_sessions(self, project_id: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -253,6 +369,7 @@ class ConsultantService:
                 return None
             session.title = str(title or "New Chat").strip() or "New Chat"
             session.touch()
+            self._store.save_session(session.to_dict())
             return session.to_dict()
 
     def delete_session(
@@ -266,13 +383,18 @@ class ConsultantService:
     ) -> bool:
         """Hapus konteks sesi (mulai konsultasi baru). Returns True bila ada."""
         with self._lock:
+            deleted = False
             if project_id is not None:
-                return self._sessions.pop((project_id, session_id), None) is not None
-            for key, session in list(self._sessions.items()):
-                if session.session_id == session_id:
-                    del self._sessions[key]
-                    return True
-            return False
+                deleted = self._sessions.pop((project_id, session_id), None) is not None
+            else:
+                for key, session in list(self._sessions.items()):
+                    if session.session_id == session_id:
+                        del self._sessions[key]
+                        deleted = True
+                        break
+            if deleted:
+                self._store.delete_session(session_id, project_id=project_id)
+            return deleted
 
     # ------------------------------------------------------------------ #
     # Consult
@@ -406,6 +528,8 @@ class ConsultantService:
         # Simpan giliran ke konteks sesi (untuk konsultasi berikutnya).
         session.add("user", str(message).strip())
         session.add("consultant", reply)
+        # Write-through: persist updated session (with new turns) to disk.
+        self._store.save_session(session.to_dict())
 
         return ConsultantResult(
             session_id=session.session_id,

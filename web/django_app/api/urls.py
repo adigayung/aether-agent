@@ -126,6 +126,12 @@ urlpatterns = [
     # Report API (final Agent Report per task)
     path("tasks/<str:task_id>/report", views.task_report, name="task_report"),
     # Consultant API (AETHER reasoning layer, read-only terhadap CODE PROJECT)
+    path("consultant/sessions", views.consultant_sessions, name="consultant_sessions"),
+    path(
+        "consultant/sessions/<str:session_id>",
+        views.consultant_session_detail,
+        name="consultant_session_detail",
+    ),
     path("consultant/consult", views.consultant_consult, name="consultant_consult"),
     # Extension Management (Task 07) - generic management API (thin facade over ExtensionManager)
     path("extensions", views.extensions_list, name="extensions_list"),

@@ -8,7 +8,14 @@
 // sudah ada. Task Proposal yang dihasilkan dapat dikirim ke Agent lewat alur
 // task existing (emit "run-task" -> App membuat task).
 import { computed, nextTick, onMounted, ref, watch } from "vue";
-import { consult } from "../api.js";
+import {
+  consult,
+  listConsultantSessions,
+  getConsultantSession,
+  createConsultantSession,
+  renameConsultantSession,
+  deleteConsultantSession,
+} from "../api.js";
 import { renderMarkdown } from "../markdown.js";
 import QueuePanel from "./QueuePanel.vue";
 
@@ -39,12 +46,16 @@ const props = defineProps({
   // task tercampur antar-project. Queue-nya tetap SATU (global); hanya
   // tampilan yang di-scope ke project aktif.
   projectId: { type: String, default: "" },
+  // Session konsultan yang SEDANG aktif (di-persist App.vue, mis. localStorage)
+  // agar switch/New bertahan antar-reload. Anak meng-Emit update bila berubah.
+  activeSessionId: { type: String, default: "" },
 });
 
 const emit = defineEmits([
   "close",
   "update:providerInstanceId",
   "update:modelId",
+  "update:activeSessionId",
   "run-task",
   "stop-task",
   "view-task",
@@ -59,6 +70,161 @@ const sessionId = ref("");
 const scroller = ref(null);
 const composer = ref(null);
 const fileInput = ref(null);
+
+// Session list for the Sessions tab (persisted on backend).
+const sessionsLoading = ref(false);
+const sessions = ref([]);
+const switchingSession = ref(false);
+
+// Sync local sessionId with prop (from App.vue localStorage persistence).
+watch(
+  () => props.activeSessionId,
+  (id) => {
+    if (id && id !== sessionId.value) {
+      sessionId.value = id;
+      resumeSessionFromId(id);
+    }
+  },
+  { immediate: true }
+);
+
+// Load session list when tab becomes visible or project changes.
+watch(
+  () => [activeSideTab.value, props.projectId],
+  () => {
+    if (activeSideTab.value === "sessions") {
+      loadSessions();
+    }
+  },
+  { immediate: true }
+);
+
+async function loadSessions() {
+  if (sessionsLoading.value) return;
+  sessionsLoading.value = true;
+  try {
+    const data = await listConsultantSessions(props.projectId || null);
+    sessions.value = data.sessions || [];
+  } catch (e) {
+    sessions.value = [];
+  } finally {
+    sessionsLoading.value = false;
+  }
+}
+
+async function switchSession(id) {
+  if (switchingSession.value || id === sessionId.value) return;
+  switchingSession.value = true;
+  error.value = "";
+  try {
+    const sess = await getConsultantSession(id, props.projectId || null);
+    if (!sess) {
+      error.value = "Session not found.";
+      return;
+    }
+    sessionId.value = id;
+    emit("update:activeSessionId", id);
+    // Rebuild messages from turns (resume penuh).
+    const turns = sess.turns || [];
+    messages.value = turns.map((t) => {
+      if (t.role === "user") {
+        return { role: "user", text: t.text || "" };
+      }
+      return {
+        role: "assistant",
+        text: t.text || "",
+        tools: [],
+        taskProposal: null,
+        failed: false,
+      };
+    });
+    scrollToBottom();
+  } catch (e) {
+    error.value = e.message || "Failed to load session.";
+  } finally {
+    switchingSession.value = false;
+  }
+}
+
+async function resumeSessionFromId(id) {
+  // Called when props.activeSessionId changes; load turns without UI blocking.
+  if (!id) return;
+  try {
+    const sess = await getConsultantSession(id, props.projectId || null);
+    if (!sess) return;
+    const turns = sess.turns || [];
+    messages.value = turns.map((t) => {
+      if (t.role === "user") {
+        return { role: "user", text: t.text || "" };
+      }
+      return {
+        role: "assistant",
+        text: t.text || "",
+        tools: [],
+        taskProposal: null,
+        failed: false,
+      };
+    });
+    scrollToBottom();
+  } catch (e) {
+    // Silent fail; keep current state.
+  }
+}
+
+async function createNewSession() {
+  if (sending.value) return;
+  error.value = "";
+  try {
+    const sess = await createConsultantSession({
+      projectId: props.projectId || null,
+      title: null,
+    });
+    sessionId.value = sess.session_id;
+    emit("update:activeSessionId", sess.session_id);
+    messages.value = [
+      {
+        role: "assistant",
+        text:
+          "Halo! Saya **AETHER Consultant**. Saya bisa menganalisa project, " +
+          "melakukan investigasi, memvalidasi temuan, dan menyusun Task Proposal " +
+          "untuk Agent. Pilih mode **⚡ Quick** (Project Bible saja, cepat) atau " +
+          "**🔍 Investigate** (boleh memeriksa project). Apa yang ingin Anda " +
+          "ketahui atau kerjakan?",
+        tools: [],
+        taskProposal: null,
+      },
+    ];
+    attachments.value = [];
+    await loadSessions();
+    scrollToBottom();
+  } catch (e) {
+    error.value = e.message || "Failed to create session.";
+  }
+}
+
+async function removeSession(id, e) {
+  if (e) e.stopPropagation();
+  try {
+    await deleteConsultantSession(id, props.projectId || null);
+    if (sessionId.value === id) {
+      startNewSession();
+    } else {
+      await loadSessions();
+    }
+  } catch (err) {
+    error.value = err.message || "Failed to delete session.";
+  }
+}
+
+function formatSessionTime(timestamp) {
+  if (!timestamp) return "";
+  const now = Date.now() / 1000;
+  const diff = Math.floor(now - timestamp);
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
+}
 
 // Gambar terlampir (belum dikirim): [{ name, mimeType, dataUrl, base64 }].
 // Dimaksimalkan 8 gambar agar konsisten dengan batas backend.
@@ -354,6 +520,10 @@ async function send() {
       taskProposal: data.task_proposal || null,
       failed: data.status === "failed",
     });
+    // Refresh session list so newly created sessions appear in the tab.
+    if (activeSideTab.value === "sessions") {
+      await loadSessions();
+    }
   } catch (e) {
     error.value = e.message || "Consultant request failed.";
     messages.value.push({
@@ -473,20 +643,26 @@ function startNewSession() {
   error.value = "";
   pendingRunIndex.value = -1;
   clearPendingRunTimer();
+  emit("update:activeSessionId", "");
+  // Persistently create a new backend session so it appears in the list.
+  createNewSession();
 }
 
 onMounted(() => {
-  messages.value.push({
-    role: "assistant",
-    text:
-      "Halo! Saya **AETHER Consultant**. Saya bisa menganalisa project, " +
-      "melakukan investigasi, memvalidasi temuan, dan menyusun Task Proposal " +
-      "untuk Agent. Pilih mode **⚡ Quick** (Project Bible saja, cepat) atau " +
-      "**🔍 Investigate** (boleh memeriksa project). Apa yang ingin Anda " +
-      "ketahui atau kerjakan?",
-    tools: [],
-    taskProposal: null,
-  });
+  // Only add greeting if no persisted session id was passed in.
+  if (!sessionId.value) {
+    messages.value.push({
+      role: "assistant",
+      text:
+        "Halo! Saya **AETHER Consultant**. Saya bisa menganalisa project, " +
+        "melakukan investigasi, memvalidasi temuan, dan menyusun Task Proposal " +
+        "untuk Agent. Pilih mode **⚡ Quick** (Project Bible saja, cepat) atau " +
+        "**🔍 Investigate** (boleh memeriksa project). Apa yang ingin Anda " +
+        "ketahui atau kerjakan?",
+      tools: [],
+      taskProposal: null,
+    });
+  }
   scrollToBottom();
 });
 </script>
@@ -781,10 +957,55 @@ onMounted(() => {
             >Tasks</button>
           </div>
           <div v-if="activeSideTab === 'sessions'" class="consultant-sessions" role="tabpanel">
-            <div class="consultant-session-empty">
+            <div class="consultant-sessions-header">
+              <span class="cs-hdr-title">All Conversations</span>
+              <button
+                type="button"
+                class="cs-new-btn"
+                title="Create new session"
+                :disabled="sessionsLoading || sending"
+                @click="createNewSession"
+              >
+                + New
+              </button>
+            </div>
+
+            <div v-if="sessionsLoading && !sessions.length" class="consultant-session-loading">
+              Loading sessions…
+            </div>
+
+            <div v-else-if="!sessions.length" class="consultant-session-empty">
               <span class="session-icon" aria-hidden="true">◌</span>
-              <span>Current session</span>
-              <small>{{ sessionId ? sessionId : 'New consultant session' }}</small>
+              <span>No saved sessions</span>
+              <small>Start chatting to create a session</small>
+            </div>
+
+            <div v-else class="consultant-session-list">
+              <div
+                v-for="s in sessions"
+                :key="s.session_id"
+                class="consultant-session-item"
+                :class="{ active: s.session_id === sessionId }"
+                @click="switchSession(s.session_id)"
+              >
+                <div class="cs-item-main">
+                  <div class="cs-item-title" :title="s.title || 'New Chat'">
+                    {{ s.title || "New Chat" }}
+                  </div>
+                  <div class="cs-item-meta">
+                    <span class="cs-item-time">{{ formatSessionTime(s.updated_at) }}</span>
+                    <span v-if="s.turn_count" class="cs-item-turns">{{ s.turn_count }} turns</span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  class="cs-item-del"
+                  title="Delete session"
+                  @click="removeSession(s.session_id, $event)"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+              </div>
             </div>
           </div>
           <QueuePanel
