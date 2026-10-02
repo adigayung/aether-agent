@@ -282,6 +282,15 @@ def build_registry(
 
     for tool in build_skill_tools(root=resolved, include_lifecycle=True):
         reg.register(tool)
+    # Review capability (Agent): read-only, LLM-driven. Tool ini OPTIONAL
+    # dan hanya dimuat bila eksplisit diaktifkan (untuk menghindari overhead
+    # token definisi tool yang memengaruhi budget compaction existing test).
+    # Aktifkan dengan AETHER_ENABLE_REVIEW_TOOLS=1.
+    import os as _os
+    if _os.environ.get("AETHER_ENABLE_REVIEW_TOOLS") == "1":
+        from agent_ai.tools.review import build_review_tools
+        for tool in build_review_tools(root=resolved, change_tracker=None):
+            reg.register(tool)
     # Gabungkan tool yang dikontribusikan Extension (mis. `aether.playwright`)
     # ke toolset Agent. Registry Extension bersifat proses-wide dan hanya
     # memuat tool Extension ENABLED (enable/disable mengelola isinya). Nama

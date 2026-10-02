@@ -215,6 +215,7 @@ class AgentOrchestrator:
         response_log: Optional[Any] = None,
         execution_policy: Optional[Dict[str, Any]] = None,
         policy_escalator: Optional[Callable[[str, str | None], Any]] = None,
+        working_state_provider: Optional[Callable[[], str]] = None,
     ) -> None:
         self.provider = provider
         self.executor = executor or ToolExecutor()
@@ -249,6 +250,9 @@ class AgentOrchestrator:
         # setiap tool call) dan berhenti sebagai CANCELLED tanpa tool call baru.
         # Bukan sistem cancellation kedua: satu token dibagikan lintas layer.
         self.cancel_token = cancel_token
+        # Working State provider (opsional): callable yang mengembalikan
+        # Working State sebagai teks untuk sistem message setiap round.
+        self.working_state_provider = working_state_provider
         # Anggaran token untuk konteks percakapan (system + task + history).
         # Bila None, anggaran diturunkan dari provider (context window) atau
         # config context yang sudah ada; lihat `_context_budget_tokens()`.
@@ -524,6 +528,37 @@ class AgentOrchestrator:
             history.append_system_message(message.content)
         except Exception:
             return False
+        return True
+
+    def _refresh_working_state_context(self, history: ConversationHistory) -> bool:
+        """Sisipkan Working State sebagai system message HANYA bila berubah.
+
+        Working State adalah pemahaman kerja internal yang menjaga konsistensi
+        Agent antar round. Seperti Bible context, working state disisipkan
+        sebagai system message tambahan setiap kali isinya berubah; bila
+        identik dengan sisipan terakhir, di-skip agar tidak memenuhi context
+        window. Tidak mengubah keputusan loop maupun completion.
+        """
+        if history is None:
+            return False
+        provider = self.working_state_provider
+        if provider is None:
+            return False
+        try:
+            text = provider()
+        except Exception:  # noqa: BLE001 - provider error tidak boleh crash
+            return False
+        if not text:
+            return False
+        # Hindari duplikat: bila isi sama persis dengan yang sudah dikirim
+        # sebelumnya, tidak perlu disisipkan ulang.
+        if text == getattr(self, "_last_working_state_text", None):
+            return False
+        try:
+            history.append_system_message(text)
+        except Exception:  # noqa: BLE001 - append history tidak boleh crash
+            return False
+        self._last_working_state_text = text
         return True
 
     def _knowledge_budget_tokens(self) -> Optional[int]:
@@ -2045,6 +2080,40 @@ class AgentOrchestrator:
                             "metadata": dict(observation.metadata or {}),
                         },
                     )
+                    # Layer 1: Tool Result — FAKTUAL, payload eksekusi apa adanya.
+                    # Tidak berisi interpretasi Agent maupun state UI.
+                    emit_event(
+                        self.event_sink,
+                        "tool_result",
+                        {
+                            "tool": action.name,
+                            "tool_call_id": action.id,
+                            "success": observation.success,
+                            "status": (
+                                "success" if observation.success else "error"
+                            ),
+                            "output": observation.content,
+                            "error": observation.error,
+                        },
+                    )
+                    # Layer 2: Agent Observation — normalized for the loop.
+                    # Metadata includes tool name so state bridge can record
+                    # files inspected/changed deterministically.
+                    emit_event(
+                        self.event_sink,
+                        "agent_observation",
+                        {
+                            "action_id": observation.action_id,
+                            "success": observation.success,
+                            "error": observation.error,
+                            "content": observation.content,
+                            "metadata": {
+                                "tool": action.name,
+                                **dict(observation.metadata or {}),
+                            },
+                        },
+                    )
+                    # Backward-compatible UI/event consumers
                     emit_event(
                         self.event_sink,
                         "observation_received",
@@ -2204,6 +2273,9 @@ class AgentOrchestrator:
             # Bible HANYA bila isi Bible berubah sejak sisipan terakhir pada
             # task ini. Duplicate context yang tidak berubah tidak dikirim ulang.
             self._refresh_bible_context(history, task)
+            # Working State berubah dari putaran/tool sebelumnya -> tersedia
+            # kembali untuk LLM pada round berikutnya.
+            self._refresh_working_state_context(history)
             # Cooperative cancellation (safe boundary): jangan memulai
             # iteration/LLM call baru bila task sudah dibatalkan.
             if self._cancel_requested():
@@ -2378,6 +2450,23 @@ class AgentOrchestrator:
                     if action is not None
                     else {}
                 )
+                # Layer 1: Tool Result is the factual, unmodified execution
+                # payload.  It is deliberately emitted separately from the
+                # agent observation and from UI activity telemetry.
+                emit_event(
+                    self.event_sink,
+                    "tool_result",
+                    {
+                        "tool": payload.tool_name,
+                        "tool_call_id": tool_call.id,
+                        "success": payload.is_success,
+                        "status": (
+                            "success" if payload.is_success else "error"
+                        ),
+                        "output": payload.output,
+                        "error": None if payload.is_success else payload.to_content(),
+                    },
+                )
                 emit_event(
                     self.event_sink,
                     "tool_completed",
@@ -2390,6 +2479,28 @@ class AgentOrchestrator:
                         "metadata": {},
                     },
                 )
+                # Layer 2: this is the normalized observation made available
+                # to the agent loop.  It is not UI state and does not infer
+                # hypotheses/decisions from the tool output.  Working State is
+                # updated only through explicit state APIs or LLM-directed
+                # state actions — telemetry is never the agent's state.
+                observation = self._tool_payload_to_observation(payload)
+                emit_event(
+                    self.event_sink,
+                    "agent_observation",
+                    {
+                        "action_id": tool_call.id,
+                        "success": observation.success,
+                        "error": observation.error,
+                        "content": observation.content,
+                        "metadata": {
+                            "tool": payload.tool_name,
+                            **dict(observation.metadata or {}),
+                        },
+                    },
+                )
+                # UI/event consumers still listen to observation_received; its
+                # payload shape is preserved for backward compatibility.
                 emit_event(
                     self.event_sink,
                     "observation_received",

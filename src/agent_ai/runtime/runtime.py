@@ -33,6 +33,7 @@ TIDAK dipakai oleh jalur normal.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
 
 from agent_ai.core.cancel import CancellationToken
@@ -57,6 +58,12 @@ from agent_ai.validation.strategy import (
     VerificationStrategy,
     format_verification_activity,
     strategy_for_mode,
+)
+from agent_ai.runtime.working_state import (
+    WorkingState,
+    WorkingStateManager,
+    PlanEntry,
+    PlanEntryStatus,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - hanya untuk type hint, hindari import cycle
@@ -211,6 +218,10 @@ class AgentRuntime:
             else cfg.stop_on_failure
         )
 
+        # Working State manager (di-reset per task di run(), bukan di sini).
+        # Inisialisasi awal sebagai None; akan dibuat saat task dimulai.
+        self._working_state_manager: Optional[WorkingStateManager] = None
+
     @staticmethod
     def _validation_config() -> Any:
         """Ambil ValidationConfig dari settings (fallback aman bila gagal)."""
@@ -231,6 +242,175 @@ class AgentRuntime:
         eksplisit. Ini menjaga backward compatibility Runtime(prepared).
         """
         return self.validation_runner is not None and self.validation_request is not None
+
+    # ------------------------------------------------------------------ #
+    # Working State access
+    # ------------------------------------------------------------------ #
+    @property
+    def working_state(self) -> Optional[WorkingState]:
+        """Snapshot Working State task saat ini (None bila tidak ada task)."""
+        if self._working_state_manager is None:
+            return None
+        return self._working_state_manager.snapshot()
+
+    @property
+    def working_state_text(self) -> str:
+        """Render Working State sebagai teks untuk konteks LLM (kosong = tidak ada)."""
+        if self._working_state_manager is None:
+            return ""
+        state = self._working_state_manager.snapshot()
+        return state.to_text() if not state.is_empty else ""
+
+    def update_working_state(self, **kwargs: Any) -> WorkingState:
+        """Update Working State (merge) dan kembalikan snapshot baru.
+
+        Kwargs diteruskan ke WorkingStateManager.update(). Bisa dipakai
+        backend/internal untuk merekam progres (file inspected/changed, dst).
+        """
+        if self._working_state_manager is None:
+            self._working_state_manager = WorkingStateManager()
+        return self._working_state_manager.update(**kwargs)
+
+    def set_working_state(self, **kwargs: Any) -> WorkingState:
+        """Set Working State fields (replace list, bukan merge)."""
+        if self._working_state_manager is None:
+            self._working_state_manager = WorkingStateManager()
+        return self._working_state_manager.set(**kwargs)
+
+    def record_files_inspected(self, *files: str) -> WorkingState:
+        """Catat file yang sudah dibaca/dipahami (append + dedup)."""
+        if self._working_state_manager is None:
+            self._working_state_manager = WorkingStateManager()
+        return self._working_state_manager.record_files_inspected(*files)
+
+    def record_files_changed(self, *files: str) -> WorkingState:
+        """Catat file yang sudah ditulis/diubah/dihapus (append + dedup)."""
+        if self._working_state_manager is None:
+            self._working_state_manager = WorkingStateManager()
+        return self._working_state_manager.record_files_changed(*files)
+
+    def record_decision(self, *decisions: str) -> WorkingState:
+        """Catat keputusan yang diambil Agent (append + dedup)."""
+        if self._working_state_manager is None:
+            self._working_state_manager = WorkingStateManager()
+        return self._working_state_manager.record_decision(*decisions)
+
+    def record_hypothesis(self, *hypotheses: str) -> WorkingState:
+        """Catat hipotesis kerja Agent (append + dedup)."""
+        if self._working_state_manager is None:
+            self._working_state_manager = WorkingStateManager()
+        return self._working_state_manager.record_hypothesis(*hypotheses)
+
+    def record_open_question(self, *questions: str) -> WorkingState:
+        """Catat pertanyaan terbuka (append + dedup)."""
+        if self._working_state_manager is None:
+            self._working_state_manager = WorkingStateManager()
+        return self._working_state_manager.record_open_question(*questions)
+
+    def record_completed_step(self, *steps: str) -> WorkingState:
+        """Catat langkah yang sudah selesai (append + dedup)."""
+        if self._working_state_manager is None:
+            self._working_state_manager = WorkingStateManager()
+        return self._working_state_manager.record_completed_step(*steps)
+
+    def set_current_focus(self, focus: str) -> WorkingState:
+        """Set fokus kerja saat ini."""
+        if self._working_state_manager is None:
+            self._working_state_manager = WorkingStateManager()
+        return self._working_state_manager.set_current_focus(focus)
+
+    def set_goal(self, goal: str) -> WorkingState:
+        """Set goal task."""
+        if self._working_state_manager is None:
+            self._working_state_manager = WorkingStateManager()
+        return self._working_state_manager.set_goal(goal)
+
+    # ------------------------------------------------------------------ #
+    # Living Plan access (plan = state di Working State, bukan engine)
+    # ------------------------------------------------------------------ #
+    @property
+    def plan(self) -> List[PlanEntry]:
+        """Snapshot living plan task saat ini (list kosong bila belum ada)."""
+        if self._working_state_manager is None:
+            return []
+        state = self._working_state_manager.snapshot()
+        return list(state.plan)
+
+    def plan_progress(self) -> Dict[str, Any]:
+        """Ringkasan progress living plan (read-only, deterministik)."""
+        if self._working_state_manager is None:
+            return {
+                "total": 0,
+                "completed": 0,
+                "skipped": 0,
+                "failed": 0,
+                "pending": 0,
+                "running": 0,
+                "blocked": 0,
+                "percent": 0.0,
+                "current_step": None,
+            }
+        return self._working_state_manager.snapshot().plan_progress()
+
+    def create_plan_entry(self, *, title: str, description: str = "",
+                          order: Optional[int] = None,
+                          metadata: Optional[Dict[str, Any]] = None) -> WorkingState:
+        """Tambah langkah baru ke living plan (source of truth: Working State)."""
+        if self._working_state_manager is None:
+            self._working_state_manager = WorkingStateManager()
+        return self._working_state_manager.create_plan_entry(
+            title=title, description=description, order=order, metadata=metadata
+        )
+
+    def add_plan_entry(self, *, title: str, description: str = "",
+                       after_id: Optional[str] = None,
+                       before_id: Optional[str] = None,
+                       metadata: Optional[Dict[str, Any]] = None) -> WorkingState:
+        """Tambah langkah plan relatif terhadap langkah lain (after/before)."""
+        if self._working_state_manager is None:
+            self._working_state_manager = WorkingStateManager()
+        return self._working_state_manager.add_plan_entry(
+            title=title, description=description,
+            after_id=after_id, before_id=before_id, metadata=metadata,
+        )
+
+    def update_plan_entry(self, entry_id: str, *,
+                          title: Optional[str] = None,
+                          description: Optional[str] = None,
+                          status: Optional[PlanEntryStatus] = None,
+                          metadata: Optional[Dict[str, Any]] = None,
+                          notes: Optional[str] = None) -> WorkingState:
+        """Ubah isi/status langkah plan yang sudah ada (replanning)."""
+        if self._working_state_manager is None:
+            self._working_state_manager = WorkingStateManager()
+        return self._working_state_manager.update_plan_entry(
+            entry_id, title=title, description=description,
+            status=status, metadata=metadata, notes=notes,
+        )
+
+    def remove_plan_entry(self, entry_id: str) -> WorkingState:
+        """Hapus langkah dari living plan (lalu urutan dirapikan)."""
+        if self._working_state_manager is None:
+            self._working_state_manager = WorkingStateManager()
+        return self._working_state_manager.remove_plan_entry(entry_id)
+
+    def reorder_plan_entry(self, entry_id: str, new_order: int) -> WorkingState:
+        """Pindahkan langkah ke posisi urutan baru (reorder plan)."""
+        if self._working_state_manager is None:
+            self._working_state_manager = WorkingStateManager()
+        return self._working_state_manager.reorder_plan_entry(entry_id, new_order)
+
+    def skip_plan_entry(self, entry_id: str, reason: str = "") -> WorkingState:
+        """Lewati langkah (LLM memutuskan, AETHER hanya mencatat)."""
+        if self._working_state_manager is None:
+            self._working_state_manager = WorkingStateManager()
+        return self._working_state_manager.skip_plan_entry(entry_id, reason)
+
+    def complete_plan_entry(self, entry_id: str, outcome: str = "") -> WorkingState:
+        """Tandai langkah plan selesai (dengan outcome opsional)."""
+        if self._working_state_manager is None:
+            self._working_state_manager = WorkingStateManager()
+        return self._working_state_manager.complete_plan_entry(entry_id, outcome)
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -290,6 +470,27 @@ class AgentRuntime:
         # runtime yang sama tidak mewarisi phase task sebelumnya.
         self._activity_phase = None
         self._set_activity_phase("planning")
+
+        # Working State: state internal per task yang menjaga pemahaman kerja
+        # (goal/requirements/decisions/files/hypotheses/open_questions/...).
+        # Di-reset per task; BUKAN activity/history (tetap telemetry UI).
+        # LLM tetap pengambil keputusan; ini hanya tempat state + persistence.
+        self._working_state_manager = WorkingStateManager()
+        self._working_state_manager.set_goal(prepared.task)
+
+        # Initialize living plan from TaskPlan (advisory-only, non-binding)
+        if plan and plan.steps:
+            for step in plan.steps:
+                self._working_state_manager.create_plan_entry(
+                    title=step.title,
+                    description=step.description or "",
+                    metadata={
+                        "objective": step.objective,
+                        "expected_outcome": step.expected_outcome,
+                        "dependencies": list(step.dependencies),
+                        "prerequisites": list(step.prerequisites),
+                    },
+                )
 
         # Lifecycle (opsional): tandai eksekusi dimulai.
         if lifecycle is not None:
@@ -808,6 +1009,9 @@ class AgentRuntime:
             # (escalation in-place). Tidak mengubah keputusan loop LLM.
             execution_policy=self._policy_for_orchestrator(),
             policy_escalator=self.escalate_policy,
+            # Working State (internal): provider teks per round agar LLM
+            # mendapat pemahaman kerja terbaru pada setiap putaran.
+            working_state_provider=lambda: self.working_state_text,
         )
 
     def _session_environment_context(self) -> Optional[str]:
@@ -904,10 +1108,53 @@ class AgentRuntime:
         activity phase dan memancarkan `phase_changed` SEBELUM tool
         dieksekusi. Dengan begitu tidak perlu menambahkan logic yang sama di
         tiap tempat pemanggilan tool.
+
+        Juga memperbarui Working State dari observation secara DETERMINISTIK
+        (bukan inferensi/LLM): mencatat file yang dibaca/diperiksa/diperbarui
+        sehingga state internal tetap konsisten antar-round.
         """
         if event_type == "tool_called":
             self._emit_activity_phase_for_tool(payload)
+        elif event_type == "agent_observation":
+            self._update_working_state_from_observation(payload)
         self._emit_event(event_type, payload)
+
+    def _update_working_state_from_observation(
+        self, payload: Dict[str, Any]
+    ) -> None:
+        """Update Working State dari Agent Observation (deterministic).
+
+        Ini BUKAN inferensi keputusan LLM — hanya pencatatan fakta struktural
+        (file yang dibaca/ditulis) agar Working State tetap konsisten. LLM
+        tetap satu-satunya pengambil keputusan; state ini hanya menyimpan
+        jejak progres agar tersedia pada round berikutnya.
+
+        Best-effort: kegagalan di sini TIDAK boleh menggagalkan task.
+        """
+        try:
+            if self._working_state_manager is None:
+                return
+            tool = payload.get("tool") or payload.get("metadata", {}).get("tool")
+            content = payload.get("content")
+            if not tool or content is None:
+                return
+            if isinstance(content, str):
+                try:
+                    content = json.loads(content)
+                except (ValueError, TypeError):
+                    return
+            if not isinstance(content, dict):
+                return
+            path = content.get("path")
+            if tool in ("read_file", "view_image", "atlas_query", "rig_query"):
+                if path:
+                    self._working_state_manager.record_files_inspected(str(path))
+            elif tool in ("write_file", "edit_file", "delete_file", "move_file",
+                          "create_skill", "delete_skill", "update_skill"):
+                if path:
+                    self._working_state_manager.record_files_changed(str(path))
+        except Exception:  # noqa: BLE001 - state update tidak boleh crash
+            return
 
     def _emit_activity_phase_for_tool(self, payload: Dict[str, Any]) -> None:
         """Klasifikasi payload `tool_called` -> activity phase (terpusat)."""
@@ -1412,6 +1659,9 @@ class AgentRuntime:
         advisory = self._advisory_context(prepared)
         if advisory:
             parts.append("\n# Saran pendekatan (advisory, tidak mengikat)\n" + advisory)
+        working_state_text = self.working_state_text
+        if working_state_text:
+            parts.append("\n# Working State (internal)\n" + working_state_text)
         verification_advisory = self._verification_advisory()
         if verification_advisory:
             parts.append(

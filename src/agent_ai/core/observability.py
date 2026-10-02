@@ -118,6 +118,10 @@ _OBSERVATION_MAX_STRING_LEN = 20_000
 #: memakai `_MAX_STRING_LEN`.
 _EVENT_STRING_LIMITS: Dict[str, int] = {
     "observation_received": _OBSERVATION_MAX_STRING_LEN,
+    # tool_result and agent_observation carry execution payload / normalized
+    # observation — same bound as observation_received.
+    "tool_result": _OBSERVATION_MAX_STRING_LEN,
+    "agent_observation": _OBSERVATION_MAX_STRING_LEN,
 }
 
 #: Batas kedalaman rekursi sanitasi.

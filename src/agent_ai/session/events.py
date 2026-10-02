@@ -26,6 +26,13 @@ class EventType(str, Enum):
     AGENT_COMMENTARY = "agent_commentary"
     TOOL_CALLED = "tool_called"
     TOOL_COMPLETED = "tool_completed"
+    # Layer 1: Tool Result is the factual, unmodified execution payload from
+    # tool execution. It does not include agent interpretation or UI state.
+    TOOL_RESULT = "tool_result"
+    # Layer 2: Agent Observation is the normalized observation made available
+    # to the agent loop for reasoning. It is not UI state and does not infer
+    # hypotheses/decisions from the tool output.
+    AGENT_OBSERVATION = "agent_observation"
     OBSERVATION_RECEIVED = "observation_received"
     PROVIDER_REQUEST = "provider_request"
     PROVIDER_RESPONSE = "provider_response"
