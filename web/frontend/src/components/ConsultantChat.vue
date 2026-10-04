@@ -513,6 +513,8 @@ async function send() {
         : null,
     });
     sessionId.value = data.session_id || sessionId.value;
+    // Persist session_id to parent (App.vue) so it survives reload via localStorage.
+    emit("update:activeSessionId", sessionId.value);
     messages.value.push({
       role: "assistant",
       text: data.reply || "(no reply)",
