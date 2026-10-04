@@ -6,7 +6,7 @@
 // tidak ada Git/checkpoint logic di frontend. Token TIDAK pernah dikembalikan
 // backend (hanya `credential_set`), sehingga field token selalu kosong saat
 // dibuka dan hanya dikirim saat user mengisi.
-import { reactive, ref, watch } from "vue";
+import { reactive, ref, watch, computed } from "vue";
 import {
   createGithubCheckpoint,
   getGithubConfig,
@@ -51,9 +51,30 @@ const checkpoints = ref([]);
 const checkpointDescription = ref("");
 const restoreTarget = ref(null);
 const restoring = ref(false);
+// Pagination state for checkpoints (blog-style)
+const currentPage = ref(1);
+const pageSize = 8; // 8 items per page, suitable for sidebar
+const pagedCheckpoints = computed(() => {
+  const start = (currentPage.value - 1) * pageSize;
+  return checkpoints.value.slice(start, start + pageSize);
+});
+const totalPages = computed(() => Math.max(1, Math.ceil(checkpoints.value.length / pageSize)));
+const hasPrev = computed(() => currentPage.value > 1);
+const hasNext = computed(() => currentPage.value < totalPages.value);
+
+function prevPage() {
+  if (hasPrev.value) currentPage.value -= 1;
+}
+function nextPage() {
+  if (hasNext.value) currentPage.value += 1;
+}
+
 // Saat project belum dikonfigurasi: user "diminta Configure GitHub" dulu
 // (callout + [Configure GitHub] / [Cancel]) sebelum form ditampilkan.
 const configureOpen = ref(false);
+// Ignore late responses from a previous project so checkpoint/config state can
+// never bleed into the project currently being viewed.
+let loadGeneration = 0;
 
 function projectId() {
   return props.project && (props.project.id || props.project.project_id);
@@ -78,7 +99,15 @@ const excludeList = () =>
 
 async function load() {
   const id = projectId();
+  const generation = ++loadGeneration;
   configureOpen.value = false;
+  // Clear project-scoped data immediately on switch, before the new request
+  // resolves. This keeps CHECKPOINTS/config from the previous project out of
+  // the current panel during loading.
+  checkpoints.value = [];
+  currentPage.value = 1; // reset pagination on project change
+  error.value = "";
+  notice.value = "";
   if (!id) {
     config.value = { ...config.value, configured: false, repository: "", branch: "" };
     checkpoints.value = [];
@@ -88,16 +117,20 @@ async function load() {
   error.value = "";
   try {
     applyConfig(await getGithubConfig(id));
+    if (generation !== loadGeneration) return; // stale project switch
     if (config.value.configured) {
       const data = await listGithubCheckpoints(id);
+      if (generation !== loadGeneration) return; // stale project switch
       checkpoints.value = data.checkpoints || [];
     } else {
+      if (generation !== loadGeneration) return; // stale project switch
       checkpoints.value = [];
     }
   } catch (e) {
+    if (generation !== loadGeneration) return; // stale project switch
     error.value = e.message || String(e);
   } finally {
-    loading.value = false;
+    if (generation === loadGeneration) loading.value = false;
   }
 }
 
@@ -348,18 +381,44 @@ watch(
             <span class="gb-count">{{ checkpoints.length }}</span>
           </div>
           <div v-if="!checkpoints.length" class="gb-empty">Belum ada checkpoint.</div>
-          <div v-else class="gb-cp-list">
-            <div v-for="cp in checkpoints" :key="cp.hash" class="gb-cp">
-              <div class="gb-cp-main">
-                <span class="gb-cp-hash mono">{{ cp.short_hash || (cp.hash || "").slice(0, 7) }}</span>
-                <span class="gb-cp-time mono">{{ formatCommitTime(cp.timestamp) }}</span>
-                <span class="gb-cp-subject">{{ cp.subject }}</span>
+          <template v-else>
+            <!-- Render HANYA halaman checkpoint saat ini (replace, bukan append) -->
+            <div class="gb-cp-list">
+              <div v-for="cp in pagedCheckpoints" :key="cp.hash" class="gb-cp">
+                <div class="gb-cp-main">
+                  <span class="gb-cp-hash mono">{{ cp.short_hash || (cp.hash || "").slice(0, 7) }}</span>
+                  <span class="gb-cp-time mono">{{ formatCommitTime(cp.timestamp) }}</span>
+                  <span class="gb-cp-subject">{{ cp.subject }}</span>
+                </div>
+                <button class="gb-mini" type="button" :disabled="busy || restoring" @click="askRestore(cp)">
+                  Restore
+                </button>
               </div>
-              <button class="gb-mini" type="button" :disabled="busy || restoring" @click="askRestore(cp)">
-                Restore
+            </div>
+
+            <!-- Blog-style pagination controls -->
+            <div v-if="checkpoints.length > pageSize" class="gb-pagination">
+              <button
+                class="gb-page-btn"
+                type="button"
+                :disabled="!hasPrev"
+                @click="prevPage"
+              >
+                Previous
+              </button>
+              <span class="gb-page-indicator">
+                Page {{ currentPage }} / {{ totalPages }}
+              </span>
+              <button
+                class="gb-page-btn"
+                type="button"
+                :disabled="!hasNext"
+                @click="nextPage"
+              >
+                Next
               </button>
             </div>
-          </div>
+          </template>
         </div>
 
         <!-- Konfirmasi restore (safety existing AETHER: konfirmasi sebelum aksi). -->
@@ -645,6 +704,34 @@ watch(
 .gb-mini:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+.gb-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 4px;
+}
+.gb-page-btn {
+  padding: 5px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.gb-page-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--accent);
+}
+.gb-page-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.gb-page-indicator {
+  font-size: 11px;
+  color: var(--text-faint);
 }
 
 .gb-confirm {

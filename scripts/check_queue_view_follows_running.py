@@ -112,8 +112,33 @@ def scenario_app_wiring() -> None:
     assert "openEventStream({ onEvent: handleEvent })" in app, (
         "connectStream harus membuka stream global (tanpa filter per-task)"
     )
-    assert "taskId: task.id" not in app, (
-        "stream TIDAK boleh difilter per task.id (itu penyebab stream A ter-rebind)"
+
+    # Membedakan dua stream yang sah:
+    #   (a) stream GLOBAL queueSource — TIDAK memakai taskId (membawa
+    #       task_queued/task_started untuk SEMUA task),
+    #   (b) stream detail/task-scoped — MEMANG memakai taskId (melanjutkan
+    #       detail Activity task yang sedang dipantau).
+    # Assertion hanya membatalkan stream global yang memakai taskId; stream
+    # task-scoped yang memang memakai taskId tetap dibenarkan.
+    import re as _re
+
+    stream_calls = _re.findall(r"openEventStream\(\{([^}]*)\}", app)
+    assert stream_calls, "App.vue harus memanggil openEventStream"
+    global_stream_ok = any(
+        "onEvent: handleEvent" in call and "taskId" not in call
+        for call in stream_calls
+    )
+    assert global_stream_ok, (
+        "stream global queueSource HARUS dipanggil tanpa taskId "
+        "(kalau memakai taskId, event task_started task lain tak terlihat)"
+    )
+    scoped_stream_ok = any(
+        "taskId: task.id" in call and "onEvent: handleEvent" in call
+        for call in stream_calls
+    )
+    assert scoped_stream_ok, (
+        "stream detail/task-scoped harus tetap dipertahankan dengan taskId "
+        "(melanjutkan detail Activity task yang dipantau)"
     )
 
     # Guard: event task LAIN tidak boleh mengubah tampilan task yang dipantau.
