@@ -447,6 +447,20 @@ def delete_entry(request: HttpRequest, service: GatewayService) -> JsonResponse:
     return _json_response(service.delete_project_entry(rel_path, entry_type))
 
 
+@csrf_exempt
+@require_http_methods(["POST"])
+@_handle
+def create_file(request: HttpRequest, service: GatewayService) -> JsonResponse:
+    """POST /api/create-file -> buat file baru di dalam active project."""
+    body = _parse_json_body(request)
+    rel_path = body.get("path")
+    content = body.get("content", "")
+    if not rel_path:
+        from api.services import ValidationError
+        raise ValidationError("Field 'path' wajib diisi.")
+    return _json_response(service.create_project_file(rel_path, content), status=201)
+
+
 @require_http_methods(["GET"])
 @_handle
 def files(request: HttpRequest, service: GatewayService) -> JsonResponse:

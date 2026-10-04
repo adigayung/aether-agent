@@ -158,6 +158,16 @@ export function openInExplorer() {
   return request("/open-in-explorer", { method: "POST" });
 }
 
+// Explorer "New File": buat file baru di dalam active project (read-only-safe:
+// backend MENOLAK penulisan bila file sudah ada; path divalidasi di dalam
+// active project root — tidak ada filesystem baru di frontend).
+export function createFile(path, content = "") {
+  return request("/create-file", {
+    method: "POST",
+    body: JSON.stringify({ path, content }),
+  });
+}
+
 // --- Project Launcher / Active Project -------------------------------------
 // Single-user local app: tidak ada login/session user, hanya active project.
 export function createProject(name, path) {
@@ -515,29 +525,15 @@ export function openEventStream({ sessionId = null, taskId = null, onEvent } = {
   const url = `${BASE}/events${qs ? `?${qs}` : ""}`;
 
   const source = new EventSource(url);
-  // Event AETHER dikirim dengan `event: <event_type>`. Kita dengarkan tipe
-  // yang dikenal (#51) tanpa mengasumsikan semuanya selalu ada.
+  // Named SSE events must use addEventListener; `onmessage` only receives
+  // unnamed frames and is intentionally not registered here.
   const KNOWN_EVENTS = [
-    "task_created",
-    "task_queued",
-    "task_started",
-    "phase_changed",
-    "agent_commentary",
-    "tool_called",
-    "tool_completed",
-    "observation_received",
-    "provider_request",
-    "provider_response",
-    "validation_started",
-    "validation_completed",
-    "recovery_started",
-    "recovery_completed",
-    "change_detected",
-    "approval_requested",
-    "approval_resolved",
-    "task_completed",
-    "task_failed",
-    "task_cancelled",
+    "task_created", "task_queued", "task_started", "phase_changed",
+    "agent_commentary", "tool_called", "tool_completed", "observation_received",
+    "provider_request", "provider_response", "validation_started",
+    "validation_completed", "recovery_started", "recovery_completed",
+    "change_detected", "approval_requested", "approval_resolved",
+    "task_completed", "task_failed", "task_cancelled",
   ];
 
   const handle = (evt) => {
@@ -547,11 +543,14 @@ export function openEventStream({ sessionId = null, taskId = null, onEvent } = {
     } catch {
       payload = { raw: evt.data };
     }
+    // evt.type akan berisi nama event (mis. "tool_called") untuk event bernama,
+    // atau "message" untuk event tanpa nama (fallback). Payload sudah lengkap.
     if (onEvent) onEvent(payload);
   };
 
   KNOWN_EVENTS.forEach((name) => source.addEventListener(name, handle));
-  // Fallback: event tanpa tipe eksplisit.
+  // Fallback hanya untuk frame SSE tanpa `event:`; named frames tidak memicu
+  // onmessage, sehingga setiap event bernama diproses tepat satu kali.
   source.onmessage = handle;
 
   return source;

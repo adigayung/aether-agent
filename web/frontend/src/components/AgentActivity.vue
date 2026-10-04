@@ -73,10 +73,10 @@ function normalize(e) {
 // ---------------------------------------------------------------------------
 const TOOL_META = {
   list_files: { icon: "📂", verb: "Exploring files" },
-  read_file: { icon: "📖", verb: "Reading source" },
+  read_file: { icon: "📖", verb: "Reading file" },
   search_code: { icon: "🔎", verb: "Searching code" },
-  write_file: { icon: "✏", verb: "Editing files" },
-  edit_file: { icon: "✏", verb: "Editing files" },
+  write_file: { icon: "✏", verb: "Editing file" },
+  edit_file: { icon: "✏", verb: "Editing file" },
   run_command: { icon: "▶", verb: "Running command" },
 };
 
@@ -161,6 +161,7 @@ function isRepeatContent(content) {
   return Boolean(obj && (obj.already_available || obj.already_searched));
 }
 
+// Helper: hash sederhana untuk argumen tool call (untuk deteksi duplicate identik)\nfunction hashArguments(args) {\n  if (!args || typeof args !== "object") return "";\n  try {\n    const replacer = (key, value) => typeof value === "bigint" ? value.toString() : value;\n    const str = JSON.stringify(args, replacer);\n    let hash = 0;\n    for (let i = 0; i < str.length; i++) {\n      hash = ((hash << 5) - hash) + str.charCodeAt(i);\n      hash = hash & hash; // Convert to 32bit integer\n    }\n    return hash.toString();\n  } catch (e) {\n    return "";\n  }\n}\n
 // ---------------------------------------------------------------------------
 // Pengelompokan event (murni tampilan) -> daftar unit tool.
 // ---------------------------------------------------------------------------
@@ -198,6 +199,7 @@ function buildUnits(events) {
         error: "",
         measures: [],
         repeated: false,
+        duplicateCount: 0,
       };
       units.push(unit);
     }
@@ -207,7 +209,25 @@ function buildUnits(events) {
     lastByTool.set(tool, unit);
 
     if (type === "tool_called") {
-      unit.called += 1;
+      // Deteksi duplicate tool call identik: target + hash argumen sama
+      // di dalam unit yang sedang terbuka. Duplicate tidak ditambah ke
+      // 'called' (hindari angka rekor yang menyesatkan di UI) tetapi tetap
+      // tercatat di events untuk observability.
+      const newTarget = String(d.target || "");
+      const newArgsHash = hashArguments(d.arguments);
+      let isDuplicate = false;
+      if (unit.lastArgsHash !== undefined) {
+        isDuplicate = unit.lastTarget === newTarget &&
+          unit.lastArgsHash === newArgsHash;
+      }
+      if (!isDuplicate) {
+        unit.called += 1;
+      } else {
+        unit.duplicateCount = (unit.duplicateCount || 0) + 1;
+        unit.repeated = true;
+      }
+      unit.lastTarget = newTarget;
+      unit.lastArgsHash = newArgsHash;
       if (d.target) unit.targets.push(String(d.target));
       openByTool.set(tool, unit);
       return;

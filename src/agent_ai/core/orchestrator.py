@@ -2047,6 +2047,12 @@ class AgentOrchestrator:
                 # bawah). Hanya hard-termination-nya yang dihilangkan.
 
             # 3) TOOL_CALL -> eksekusi tiap action, catat step, kirim balik.
+            #
+            # Event aktivitas (tool_called/tool_completed) hanya berurusan dengan
+            # satu ToolCall. Jika LLM mengeluarkan beberapa tool call dalam satu
+            # response, masing-masing dieksekusi & dilaporkan satu kali — tidak
+            # perlu memakai Coordinator batch karena eksekusi paralel tidak
+            # mengubah makna "1 tool execution = 1 Activity event".
             try:
                 for action in response.tool_calls():
                     # Cooperative cancellation (safe boundary): jangan eksekusi
@@ -2064,6 +2070,7 @@ class AgentOrchestrator:
                             # Target ringkas (path/query/command) dari argumen
                             # tool yang memang tersedia. Bukan hardcode nama file.
                             "target": self._tool_target(action.arguments or {}),
+                            "tool_call_id": action.id,
                             "iteration": loop.iteration,
                         },
                     )

@@ -1110,6 +1110,30 @@ button {
 .ex-err {
   color: var(--err);
 }
+.ex-newfile-row {
+  cursor: default;
+  align-items: flex-start;
+  gap: 6px;
+}
+.new-file-input {
+  min-width: 0;
+  width: 145px;
+  padding: 3px 6px;
+  color: var(--text);
+  background: var(--bg-card);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  outline: none;
+  font: inherit;
+}
+.new-file-input:focus {
+  box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.2);
+}
+.ex-inline-err {
+  font-size: 11px;
+  white-space: nowrap;
+  padding-top: 4px;
+}
 
 /* ---- Context Menu ---- */
 .ctx-menu {

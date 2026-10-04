@@ -42,6 +42,7 @@ if str(SRC_DIR) not in sys.path:
 
 from agent_ai.consultant.tools import build_consultant_registry  # noqa: E402
 from agent_ai.core.agent_prompt import build_agent_system_prompt  # noqa: E402
+from agent_ai.config.settings import agent_system_prompt  # noqa: E402
 from agent_ai.core.executor import ToolExecutor  # noqa: E402
 from agent_ai.core.history import ConversationHistory  # noqa: E402
 from agent_ai.core.models import AgentStatus  # noqa: E402
@@ -431,7 +432,11 @@ def test_agent_default_prompt_guides_retrieval_and_state() -> None:
 def test_runtime_injects_default_agent_prompt() -> None:
     runtime = AgentRuntime(provider=ScriptedProvider([]), project_root=None)
     orchestrator = runtime._make_orchestrator(runtime.provider)  # noqa: SLF001
-    assert orchestrator.system_prompt == build_agent_system_prompt()
+    # System Prompt Agent EFEKTIF dipakai; nilai default bersal dari
+    # `build_agent_system_prompt()` — jadi orchestrator.system_prompt
+    # selalu sama dengan `agent_system_prompt()` (yang mana sama dengan
+    # `build_agent_system_prompt()` bila belum diatur user).
+    assert orchestrator.system_prompt == agent_system_prompt()
 
 
 def test_runtime_respects_explicit_system_prompt() -> None:

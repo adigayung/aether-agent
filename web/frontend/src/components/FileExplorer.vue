@@ -2,8 +2,8 @@
 // File Explorer (#52 rework). Menampilkan file project aktif (read-only).
 // Data dari ListFilesTool AETHER via gateway (#50). TIDAK ada abstraksi
 // filesystem baru di frontend. Root = active project root (bukan ".").
-import { computed, ref, watch } from "vue";
-import { listFiles } from "../api.js";
+import { computed, ref, watch, nextTick } from "vue";
+import { listFiles, createFile } from "../api.js";
 // Node tree RECURSIVE (menggantikan rendering 2-level hard-coded). Komponen ini
 // merender satu baris lalu memanggil dirinya sendiri untuk anak-anaknya, jadi
 // kedalaman folder tidak lagi dibatasi di template.
@@ -36,6 +36,7 @@ function toggleCollapse() {
 // Context menu state.
 const contextMenu = ref(null);
 const contextOpen = ref(false);
+const editingInput = ref(null);
 
 // Nama folder internal AETHER yang disembunyikan dari UI Explorer.
 const HIDDEN_NAMES = new Set([".aether"]);
@@ -355,6 +356,75 @@ function ctxOpenWithEditor(entry) {
   });
 }
 
+function cancelNewFile() {
+  editingInput.value = null;
+}
+
+function startNewFile(targetDir) {
+  closeContextMenu();
+  const dir = targetDir || ".";
+  const input = { dir, name: "", error: "", busy: false };
+  editingInput.value = input;
+  nextTick(() => {
+    const el = document.querySelector(".new-file-input");
+    if (el) el.focus();
+  });
+}
+
+function validateNewFileName(name) {
+  const value = String(name || "").trim();
+  if (!value) return "Nama file wajib diisi.";
+  if (value.includes("/") || value.includes("\\\\")) return "Masukkan satu nama file, bukan path.";
+  if (value === "." || value === "..") return "Nama file tidak valid.";
+  if (/^[A-Za-z]:/.test(value) || value.startsWith("/")) return "Path absolut tidak diizinkan.";
+  if (/[<>:\"|?*]/.test(value)) return "Nama file mengandung karakter yang tidak valid.";
+  return "";
+}
+
+async function submitNewFile() {
+  const draft = editingInput.value;
+  if (!draft || draft.busy) return;
+  const name = String(draft.name || "").trim();
+  const validationError = validateNewFileName(name);
+  if (validationError) {
+    draft.error = validationError;
+    editingInput.value = { ...draft };
+    return;
+  }
+  draft.busy = true;
+  draft.error = "";
+  editingInput.value = { ...draft };
+  const path = childPath(draft.dir, name);
+  try {
+    await createFile(path);
+    const target = draft.dir || ".";
+    await reloadDir(target);
+    if (target === ".") await load(".");
+    editingInput.value = null;
+  } catch (e) {
+    editingInput.value = { ...draft, busy: false, error: e.message || "Gagal membuat file." };
+  }
+}
+
+function onNewFileKeydown(e) {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    submitNewFile();
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    cancelNewFile();
+  }
+}
+
+function ctxNewFile(entry) {
+  const full = ctxTargetPath(entry);
+  startNewFile(entry && entry.type === "dir" ? full : parentDirOf(full));
+}
+
+function ctxNewFileAtRoot() {
+  startNewFile(".");
+}
+
 function ctxCopyPath(entry) {
   const rel = ctxTargetPath(entry);
   closeContextMenu();
@@ -426,6 +496,21 @@ function onDocumentClick(e) {
   }
 }
 
+function onExplorerContext(e) {
+  e.preventDefault();
+  stopPropagation(e);
+  const menuW = 180;
+  const menuH = 280;
+  let x = e.clientX;
+  let y = e.clientY;
+  if (x + menuW > window.innerWidth) x = window.innerWidth - menuW - 4;
+  if (y + menuH > window.innerHeight) y = window.innerHeight - menuH - 4;
+  if (x < 4) x = 4;
+  if (y < 4) y = 4;
+  contextMenu.value = { x, y, entry: null, type: "root", path: "." };
+  contextOpen.value = true;
+}
+
 function onDocumentKeydown(e) {
   if (e.key === "Escape" && contextOpen.value) {
     closeContextMenu();
@@ -448,6 +533,8 @@ watch(
     applyLiveChange(props.liveChange);
   }
 );
+
+
 </script>
 
 <template>
@@ -467,7 +554,7 @@ watch(
       </button>
     </div>
 
-    <div v-show="!collapsed" class="explorer" @click="closeContextMenu" @contextmenu.prevent>
+    <div v-show="!collapsed" class="explorer" @click="closeContextMenu" @contextmenu="onExplorerContext">
       <div v-if="loading" class="ex-empty">Loading…</div>
       <div v-else-if="error" class="ex-empty ex-err">{{ error }}</div>
       <div v-else-if="!entries.length" class="ex-empty">Empty.</div>
@@ -504,6 +591,7 @@ watch(
         <div class="ctx-item" @click="ctxOpen(contextMenu.entry)">Open</div>
         <div class="ctx-item" @click="ctxOpenWithEditor(contextMenu.entry)">Open with Editor</div>
         <div class="ctx-sep"></div>
+        <div class="ctx-item" @click="ctxNewFile(contextMenu.entry)">New File</div>
         <div class="ctx-item" @click="ctxCopyPath(contextMenu.entry)">Copy Path</div>
         <div class="ctx-item" @click="ctxCopyFullPath(contextMenu.entry)">Copy Full Path</div>
         <div class="ctx-sep"></div>
@@ -515,6 +603,7 @@ watch(
       <template v-else-if="contextMenu.type === 'folder'">
         <div class="ctx-item" @click="ctxOpen(contextMenu.entry)">Open</div>
         <div class="ctx-sep"></div>
+        <div class="ctx-item" @click="ctxNewFile(contextMenu.entry)">New File</div>
         <div class="ctx-item" @click="ctxCopyPath(contextMenu.entry)">Copy Path</div>
         <div class="ctx-item" @click="ctxCopyFullPath(contextMenu.entry)">Copy Full Path</div>
         <div class="ctx-sep"></div>
@@ -523,6 +612,29 @@ watch(
         <div class="ctx-item" @click="ctxRename(contextMenu.entry)">Rename</div>
         <div class="ctx-item ctx-danger" @click="ctxDelete(contextMenu.entry)">Delete</div>
       </template>
+      <template v-else-if="contextMenu.type === 'root'">
+        <div class="ctx-item" @click="ctxNewFileAtRoot()">New File</div>
+        <div class="ctx-item" @click="ctxCopyPath(contextMenu.entry)">Copy Path</div>
+        <div class="ctx-item" @click="ctxCopyFullPath(contextMenu.entry)">Copy Full Path</div>
+      </template>
+    </div>
+
+    <!-- Inline New File editor (root-level) -->
+    <div
+      v-if="editingInput"
+      class="ex-row ex-newfile-row"
+      :style="{ paddingLeft: '38px' }"
+    >
+      <input
+        class="new-file-input"
+        type="text"
+        v-model="editingInput.name"
+        placeholder="filename.ext"
+        :aria-label="editingInput.error ? 'File name (error)' : 'File name'"
+        @keydown.enter.exact.stop.prevent="submitNewFile"
+        @keydown.esc.stop.prevent="cancelNewFile"
+      />
+      <span v-if="editingInput.error" class="ex-err ex-inline-err">{{ editingInput.error }}</span>
     </div>
   </section>
 </template>

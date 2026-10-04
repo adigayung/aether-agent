@@ -83,6 +83,7 @@ urlpatterns = [
     path("open-in-explorer", views.open_in_explorer, name="open_in_explorer"),
     path("reveal-in-explorer", views.reveal_in_explorer, name="reveal_in_explorer"),
     path("delete-entry", views.delete_entry, name="delete_entry"),
+    path("create-file", views.create_file, name="create_file"),
     path("files", views.files, name="files"),
     path("files/content", views.file_content, name="file_content"),
     path("tasks", views.tasks, name="tasks"),

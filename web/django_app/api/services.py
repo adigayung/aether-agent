@@ -1261,6 +1261,44 @@ class GatewayService:
         except ToolError as exc:
             raise ValidationError(str(exc)) from exc
 
+    def create_project_file(self, rel_path: str, content: str = "") -> Dict[str, Any]:
+        """Buat file baru di dalam active project (hanya bila BELUM ada).
+
+        Berbeda dengan write_project_file (Code Editor) yang menimpa file
+        existing, method ini HANYA membuat file baru dan GAGAL bila target
+        sudah ada — dipakai aksi "New File" Explorer agar tidak menimpa
+        konten user secara diam-diam. Boundary workspace divalidasi terhadap
+        active project root (polanya sama dengan delete_project_entry).
+
+        Raises:
+            NotFoundError: bila tidak ada active project.
+            ValidationError: bila path kosong / di luar root / file sudah ada.
+        """
+        from agent_ai.tools.base import ToolError
+        from agent_ai.tools.workspace import WriteFileTool
+
+        if not rel_path:
+            raise ValidationError("Field 'path' wajib diisi.")
+        if content is None:
+            content = ""
+
+        root_resolved = self._active_project_root().resolve()
+        target = (root_resolved / rel_path).resolve()
+
+        # Validasi: target harus berada di dalam active project root.
+        if target == root_resolved or root_resolved not in target.parents:
+            raise ValidationError(f"Path '{rel_path}' berada di luar project root.")
+
+        if target.exists() and target.is_file():
+            raise ValidationError(f"File sudah ada: {rel_path}")
+
+        # WriteFileTool AETHER existing: workspace boundary + penulisan atomic.
+        tool = WriteFileTool(root=root_resolved)
+        try:
+            return tool.execute(path=rel_path, content=content)
+        except ToolError as exc:
+            raise ValidationError(str(exc)) from exc
+
     # ------------------------------------------------------------------ #
     # GitHub Backup (OPTIONAL per project; checkpoint/recovery via Git)
     #
