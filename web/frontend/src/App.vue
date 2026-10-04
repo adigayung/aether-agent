@@ -246,6 +246,29 @@ let liveFsChangeSeq = 0;
 // via Activity API saat membuka task lama.
 const MAX_ACTIVITY = 500;
 
+// The queue stream and task stream intentionally overlap for the viewed task.
+// SSE carries a globally stable event_id (and a store sequence fallback), so
+// use that identity rather than event shape/content: identical tool calls are
+// legitimate and must not be collapsed merely because their payload matches.
+// Dedup key includes task_id to avoid cross-task collisions (defensive).
+const handledEventIds = new Set();
+const MAX_HANDLED_EVENT_IDS = 2000;
+function isDuplicateEvent(evt) {
+  const id = evt && (evt.event_id || evt.id);
+  const sequence = evt && evt.sequence;
+  const taskId = evt && evt.task_id;
+  if (id == null && sequence == null) return false;
+  const key = id != null
+    ? `id:${taskId || "global"}:${id}`
+    : `seq:${taskId || "global"}:${sequence}`;
+  if (handledEventIds.has(key)) return true;
+  handledEventIds.add(key);
+  if (handledEventIds.size > MAX_HANDLED_EVENT_IDS) {
+    handledEventIds.delete(handledEventIds.values().next().value);
+  }
+  return false;
+}
+
 function pushRolling(list, item, max) {
   list.push(item);
   if (list.length > max) list.splice(0, list.length - max);
@@ -920,11 +943,19 @@ function handleEvent(evt) {
   // Approval (ASK) bersifat GLOBAL (satu queue/task lintas project): action
   // ditahan pada task mana pun harus tetap bisa di-Allow/Deny. Ditangani
   // SEBELUM filter task di bawah, dan selalu tertaut ke task_id payload-nya
-  // sehingga approval TIDAK tertukar antar task.
+  // sehingga approval TIDAK tertukar antar task. Approval juga tidak
+  // didedup (bisa berulang untuk task yang sama).
   if (evt.event_type === "approval_requested" || evt.event_type === "approval_resolved") {
     handleApprovalEvent(evt);
     return;
   }
+
+  // SSE dapat dikirim dua kali untuk event yang SAMA: stream global queue
+  // (tanpa task_id filter) dan stream task-scoped (task_id filter). Keduanya
+  // dapat event yang sama -> deduplikasi berdasarkan event_id/sequence
+  // (stabil & global) agar tiap event diproses tepat satu kali. Hanya dilakukan
+  // SETELAH approval (approval tidak butuh dedup).
+  if (isDuplicateEvent(evt)) return;
 
   // Queue events (global, tidak task-scoped): task_queued, task_started.
   // Dipakai untuk refresh QueuePanel dan badge sidebar secara reactive.
