@@ -512,6 +512,7 @@ export function openEventStream({ sessionId = null, taskId = null, onEvent } = {
   // yang dikenal (#51) tanpa mengasumsikan semuanya selalu ada.
   const KNOWN_EVENTS = [
     "task_created",
+    "task_queued",
     "task_started",
     "phase_changed",
     "agent_commentary",

@@ -26,6 +26,9 @@ const props = defineProps({
   // `true` (TASK tertutup saat pertama dibuka); Consultant tetap `false`
   // agar perilaku panel TASKS di sana tidak berubah.
   defaultCollapsed: { type: Boolean, default: false },
+  // SSE event source: bila disediakan, panel bereaksi terhadap queue events
+  // (task_queued, task_started, task_completed) secara reactive tanpa polling.
+  eventSource: { type: Object, default: null },
 });
 
 const emit = defineEmits(["stop-task", "view-task"]);
@@ -226,6 +229,7 @@ function ctxView() {
 }
 
 let poll = null;
+let sseUnsubscribe = null;
 onMounted(() => {
   load();
   document.addEventListener("click", onDocumentClick);
@@ -233,11 +237,18 @@ onMounted(() => {
   // Refresh ringan berkala (tidak ada event queue khusus di tahap ini).
   // Event terminal task (SSE) juga memicu refresh via prop refreshKey.
   poll = setInterval(load, 5000);
+  // Listen to global queue events for reactive updates (task_queued,
+  // task_started, task_completed). Event global ini tidak task-scoped,
+  // jadi cocok untuk update QueuePanel tanpa polling tambahan.
+  if (props.eventSource) {
+    sseUnsubscribe = props.eventSource.onQueueEvent(() => load());
+  }
 });
 onBeforeUnmount(() => {
   document.removeEventListener("click", onDocumentClick);
   document.removeEventListener("keydown", onDocumentKeydown);
   if (poll) clearInterval(poll);
+  if (sseUnsubscribe) sseUnsubscribe();
 });
 
 watch(
@@ -258,6 +269,8 @@ watch(
       <span class="q-title">TASKS</span>
       <span class="q-badge">[{{ tasks.length }}]</span>
       <span v-if="runningCount" class="q-running-dot" title="Task running">●</span>
+      <span v-if="runningCount > 1" class="q-running-count">RUNNING x{{ runningCount }}</span>
+      <span v-else-if="runningCount === 1" class="q-running-count">RUNNING</span>
       <span class="q-count">{{ tasks.length }} task(s)</span>
     </div>
 

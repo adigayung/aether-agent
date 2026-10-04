@@ -445,6 +445,9 @@ function applyHistoryTiming(info, evts) {
 }
 
 let source = null;
+// Global queue stream is kept separate from the detail stream. The detail
+// stream is always task-scoped; queue events remain global by design.
+let queueSource = null;
 
 const hasActiveTask = computed(() => Boolean(task.id));
 
@@ -891,6 +894,12 @@ function handleEvent(evt) {
     return;
   }
 
+  // Queue events (global, tidak task-scoped): task_queued, task_started.
+  // Dipakai untuk refresh QueuePanel dan badge sidebar secara reactive.
+  if (evt.event_type === "task_queued" || evt.event_type === "task_started") {
+    queueRefresh.value += 1;
+  }
+
   // Stream SSE bersifat GLOBAL (satu queue global AETHER): event untuk task
   // LAIN tidak boleh mengubah Task Card/Agent Activity/runtime task yang sedang
   // dipantau — inilah mekanisme bug "UI ikut pindah ke Task B yang masih
@@ -1094,19 +1103,32 @@ function handleEvent(evt) {
 }
 
 function connectStream() {
+  // Close existing detail stream
   if (source) source.close();
-  // Stream SSE GLOBAL (satu queue global AETHER). TIDAK difilter per task di
-  // server agar UI dapat mengenali task antrian berikutnya yang BENAR-BENAR
-  // mulai running (event task_started) TANPA harus me-rebind stream saat task
-  // baru di-submit. Pemilihan event yang diproses dilakukan di handleEvent
-  // (hanya event milik task yang dipantau + task deferred yang mulai running).
-  source = openEventStream({ onEvent: handleEvent });
-  source.onopen = () => {
-    connected.value = true;
-  };
-  source.onerror = () => {
-    connected.value = false;
-  };
+
+  // Ensure global queue stream is open (for task_queued/task_started events)
+  if (!queueSource) {
+    queueSource = openEventStream({ onEvent: handleEvent });
+    queueSource.onopen = () => {
+      connected.value = true;
+    };
+    queueSource.onerror = () => {
+      connected.value = false;
+    };
+  }
+
+  // Open task-scoped stream when task.id is set
+  if (task.id) {
+    source = openEventStream({ taskId: task.id, onEvent: handleEvent });
+    source.onopen = () => {
+      connected.value = true;
+    };
+    source.onerror = () => {
+      connected.value = false;
+    };
+  } else {
+    source = null;
+  }
 }
 
 function resetWorkspace() {
@@ -1715,6 +1737,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (source) source.close();
+  if (queueSource) queueSource.close();
   document.removeEventListener('keydown', onStopConfirmKeydown);
   // Bersihkan interval durasi Task Card agar tidak ada timer nyangkut.
   stopDurationTimer();

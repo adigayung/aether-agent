@@ -19,6 +19,9 @@ class EventType(str, Enum):
     """Jenis event eksekusi."""
 
     TASK_CREATED = "task_created"
+    # Queue admission is distinct from execution start: consumers can render
+    # pending work without guessing from the HTTP response.
+    TASK_QUEUED = "task_queued"
     TASK_STARTED = "task_started"
     PHASE_CHANGED = "phase_changed"
     # Commentary natural dari LLM (bukan log tool). Ditempatkan pada event

@@ -95,6 +95,10 @@ class ConflictError(GatewayError):
 _VALID_EXECUTION_MODES = frozenset({"queue", "parallel"})
 _DEFAULT_EXECUTION_MODE = "queue"
 
+# Default concurrency untuk execution_mode="parallel". Minimal 2 agar benar-benar
+# concurrent. Dapat diubah via settings atau environment variable.
+_DEFAULT_PARALLEL_CONCURRENCY = 4
+
 
 def _normalize_execution_mode(value: Optional[str]) -> str:
     """Normalisasi execution_mode -> 'queue' | 'parallel' (default queue).
@@ -257,6 +261,7 @@ class GatewayService:
         project_store: Optional[ProjectStore] = None,
         llm_config_service: Optional[Any] = None,
         consultant_service: Optional[Any] = None,
+        parallel_concurrency: Optional[int] = None,
     ) -> None:
         self.projects = project_registry or ProjectRegistry()
         self.preparation = task_preparation or TaskPreparation()
@@ -303,6 +308,14 @@ class GatewayService:
         # Ini BUKAN worker framework/queue subsystem kedua: satu queue, satu
         # scheduler, satu slot — sumber data tetap self._tasks.
         self._pumping = False
+        # Concurrency pool untuk execution_mode="parallel".
+        # Nilai default: 4 (dapat dioverride via constructor).
+        # Task parallel TIDAK memakai slot queue serial, melainkan pool
+        # terpisah dengan batas konfigurasi agar benar-benar concurrent.
+        self._parallel_concurrency = (
+            parallel_concurrency if parallel_concurrency is not None
+            else _DEFAULT_PARALLEL_CONCURRENCY
+        )
         # Koordinator approval untuk action yang butuh approval (ASK/mode
         # `require_approval`). Ini BUKAN sistem permission kedua: keputusan
         # tetap dibuat PermissionManager existing; koordinator HANYA menahan
@@ -1516,10 +1529,26 @@ class GatewayService:
             payload={"task": record.task, "project_id": project_id},
         )
 
+        # Event TASK_QUEUED: task benar-benar masuk queue (pending).
+        # Event ini bersifat per-task (task_id + project_id) sehingga QueuePanel
+        # dapat bereaksi reactively tanpa polling/refresh.
+        self._emit(
+            session.session_id,
+            "task_queued",
+            task_id=task_id,
+            payload={
+                "task": record.task,
+                "project_id": project_id,
+                "queue_state": "pending",
+                "execution_mode": execution_mode_norm,
+            },
+        )
+
         # Dispatch berdasarkan execution_mode (Task 02):
         # - queue: lewat scheduler serial GLOBAL (1 slot, FIFO) — perilaku
         #   existing tetap dipertahankan.
-        # - parallel: langsung running tanpa menunggu slot queue (tanpa batas).
+        # - parallel: langsung running dengan concurrency control (configurable
+        #   N, default 4). Task parallel TIDAK memakai slot queue serial.
         if self.auto_execute:
             if execution_mode_norm == "parallel":
                 self._start_parallel_execution(task_id)
@@ -1529,13 +1558,13 @@ class GatewayService:
         return record.to_dict()
 
     # ------------------------------------------------------------------ #
-    # Parallel execution (Task 02) — bypass scheduler queue
+    # Parallel execution — concurrency-controlled pool (configurable N)
     # ------------------------------------------------------------------ #
     def _start_parallel_execution(self, task_id: str) -> None:
-        """Mulai task parallel seketika tanpa menunggu slot queue.
+        """Mulai task parallel dengan concurrency control (bukan unlimited).
 
-        Tidak memengaruhi slot serial queue dan tidak dibatasi jumlahnya.
-        Token cancellation dibuat sinkron agar Stop tetap menemukan token.
+        Task parallel menggunakan pool terpisah dari queue serial.
+        Concurrency dikontrol oleh self._parallel_concurrency (default 4).
         """
         from api.execution import run_in_background
 
@@ -1548,10 +1577,58 @@ class GatewayService:
                 return
             if rec.status in ("completed", "failed", "cancelled"):
                 return
+
+            # Cek apakah ada slot tersedia di parallel pool
+            parallel_running = sum(
+                1 for t in self._tasks.values()
+                if t.execution_mode == "parallel" and t.queue_state == "running"
+            )
+            if parallel_running >= self._parallel_concurrency:
+                # Slot penuh - task tetap pending, akan dipromosikan saat slot bebas
+                return
+
             rec.queue_state = "running"
             token = CancellationToken()
             self._cancel_tokens[task_id] = token
         run_in_background(lambda: self._execute_task(task_id, token))
+
+    def _pump_parallel_pool(self) -> None:
+        """Promosikan task parallel pending -> running jika slot tersedia.
+
+        Dipanggil setelah task parallel selesai (di _execute_task finally)
+        atau saat task baru dibuat dengan execution_mode="parallel".
+        """
+        from api.execution import run_in_background
+
+        while True:
+            with self._lock:
+                # Hitung task parallel yang sedang running
+                parallel_running = sum(
+                    1 for t in self._tasks.values()
+                    if t.execution_mode == "parallel" and t.queue_state == "running"
+                )
+                if parallel_running >= self._parallel_concurrency:
+                    return  # Pool penuh
+
+                # Cari task parallel pending yang eligible
+                candidates = [
+                    r for r in self._tasks.values()
+                    if r.execution_mode == "parallel"
+                    and r.queue_state == "pending"
+                    and r.status not in ("completed", "failed", "cancelled")
+                ]
+                if not candidates:
+                    return  # Tidak ada task parallel pending
+
+                # Pilih berdasarkan queue_order (FIFO)
+                candidate = min(candidates, key=lambda r: (r.queue_order, r.task_id))
+                candidate.queue_state = "running"
+                task_id = candidate.task_id
+                token = CancellationToken()
+                self._cancel_tokens[task_id] = token
+
+            # Jalankan di luar lock
+            run_in_background(lambda: self._execute_task(task_id, token))
 
     # ------------------------------------------------------------------ #
     # Serial scheduler GLOBAL (1 execution slot) — HANYA untuk queue mode
@@ -1666,8 +1743,8 @@ class GatewayService:
 
         Slot release: blok `finally` terluar SELALU melepas execution slot
         (menghapus token + memastikan queue_state tidak "nyangkut" running bila
-        runtime gagal tanpa on_status terminal) lalu memanggil `_scheduler_pump`
-        agar task berikutnya (per queue_order) mulai. Ini TIDAK menjadikan
+        runtime gagal tanpa on_status terminal), lalu memanggil scheduler yang
+        sesuai berdasarkan execution_mode task. Ini TIDAK menjadikan
         AgentRuntime sebagai scheduler: runtime tetap tak tahu soal queue.
         """
         try:
@@ -1687,7 +1764,13 @@ class GatewayService:
                         rec.queue_state = "done"
                     else:
                         rec.queue_state = "done"
-            # Slot bebas -> scheduler memilih task berikutnya (FIFO).
+                # Simpan execution_mode sebelum keluar lock
+                exec_mode = rec.execution_mode if rec else "queue"
+            # Slot bebas -> pump scheduler yang sesuai:
+            # - queue mode: scheduler serial FIFO (1 slot).
+            # - parallel mode: promosikan task parallel pending jika slot ada.
+            if exec_mode == "parallel":
+                self._pump_parallel_pool()
             self._scheduler_pump()
 
     def _run_task_inner(self, task_id: str, token: CancellationToken) -> None:
@@ -2267,6 +2350,8 @@ class GatewayService:
         Raises:
             NotFoundError: bila file log task benar-benar tidak ditemukan.
         """
+        # Validate task ownership before reading log
+        self._validate_task_project_ownership(task_id, project_id)
         reader = self._reader_for_task(task_id, project_id)
         if reader is None:
             raise NotFoundError(f"Task '{task_id}' tidak ditemukan di log.")
@@ -2310,6 +2395,8 @@ class GatewayService:
         Raises:
             NotFoundError: bila file log task benar-benar tidak ditemukan.
         """
+        # Validate task ownership before reading log
+        self._validate_task_project_ownership(task_id, project_id)
         reader = self._reader_for_task(task_id, project_id)
         if reader is None:
             raise NotFoundError(f"Task '{task_id}' tidak ditemukan di log.")
@@ -2338,6 +2425,8 @@ class GatewayService:
         Raises:
             NotFoundError: bila file log task tidak ditemukan.
         """
+        # Validate task ownership before reading log
+        self._validate_task_project_ownership(task_id, project_id)
         reader = self._reader_for_task(task_id, project_id)
         if reader is None:
             raise NotFoundError(f"Task '{task_id}' tidak ditemukan di log.")
@@ -2425,7 +2514,20 @@ class GatewayService:
         safe_id = safe_task_id(task_id)
         if not safe_id:
             return None
-        candidates = [root] if root else self._candidate_log_roots(project_id)
+        # Project ownership boundary: when project_id is explicitly provided,
+        # ONLY search within that project's root. Never fall back to workspace
+        # or other projects (prevents cross-project data leakage).
+        if root:
+            candidates = [root]
+        elif project_id is not None:
+            meta = self.project_store.get_project(project_id)
+            candidates = []
+            if meta is not None:
+                project_root = meta.get("path") or meta.get("root")
+                if project_root:
+                    candidates = [str(project_root)]
+        else:
+            candidates = self._candidate_log_roots(None)
         for candidate in candidates:
             if not candidate:
                 continue
@@ -2439,6 +2541,27 @@ class GatewayService:
                 if f.stem.startswith(safe_id):
                     return f
         return None
+
+    def _validate_task_project_ownership(self, task_id: str, project_id: Optional[str]) -> None:
+        """Validate that task_id belongs to project_id.
+
+        Used by History/Activity/Report APIs to enforce cross-project isolation.
+        If project_id is None, skip validation (backward compat for global views).
+        """
+        if project_id is None:
+            return
+        with self._lock:
+            record = self._tasks.get(task_id)
+        if record is None:
+            # Check persistent log if not in memory
+            reader = self._reader_for_task(task_id, project_id)
+            if reader is None:
+                raise NotFoundError(f"Task '{task_id}' tidak ditemukan di log.")
+            # If found in log but project_id was provided, we still allow access
+            # (log may not have project_id metadata embedded)
+            return
+        if record.project_id != project_id:
+            raise NotFoundError(f"Task '{task_id}' tidak ditemukan di project '{project_id}'.")
 
     def _reader_for_task(self, task_id: str, project_id: Optional[str] = None) -> Optional[Any]:
         """Buat TaskLogReader yang terikat ke file log yang benar-benar ada.
