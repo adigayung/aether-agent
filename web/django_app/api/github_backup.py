@@ -320,6 +320,37 @@ class GitBackupClient:
         """Restore tracked files ke sebuah commit (history TIDAK ditulis ulang)."""
         self._run(["checkout", ref, "--", "."], root, token)
 
+    def log(
+        self,
+        root: Path,
+        limit: int = 20,
+        offset: int = 0,
+        ref: str = "HEAD",
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """Read-only paginated Git history and total count."""
+        limit = max(1, min(int(limit), 100))
+        offset = max(0, int(offset))
+        # ref is supplied internally (HEAD/current branch), never user input.
+        fmt = "%h%x1f%s%x1f%an%x1f%aI%x1f%D"
+        total = 0
+        try:
+            total = int(self._run(["rev-list", "--count", ref], root).strip() or 0)
+        except GithubBackupError:
+            # Repo has no commits yet (HEAD unborn) or not a repo.
+            return [], 0
+        if total == 0:
+            return [], 0
+        out = self._run(
+            ["log", f"--format={fmt}", f"-n{limit}", f"--skip={offset}", ref], root
+        )
+        commits = []
+        for line in out.splitlines():
+            parts = line.split("\x1f", 4)
+            if len(parts) < 5:
+                continue
+            commits.append({"sha": parts[0], "message": parts[1], "author": parts[2], "date": parts[3], "branch": parts[4] or ref})
+        return commits, total
+
     def ls_remote(
         self,
         repository: str,
@@ -626,6 +657,34 @@ class GithubBackupService:
             return []
         commits: List[GitCommit] = facade.log(limit=limit or self.checkpoint_limit)
         return [c.to_dict() for c in commits]
+
+    def get_commits(self, root: Path, page: int = 1, per_page: int = 20) -> Dict[str, Any]:
+        """Paginated Git history (read-only) untuk UI commit list sidebar Backup."""
+        root = Path(root)
+        facade = self._read_facade(root)
+        if not facade.is_repository():
+            return {
+                "commits": [],
+                "total": 0,
+                "page": 1,
+                "per_page": per_page,
+                "has_next": False,
+                "has_prev": False,
+            }
+
+        page = max(1, int(page))
+        per_page = max(1, min(int(per_page), 100))
+        offset = (page - 1) * per_page
+        ref = "HEAD"
+        commits, total = self.git.log(root, limit=per_page, offset=offset, ref=ref)
+        return {
+            "commits": commits,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "has_next": offset + len(commits) < total,
+            "has_prev": page > 1 and total > 0,
+        }
 
     def create_checkpoint(
         self,

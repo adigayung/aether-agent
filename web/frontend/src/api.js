@@ -244,6 +244,13 @@ export function restoreGithubCheckpoint(projectId, commit, force = false) {
   });
 }
 
+// --- GitHub Backup: Commit History (pagination) -----------------------------
+// GET /api/projects/<projectId>/github/commits?page=1&per_page=20
+export function fetchBackupCommits(projectId, page = 1, perPage = 20) {
+  const params = new URLSearchParams({ page: String(page), per_page: String(perPage) });
+  return request(`/projects/${encodeURIComponent(projectId)}/github/commits?${params.toString()}`);
+}
+
 export function createTask(task, projectId = null, metadata = null, executionMode = null, images = null) {
   const body = { task };
   if (projectId) body.project_id = projectId;

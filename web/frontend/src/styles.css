@@ -3586,6 +3586,8 @@ tr:hover .q-copy-btn.hist-copy {
 .q-item.running {
   border-color: rgba(34, 211, 238, 0.4);
   background: rgba(34, 211, 238, 0.07);
+  /* Klik kiri pada task RUNNING membuka task di Latest Task. */
+  cursor: pointer;
 }
 .q-item.disabled {
   opacity: 0.5;

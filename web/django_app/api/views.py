@@ -357,6 +357,32 @@ def project_github_checkpoints(
 
 
 @csrf_exempt
+@require_http_methods(["GET"])
+@_handle
+def project_github_commits(
+    request: HttpRequest, service: GatewayService, project_id: str
+) -> JsonResponse:
+    """GET /api/projects/<project_id>/github/commits -> paginated Git history.
+
+    Query params:
+        page     (int, default 1)
+        per_page (int, default 20, maks 100)
+    """
+    try:
+        page = int(request.GET.get("page", "1") or 1)
+    except ValueError:
+        page = 1
+    try:
+        per_page = int(request.GET.get("per_page", "20") or 20)
+    except ValueError:
+        per_page = 20
+
+    return _json_response(
+        service.get_github_backup_commits(project_id, page=page, per_page=per_page)
+    )
+
+
+@csrf_exempt
 @require_http_methods(["POST"])
 @_handle
 def project_github_restore(

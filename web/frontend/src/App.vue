@@ -178,8 +178,30 @@ const currentReport = ref(null);
 const reportOpen = ref(false);
 const reportTaskId = ref("");
 const reportStatus = ref("");
-const changes = ref([]);
+// Changes per-task. Task baru tidak menimpa changes milik task lain.
+// Key = task_id. Nilai = array of change objects (path, old_path, kind, diff, dll).
+const changesByTask = ref({});
 const validation = reactive({ state: "pending" });
+
+// Changes yang sedang ditampilkan mengikuti task yang sedang dibuka.
+const changes = computed(() => changesByTask.value[task.id || ""] || []);
+// Header: gabungan file unik dari seluruh task aktif/pending.
+const aggregateChanges = computed(() => {
+  const ids = new Set();
+  for (const item of [...queueItems.value, ...tasks.value]) {
+    const state = String(item.queue_state || item.status || "").toLowerCase();
+    if (["pending", "queued", "running", "prepared", "planning", "executing", "validating"].includes(state)) {
+      if (item.task_id || item.id) ids.add(item.task_id || item.id);
+    }
+  }
+  if (task.id && isViewingRunningTask()) ids.add(task.id);
+  const paths = new Set();
+  for (const id of ids) for (const change of changesByTask.value[id] || []) {
+    if (change.path) paths.add(change.path);
+  }
+  return paths;
+});
+
 const runtime = reactive({ phase: "", activity: "", provider: "", model: "", tool: "" });
 
 // Activity Phase (UI) — aktivitas NYATA Agent dari event `phase_changed` (Task 1).
@@ -711,9 +733,15 @@ async function stopQueueTask(taskId) {
     queueRefresh.value += 1;
   }
 }
-// View Task: buka task yang sama lewat alur history/activity existing.
+// View Task dari Task List (klik kiri pada item RUNNING): buka task yang
+// DIPILIH (task_id item yang diklik — BUKAN runningTaskId global) lewat alur
+// history/activity existing. Guard defensif: hanya object task valid dengan
+// queue_state="running" yang boleh membuka Latest Task; task pending/disabled
+// tidak mengubah tampilan.
 function viewQueueTask(t) {
-  if (t && t.task_id) openHistoryTask(t.task_id);
+  if (!t || !t.task_id) return;
+  if (t.queue_state !== "running") return;
+  openHistoryTask(t.task_id);
 }
 
 // Dot warna Agent di sidebar.
@@ -861,11 +889,15 @@ function isAetherMetadata(path) {
   );
 }
 
-// Upsert perubahan berdasarkan path: satu file = satu baris di Changes panel.
-// File yang sama diedit berkali-kali memperbarui baris yang ada (bukan
-// menumpuk duplikat). Move/rename memindahkan baris lama ke path baru.
-function upsertChange(entry) {
-  const list = changes.value;
+// Upsert perubahan per task (berdasarkan task_id pada event live).
+// Satu file = satu baris di Changes panel tiap task; file yang sama diedit
+// berkali-kali memperbarui barisnya (bukan menumpuk duplikat). Move/rename
+// memindahkan baris lama ke path baru. Data disimpan per-task sehingga task
+// baru tidak menimpa changes milik task lain. Bucket task_id dibuat otomatis
+// ketika belum ada.
+function upsertChange(entry, taskId) {
+  const bucketId = taskId || task.id || "";
+  const list = changesByTask.value[bucketId] || (changesByTask.value[bucketId] = []);
   const idx = list.findIndex((c) => c.path === entry.path);
   if (idx >= 0) {
     list[idx] = { ...list[idx], ...entry };
@@ -1031,7 +1063,7 @@ function handleEvent(evt) {
           additions: p.additions,
           deletions: p.deletions,
           diff: p.diff,
-        });
+        }, evt.task_id || task.id);
         // Update File Explorer secara INCREMENTAL (refresh direktori terdampak
         // saja; expanded/selected dipertahankan), TANPA menunggu task selesai.
         liveFsChange.value = {
@@ -1133,7 +1165,8 @@ function connectStream() {
 
 function resetWorkspace() {
   events.value = [];
-  changes.value = [];
+  // changesByTask TIDAK dihapus di sini — data per-task dipertahankan.
+  // Hanya historyEvents/currentReport/runtime/lifecycle yang direset.
   historyEvents.value = null;
   currentReport.value = null;
   validation.state = "pending";
@@ -1152,6 +1185,13 @@ function resetWorkspace() {
   taskStartedAt.value = null;
   taskEndedAt.value = null;
   stopDurationTimer();
+}
+
+// Total reset changes: HANYA dipanggil ketika tidak ada task aktif/pending
+// (semua task terminal) dan user memulai task baru. Dipanggil dari submitTask
+// saat adoption baru.
+function resetAllChanges() {
+  changesByTask.value = {};
 }
 
 // --- Data loading ----------------------------------------------------------
@@ -1238,6 +1278,15 @@ async function submitTask(
       } else {
         task.status = record.status || "prepared";
       }
+      // Reset seluruh changes HANYA ketika tidak ada task aktif/pending lain
+      // (bukan saat pindah tampilan atau saat task lain masih berjalan).
+      const hasOtherActive = [...queueItems.value, ...tasks.value].some((item) => {
+        const id = item.task_id || item.id || "";
+        const st = String(item.queue_state || item.status || "").toLowerCase();
+        return id !== record.task_id &&
+          ["pending", "queued", "running", "prepared", "planning", "executing", "validating"].includes(st);
+      });
+      if (!hasOtherActive) resetAllChanges();
       resetAudioTracker();
       resetWorkspace();
       // Bila task LANGSUNG mendapat slot eksekusi (queue_state="running"), mulai
@@ -1364,6 +1413,24 @@ async function openHistoryTask(taskId) {
     // Activity (chronological) dari persistent log.
     const activity = await getTaskActivity(taskId, projectId);
     historyEvents.value = activity.events || [];
+    // Reconstruct changes per task from history events.
+    changesByTask.value[taskId] = [];
+    for (const raw of historyEvents.value || []) {
+      if (raw.event_type === "change_detected") {
+        const p = raw.payload || {};
+        if (!isAetherMetadata(p.path)) {
+          upsertChange({
+            kind: p.kind || "change",
+            path: p.path,
+            old_path: p.old_path,
+            detail: p.detail,
+            additions: p.additions,
+            deletions: p.deletions,
+            diff: p.diff,
+          }, taskId);
+        }
+      }
+    }
     // Lifecycle task lama: rekonstruksi activity phase + milestone dari event
     // yang tersimpan (phase_changed/task_started). Status terminal tetap dari
     // info.status sehingga Completed/Failed/Cancelled benar.
@@ -1582,7 +1649,9 @@ async function confirmProjectDelete() {
       task.id = "";
       task.text = "";
       task.status = "idle";
-      resetWorkspace();
+      // Project aktif dihapus = tidak ada task aktif/pending di project ini ->
+      // reset changes global.
+      resetAllChanges();
     }
     await refreshLauncherProjects();
     notice.value = `"${project.name}" dihapus dari daftar AETHER. File/folder di disk TIDAK dihapus.`;
@@ -1629,6 +1698,8 @@ async function closeProject() {
   task.id = "";
   task.text = "";
   task.status = "idle";
+  // Project ditutup = tidak ada task aktif/pending di project ini -> reset changes.
+  resetAllChanges();
   resetWorkspace();
   await refreshLauncherProjects();
 }
@@ -1872,7 +1943,7 @@ onBeforeUnmount(() => {
         </div>
         <div class="ws-meta">
           <span class="chip" :class="agentStatus.cls">Task: <span class="mono">{{ agentStatus.label }}</span></span>
-          <span class="chip">Changes: <span class="mono">{{ changes.length }}</span></span>
+          <span class="chip">Changes: <span class="mono">{{ aggregateChanges.size }}</span></span>
           <span class="chip" :class="{ accent: connected }">
             <span class="dot" :class="connected ? '' : 'err'"></span>{{ connected ? "live" : "offline" }}
           </span>

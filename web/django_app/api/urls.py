@@ -57,6 +57,11 @@ urlpatterns = [
         name="project_github_test",
     ),
     path(
+        "projects/<str:project_id>/github/commits",
+        views.project_github_commits,
+        name="project_github_commits",
+    ),
+    path(
         "projects/<str:project_id>/github/checkpoints",
         views.project_github_checkpoints,
         name="project_github_checkpoints",

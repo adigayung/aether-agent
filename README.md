@@ -17,6 +17,37 @@ The LLM remains the decision-maker. AETHER provides the hands: filesystem tools,
 
 AETHER is a coding agent engine plus a workbench for running it. You describe a task in natural language; AETHER prepares context, streams the agent's reasoning, executes tools, and reports results.
 
+## Backup Commit History Pagination
+
+Sidebar Backup menampilkan riwayat commit backup (git history) dengan pagination. Fitur ini read-only — tidak melakukan commit/push/restore.
+
+### Backend
+
+- **`GitBackupClient.log(root, limit=20, offset=0, ref='HEAD')`** — menjalankan `git log --format=...` untuk mengambil commit per halaman dan `git rev-list --count` untuk total. Mengembalikan `(commits, total)`.
+- **`GatewayService.get_github_backup_commits(project_id, page=1, per_page=20)`** — memanggil `GithubBackupService.get_commits()` dan mengembalikan dict paginated.
+- **Endpoint**: `GET /api/projects/<project_id>/github/commits?page=1&per_page=20` → `views.project_github_commits`.
+
+Response format:
+
+```json
+{
+  "commits": [
+    {"sha": "abc1234", "message": "commit message", "author": "User", "date": "ISO date", "branch": "HEAD"}
+  ],
+  "total": 25,
+  "page": 1,
+  "per_page": 20,
+  "has_next": true,
+  "has_prev": false
+}
+```
+
+### Frontend
+
+- **`fetchBackupCommits(projectId, page, perPage)`** di `api.js`.
+- **`BackupCommitList.vue`** — komponen Vue yang menampilkan daftar commit + pagination (Previous/Next + "Page X of N"). Empty state: "No commits yet".
+- Dipasang di **`GithubBackupPanel.vue`** sebagai blok "BACKUP HISTORY" di bawah CHECKPOINTS.
+
 Core idea:
 
 ```

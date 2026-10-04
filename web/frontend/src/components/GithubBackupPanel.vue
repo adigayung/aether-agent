@@ -15,6 +15,7 @@ import {
   saveGithubConfig,
   testGithubConnection,
 } from "../api";
+import BackupCommitList from "./BackupCommitList.vue";
 
 const props = defineProps({
   // Project (dari daftar launcher / active project): { id, name, root|path }.
@@ -311,8 +312,8 @@ watch(
         </div>
       </div>
 
-      <!-- Checkpoint + Recovery (hanya bila sudah dikonfigurasi) -->
-      <template v-if="config.configured">
+      <!-- Checkpoint + History (hanya bila sudah dikonfigurasi) -->
+      <div v-if="config.configured">
         <div class="gb-block">
           <div class="gb-block-head">
             <span class="gb-block-title">CREATE CHECKPOINT</span>
@@ -336,7 +337,7 @@ watch(
               :disabled="busy || !checkpointDescription.trim()"
               @click="commitCheckpoint"
             >
-              Commit &amp; Upload
+              Commit & Upload
             </button>
           </div>
         </div>
@@ -378,7 +379,15 @@ watch(
             </button>
           </div>
         </div>
-      </template>
+
+        <!-- Backup Commit History (pagination) -->
+        <div class="gb-block">
+          <div class="gb-block-head">
+            <span class="gb-block-title">BACKUP HISTORY</span>
+          </div>
+          <BackupCommitList :project="project" />
+        </div>
+      </div>
     </template>
   </div>
 </template>

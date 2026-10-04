@@ -221,10 +221,11 @@ function ctxStop() {
   emit("stop-task", t.task_id);
 }
 
-function ctxView() {
-  const t = ctxTask.value;
-  closeContextMenu();
-  if (!t) return;
+// Klik kiri pada item task: HANYA task yang benar-benar RUNNING (queue_state
+// dari queue API) yang dapat dibuka di Latest Task. Task pending/disabled
+// diabaikan — klik kanan tetap tersedia untuk aksi queue management lain.
+function onTaskClick(t) {
+  if (!t || t.queue_state !== "running") return;
   emit("view-task", t);
 }
 
@@ -283,6 +284,7 @@ watch(
           class="q-item"
           :class="t.queue_state"
           :title="t.task || ''"
+          @click="onTaskClick(t)"
           @contextmenu="openContext($event, t)"
         >
           <span class="q-ico" :class="t.queue_state">{{ stateIcon(t) }}</span>
@@ -323,8 +325,6 @@ watch(
       <div class="ctx-sep"></div>
       <template v-if="ctxTask.queue_state === 'running'">
         <div class="ctx-item" @click="ctxStop()">Stop</div>
-        <div class="ctx-sep"></div>
-        <div class="ctx-item" @click="ctxView()">View Task</div>
       </template>
       <template v-else>
         <div class="ctx-item" @click="ctxMove('up')">Move Up</div>
@@ -332,8 +332,6 @@ watch(
         <div class="ctx-sep"></div>
         <div v-if="ctxTask.queue_state === 'disabled'" class="ctx-item" @click="ctxEnable()">Enable</div>
         <div v-else class="ctx-item" @click="ctxDisable()">Disable</div>
-        <div class="ctx-sep"></div>
-        <div class="ctx-item" @click="ctxView()">View Task</div>
         <div class="ctx-sep"></div>
         <div class="ctx-item ctx-danger" @click="ctxRemove()">Remove</div>
       </template>

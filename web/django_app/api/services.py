@@ -1387,6 +1387,18 @@ class GatewayService:
         except Exception as exc:  # noqa: BLE001
             raise self._github_error_to_gateway(exc) from exc
 
+    def get_github_backup_commits(
+        self, project_id: str, page: int = 1, per_page: int = 20
+    ) -> Dict[str, Any]:
+        """Paginated Git history (read-only) for backup repo."""
+        root = self._project_root_by_id(project_id)
+        page = max(1, int(page))
+        per_page = max(1, min(int(per_page), 100))
+        try:
+            return self.github_backup_service.get_commits(root, page, per_page)
+        except Exception as exc:  # noqa: BLE001
+            raise self._github_error_to_gateway(exc) from exc
+
     # ------------------------------------------------------------------ #
     # Tasks
     # ------------------------------------------------------------------ #
