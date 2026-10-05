@@ -431,6 +431,8 @@ class GatewayService:
         # menunjuk provider_instance_id + model_id yang benar-benar tersimpan.
         instances: List[Dict[str, Any]] = []
         try:
+            if hasattr(self.llm_config_service, "ensure_default_providers"):
+                self.llm_config_service.ensure_default_providers()
             instances = self.llm_config_service.get_full_config()
         except Exception:  # noqa: BLE001 - config read tidak boleh mematikan UI
             instances = []
@@ -551,6 +553,8 @@ class GatewayService:
         from agent_ai.llm_config import list_provider_types
 
         try:
+            if hasattr(self.llm_config_service, "ensure_default_providers"):
+                self.llm_config_service.ensure_default_providers()
             credentials = self.llm_config_service.list_credentials()
             providers = self.llm_config_service.get_full_config()
         except Exception as exc:  # noqa: BLE001 - error baca -> error gateway
@@ -570,6 +574,8 @@ class GatewayService:
         BUKAN dari settings/.env. Nilai secret tidak pernah dikembalikan.
         """
         try:
+            if hasattr(self.llm_config_service, "ensure_default_providers"):
+                self.llm_config_service.ensure_default_providers()
             return self.llm_config_service.get_full_config()
         except Exception as exc:  # noqa: BLE001 - error baca -> error gateway
             raise self._llm_error_to_gateway(exc) from exc
@@ -822,6 +828,31 @@ class GatewayService:
         meta = self.project_store.get_project(config.id)
         meta["root"] = meta.get("path")
         return meta
+
+    def pick_folder(self) -> Dict[str, Any]:
+        """Buka dialog folder native OS (Finder / file manager) — Result dict.
+
+        Dipakai UI Project Launcher agar path ABSOLUT bisa dipilih lintas
+        folder tanpa ketik manual. Implementasi ada di `api.folder_dialog`
+        (modul terpisah, Result pattern — tidak pernah melempar).
+
+        Returns:
+            {"ok": True, "path": str} saat user memilih,
+            {"ok": False, "reason": "cancelled"} saat user membatalkan
+            (HTTP 200 — hasil normal, BUKAN error).
+
+        Raises:
+            ValidationError: bila dialog gagal / platform tak didukung
+            (hasil "failed" | "unsupported" | "timeout" diterjemahkan ke
+            error terstruktur lewat jalur `_handle` yang sama).
+        """
+        from api.folder_dialog import pick_folder as _pick
+
+        result = _pick()
+        if result.get("ok") or result.get("reason") == "cancelled":
+            return result
+        message = result.get("message") or "Dialog folder tidak tersedia."
+        raise ValidationError(f"Folder picker gagal ({result.get('reason')}): {message}")
 
     def delete_project(self, project_id: str) -> Dict[str, Any]:
         """Hapus RECORD project dari database SQLite AETHER.
@@ -2190,6 +2221,32 @@ class GatewayService:
             self._cancel_tokens.pop(task_id, None)
         return {"task_id": task_id, "removed": True}
 
+    def clear_queue(self, project_id: Optional[str] = None) -> Dict[str, Any]:
+        """Kosongkan antrian task non-running (pending & disabled).
+
+        Task yang sedang running TIDAK akan dihapus. Bila project_id diberikan,
+        hanya task milik project tersebut yang dibersihkan.
+
+        Args:
+            project_id: project terkait (opsional).
+
+        Returns:
+            Dict dengan status cleared dan jumlah task yang dihapus.
+        """
+        with self._lock:
+            keys_to_remove = [
+                tid
+                for tid, r in self._tasks.items()
+                if r.queue_state in ("pending", "disabled")
+                and (project_id is None or r.project_id == project_id)
+            ]
+            for tid in keys_to_remove:
+                self._tasks.pop(tid, None)
+                self._prepared.pop(tid, None)
+                self._cancel_tokens.pop(tid, None)
+
+        return {"cleared": True, "deleted_count": len(keys_to_remove)}
+
     # ------------------------------------------------------------------ #
     # Task History (from .aether/log/ persistent store)
     # ------------------------------------------------------------------ #
@@ -2285,6 +2342,133 @@ class GatewayService:
             }
         return info
 
+    def delete_task_history(self, task_id: str, project_id: Optional[str] = None) -> Dict[str, Any]:
+        """Hapus satu task history (file log + response log + state in-memory).
+
+        Raises:
+            ValidationError: bila task sedang berjalan (running).
+            NotFoundError: bila task tidak ditemukan di log maupun in-memory.
+        """
+        from api.services import ValidationError as _ValidationError
+
+        had_record = False
+        with self._lock:
+            record = self._tasks.get(task_id)
+            if record is not None:
+                if record.queue_state == "running" or record.status == "running":
+                    raise _ValidationError(
+                        "Task sedang berjalan; hentikan task terlebih dahulu sebelum menghapus."
+                    )
+                had_record = True
+                self._tasks.pop(task_id, None)
+                self._prepared.pop(task_id, None)
+                self._cancel_tokens.pop(task_id, None)
+
+        target_root = self._resolve_project_root(project_id) if project_id else None
+        log_path = self._find_log_file(task_id, root=target_root, project_id=project_id)
+        had_log = False
+        if log_path is not None and log_path.is_file():
+            had_log = True
+            try:
+                log_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            try:
+                resp_log = log_path.parent / "response" / f"{log_path.stem}.json"
+                if resp_log.is_file():
+                    resp_log.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        if not had_record and not had_log:
+            raise NotFoundError(f"Task '{task_id}' tidak ditemukan di history.")
+
+        return {"task_id": task_id, "deleted": True}
+
+    def clear_task_history(self, project_id: Optional[str] = None) -> Dict[str, Any]:
+        """Hapus seluruh task history yang sudah selesai untuk sebuah project.
+
+        Task yang sedang running TIDAK akan dihapus. Bila project_id tidak
+        diberikan, active project akan digunakan. Bila tidak ada active project,
+        ValidationError akan dimunculkan untuk mencegah accidental global wipe.
+
+        Args:
+            project_id: identifier project (opsional).
+
+        Returns:
+            Dict dengan status cleared dan jumlah task history yang dihapus.
+        """
+        from pathlib import Path as _Path
+        from agent_ai.projects.aether_store import AetherProjectStore
+        from api.services import ValidationError as _ValidationError
+
+        target_roots: List[str] = []
+        target_project_id = project_id
+
+        if project_id:
+            resolved = self._resolve_project_root(project_id)
+            if resolved:
+                target_roots.append(resolved)
+            elif _Path(project_id).is_dir():
+                target_roots.append(str(project_id))
+            else:
+                raise _ValidationError(f"Project '{project_id}' tidak ditemukan.")
+        else:
+            active_id = self.project_store.get_active_project_id()
+            if active_id:
+                target_project_id = active_id
+                resolved = self._resolve_project_root(active_id)
+                if resolved:
+                    target_roots.append(resolved)
+            if not target_roots:
+                raise _ValidationError("project_id diperlukan atau set active project terlebih dahulu.")
+
+        deleted_count = 0
+        for root in target_roots:
+            try:
+                store = AetherProjectStore(root)
+                log_paths = store.list_task_logs()
+            except Exception:
+                continue
+
+            for log_path in log_paths:
+                task_id = log_path.stem
+                with self._lock:
+                    record = self._tasks.get(task_id)
+                    if record is not None and (record.queue_state == "running" or record.status == "running"):
+                        continue
+                    self._tasks.pop(task_id, None)
+                    self._prepared.pop(task_id, None)
+                    self._cancel_tokens.pop(task_id, None)
+
+                try:
+                    log_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                try:
+                    resp_log = store.response_log_path(task_id)
+                    if resp_log.is_file():
+                        resp_log.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                deleted_count += 1
+
+        # Evict remaining terminal in-memory tasks for matching project
+        with self._lock:
+            terminal_keys = [
+                tid
+                for tid, r in self._tasks.items()
+                if (r.project_id == target_project_id or (target_roots and any(r.project_id == root for root in target_roots)))
+                and (r.queue_state in ("done", "completed", "failed", "cancelled") or r.status in ("completed", "failed", "cancelled"))
+            ]
+            for tid in terminal_keys:
+                self._tasks.pop(tid, None)
+                self._prepared.pop(tid, None)
+                self._cancel_tokens.pop(tid, None)
+            deleted_count += len(terminal_keys)
+
+        return {"cleared": True, "deleted_count": deleted_count}
+
     # ------------------------------------------------------------------ #
     # Activity API (chronological events per task)
     # ------------------------------------------------------------------ #
@@ -2357,6 +2541,13 @@ class GatewayService:
             meta = self.project_store.get_project(project_id)
             if meta is not None:
                 return meta.get("path") or meta.get("root")
+            from pathlib import Path as _Path
+            try:
+                p = _Path(project_id)
+                if p.is_dir():
+                    return str(p)
+            except Exception:
+                pass
         active_id = self.project_store.get_active_project_id()
         if active_id:
             meta = self.project_store.get_project(active_id)

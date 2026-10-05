@@ -173,6 +173,20 @@ _PROVIDER_TYPES: Dict[str, ProviderTypeSpec] = {
             # yang ditolak sebagian gateway). Tidak mengubah 9Router/cloud.
             supports_model_discovery=True,
         ),
+        # Provider untuk OpenCode Zen (https://opencode.ai/docs/zen)
+        # Endpoint OpenAI-compatible cloud resmi: https://opencode.ai/zen/v1
+        # Autentikasi memakai Bearer token standar (OPENCODE_API_KEY).
+        ProviderTypeSpec(
+            key="opencode",
+            label="OpenCode Zen",
+            env_prefix="OPENCODE",
+            default_api_url="https://opencode.ai/zen/v1",
+            requires_api_key=True,
+            requires_model=True,
+            needs_model_field=True,
+            allow_custom_env=False,
+            supports_model_discovery=True,
+        ),
     )
 }
 

@@ -829,7 +829,7 @@ def test_ref_checkout(tmp_path):
     (repo / "manifest.json").write_text(json.dumps({"id": "test.ref-check", "name": "R", "version": "2.0", "description": "D", "api_version": "1"}))
     subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True, check=True)
     subprocess.run(["git", "commit", "-m", "v2"], cwd=str(repo), capture_output=True, check=True)
-    subprocess.run(["git", "checkout", "master"], cwd=str(repo), capture_output=True, check=True)
+    subprocess.run(["git", "checkout", "-"], cwd=str(repo), capture_output=True, check=True)
     db = tmp_path / "lc.db"
     manager, reg, _, _, _ = _fresh_manager(ext_dir, db)
     manager.install(str(repo), ref="feature")

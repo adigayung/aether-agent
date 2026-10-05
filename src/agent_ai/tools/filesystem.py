@@ -299,6 +299,7 @@ class ListFilesTool(BaseTool):
         "properties": {
             "path": {"type": "string", "description": "Directory relatif terhadap project root."},
             "max_entries": {"type": "integer", "description": "Batas jumlah entri."},
+            "recursive": {"type": "boolean", "description": "Listing file secara rekursif (flat paths)."},
         },
         "required": [],
     }
@@ -308,7 +309,9 @@ class ListFilesTool(BaseTool):
 
     def execute(self, **arguments: Any) -> Dict[str, Any]:
         rel_path = arguments.get("path", ".") or "."
-        max_entries = int(arguments.get("max_entries", _DEFAULT_MAX_ENTRIES))
+        recursive = bool(arguments.get("recursive", False))
+        default_limit = 1000 if recursive else _DEFAULT_MAX_ENTRIES
+        max_entries = int(arguments.get("max_entries", default_limit))
 
         target = _resolve_within_root(rel_path, self.root)
         if not target.exists():
@@ -316,21 +319,41 @@ class ListFilesTool(BaseTool):
         if not target.is_dir():
             raise ToolValidationError(f"'{rel_path}' bukan sebuah directory.")
 
+        root_resolved = self.root.resolve()
         entries: List[Dict[str, Any]] = []
         truncated = False
-        for child in sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
-            if child.name in _IGNORED_DIRS:
-                continue
-            if len(entries) >= max_entries:
-                truncated = True
-                break
-            entries.append(
-                {
-                    "name": child.name,
-                    "type": "dir" if child.is_dir() else "file",
-                    "size": child.stat().st_size if child.is_file() else None,
-                }
-            )
+
+        if recursive:
+            for file_path in _iter_files(target):
+                if len(entries) >= max_entries:
+                    truncated = True
+                    break
+                try:
+                    rel_file = str(file_path.relative_to(root_resolved))
+                except ValueError:
+                    rel_file = str(file_path)
+                entries.append(
+                    {
+                        "name": file_path.name,
+                        "path": rel_file,
+                        "type": "file",
+                        "size": file_path.stat().st_size if file_path.is_file() else None,
+                    }
+                )
+        else:
+            for child in sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
+                if child.name in _IGNORED_DIRS:
+                    continue
+                if len(entries) >= max_entries:
+                    truncated = True
+                    break
+                entries.append(
+                    {
+                        "name": child.name,
+                        "type": "dir" if child.is_dir() else "file",
+                        "size": child.stat().st_size if child.is_file() else None,
+                    }
+                )
 
         return {
             "path": rel_path,

@@ -727,6 +727,39 @@ class NineRouterConfig:
         return bool(self.api_key)
 
 
+@dataclass(frozen=True)
+class OpenCodeConfig:
+    """Konfigurasi provider Opencode Zen (OpenAI-compatible gateway, cloud).
+
+    OpenCode Zen menyediakan endpoint OpenAI-compatible resmi langsung di:
+    https://opencode.ai/zen/v1 dengan autentikasi Bearer token standar.
+
+    Env vars:
+        OPENCODE_API_KEY        : API key OpenCode Zen (wajib untuk akses)
+        OPENCODE_BASE_URL       : override base URL (default: https://opencode.ai/zen/v1)
+        OPENCODE_MODEL          : model default (mis. claude-sonnet-4-5, gpt-5.5)
+        OPENCODE_TIMEOUT        : timeout detik (default: 120)
+        OPENCODE_CONTEXT_WINDOW : context window token (default: 0 = tidak diketahui)
+    """
+
+    api_key: str = field(
+        default_factory=lambda: _get("OPENCODE_API_KEY")
+    )
+    base_url: str = field(
+        default_factory=lambda: _get("OPENCODE_BASE_URL", "https://opencode.ai/zen/v1")
+    )
+    model: str = field(default_factory=lambda: _get("OPENCODE_MODEL"))
+    timeout: int = field(default_factory=lambda: _get_int("OPENCODE_TIMEOUT", 120))
+    context_window: int = field(
+        default_factory=lambda: _get_int("OPENCODE_CONTEXT_WINDOW", 0)
+    )
+
+    @property
+    def is_configured(self) -> bool:
+        """True bila API key dan base_url sudah diisi."""
+        return bool(self.api_key and self.base_url)
+
+
 # ---------------------------------------------------------------------------
 # Konfigurasi Advanced Context / Token Budgeting (#40)
 # ---------------------------------------------------------------------------
@@ -1065,6 +1098,7 @@ class Settings:
     openai: OpenAIConfig = field(default_factory=OpenAIConfig)
     openrouter: OpenRouterConfig = field(default_factory=OpenRouterConfig)
     nine_router: NineRouterConfig = field(default_factory=NineRouterConfig)
+    opencode: OpenCodeConfig = field(default_factory=OpenCodeConfig)
 
     # Advanced Context / Token Budgeting (#40)
     context: ContextConfig = field(default_factory=ContextConfig)
