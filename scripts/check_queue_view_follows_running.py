@@ -81,7 +81,10 @@ def scenario_task_view_logic() -> None:
 # 2) Wiring App.vue.
 # --------------------------------------------------------------------------- #
 def scenario_app_wiring() -> None:
-    app = _read(SRC_FRONTEND / "App.vue")
+    # App.vue = composition root; wiring stream/adopsi ada di ./composables/*.
+    app = _read(SRC_FRONTEND / "App.vue") + "\n" + "\n".join(
+        _read(p) for p in sorted((SRC_FRONTEND / "composables").glob("*.js"))
+    )
     helper = _read(SRC_FRONTEND / "taskView.js")
 
     # Helper murni diekspor dan dipakai.

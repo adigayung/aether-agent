@@ -80,7 +80,10 @@ def _run_node_time_utils() -> dict:
 def main() -> int:
     print("=== Verifikasi Task Card (Provider + Model + Execution Timer) ===")
 
-    app_src = _read(SRC_FRONTEND / "App.vue")
+    # App.vue = composition root; timing/provider-model ada di ./composables/*.
+    app_src = _read(SRC_FRONTEND / "App.vue") + "\n" + "\n".join(
+        _read(p) for p in sorted((SRC_FRONTEND / "composables").glob("*.js"))
+    )
     css_src = _read(SRC_FRONTEND / "styles.css")
     time_src = _read(SRC_FRONTEND / "timeUtils.js")
 

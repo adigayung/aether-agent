@@ -1,20 +1,36 @@
 <script setup>
 // AETHER Engineering Workbench (#52 rework).
 //
-// Frontend TIPIS: hanya HTTP ke Django Gateway (#50) dan SSE (#51).
-// TIDAK ada logic agent (runtime/loop/orchestrator/planning/tools/terminal/
-// validation/recovery/routing/fallback/filesystem) di frontend.
+// COMPOSITION ROOT. Frontend TIPIS: hanya HTTP ke Django Gateway (#50) dan SSE
+// (#51). TIDAK ada logic agent (runtime/loop/orchestrator/planning/tools/
+// terminal/validation/recovery/routing/fallback/filesystem) di frontend.
 // TIDAK ada Project Registry / Session Store / Task Lifecycle / Event System
 // kedua: semua dari backend AETHER yang sudah ada.
+//
+// Semua logic dipindahkan ke modul dengan satu tanggung jawab di ./composables:
+//   - useAgentActivity : event stream state + dedup + Agent Activity (#51)
+//   - useEventStream   : SSE connection (global queue + task-scoped) & reconnect
+//   - useTaskQueue     : Global Task Queue, task running/dipantau, adopt,
+//                        deferred follow, view/stop queue task
+//   - useTaskLifecycle : submit/stop task, buka task history, report final
+//   - useWorkspace     : project registry, active project, launcher, policy
+//   - useChanges       : changes per task (changesByTask + agregasi)
+//   - useTaskTiming    : timing/durasi Task Card + ticker tampilan
+//   - useTaskTelemetry : provider/model + LLM rounds/tool calls/tokens
+//   - useLifecycle     : lifecycle step + status/tag task
+//   - useTaskData      : daftar task + history (queue & arsip)
+//   - useApprovals     : approval (ASK) Allow/Deny
+//   - useConsultant    : modal Consultant + session aktif + Task Proposal
+//   - useComposer      : Task Composer + konfigurasi LLM New Task
+//   - useCodeEditor    : modal editor kode (Monaco)
+//   - useShellState    : navigasi sidebar + label header/footer
+//   - useNotifications : banner error + notice sementara
+// App.vue hanya merakit modul di atas (wiring) dan merender root UI.
 //
 // Layout 3 area: Sidebar | Agent Workbench | Changes/File Explorer.
 // Bootstrap 5 dipakai untuk layout/spacing/form/button/dropdown/responsive.
 
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-// Versi AETHER dibaca dari SINGLE SOURCE OF TRUTH `data/version.json` (Vite
-// meng-inline JSON saat build). TIDAK ada file versi kedua dan TIDAK ada
-// sistem version baru: mengubah data/version.json -> footer ikut berubah.
-import versionInfo from "../../../data/version.json";
+import { onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import ProjectLauncher from "./components/ProjectLauncher.vue";
 import AgentActivity from "./components/AgentActivity.vue";
 import CodeEditor from "./components/CodeEditor.vue";
@@ -28,1825 +44,403 @@ import SettingsView from "./components/SettingsView.vue";
 import ProjectPolicyPanel from "./components/ProjectPolicyPanel.vue";
 import ConsultantChat from "./components/ConsultantChat.vue";
 import ExtensionManager from "./components/ExtensionManager.vue";
-import {
-  cancelTask,
-  closeActiveProject,
-  createProject,
-  createTask,
-  deleteProject,
-  getActiveProject,
-  getConfig,
-  
-  getHealth,
-  getLLMProviders,
-  getProjects,
-  getTaskActivity,
-  getTaskHistory,
-  getTaskReport,
-  listTaskHistory,
-  listTaskQueue,
-  listTasks,
-  openEventStream,
-  openInExplorer,
-  resolveApproval,
-  setActiveProject,
-} from "./api.js";
-import { playStatusSound, resetAudioTracker } from "./audioRegistry.js";
-import { createDurationTicker, eventTimeMs, formatDuration } from "./timeUtils.js";
-// Formatter token usage (Sumber = usage AKTUAL provider; tidak ada estimasi).
-import { formatTokens, formatTokensFull, usageTokens } from "./tokenFormat.js";
-// Copy snapshot Agent Activity (frontend-only formatter, batas 45.000 char).
-import { buildAgentActivityCopy } from "./activityCopy.js";
-// Pemisahan "task yang dipantau (viewed/running)" dari "task yang baru dibuat
-// (bisa masih pending)". Logika murni ini mencegah submit Task B saat Task A
-// RUNNING meng-overwrite tampilan/stream Task A (lihat taskView.js).
-import {
-  isViewedTaskRunning,
-  shouldAdoptSubmittedTask,
-  shouldFollowStartedTask,
-} from "./taskView.js";
-// Lifecycle UI: 6 step (Planning..Completed) diturunkan dari activity phase
-// NYATA agent (event `phase_changed`, Task 1) + status task. Milestone yang
-// sudah dicapai tetap `done` walau current phase kembali ke step sebelumnya.
-// Nilai internal runtime lama (`replan`/`provider_fallback`) TIDAK dipakai lagi
-// sebagai sumber step lifecycle (lihat lifecycle.js).
-import {
-  VALIDATING_STEP,
-  activityPhaseIndex,
-  addMilestone,
-  buildLifecycleStates,
-  lifecycleFromEvents,
-} from "./lifecycle.js";
+import { getHealth } from "./api.js";
+// Helper murni presentasi (dipakai langsung oleh template).
+import { formatTs, statusTagClass } from "./taskHistory.js";
+import { ACTIVE_TASK_STATES, executionLabel } from "./executionMode.js";
+// Modul (satu tanggung jawab per file).
+import { useNotifications } from "./composables/useNotifications.js";
+import { useShellState } from "./composables/useShellState.js";
+import { useTaskData } from "./composables/useTaskData.js";
+import { useTaskTiming } from "./composables/useTaskTiming.js";
+import { useChanges } from "./composables/useChanges.js";
+import { useApprovals } from "./composables/useApprovals.js";
+import { useTaskQueue } from "./composables/useTaskQueue.js";
+import { useEventStream } from "./composables/useEventStream.js";
+import { useAgentActivity } from "./composables/useAgentActivity.js";
+import { useLifecycle } from "./composables/useLifecycle.js";
+import { useTaskTelemetry } from "./composables/useTaskTelemetry.js";
+import { useTaskLifecycle } from "./composables/useTaskLifecycle.js";
+import { useComposer } from "./composables/useComposer.js";
+import { useWorkspace } from "./composables/useWorkspace.js";
+import { useConsultant } from "./composables/useConsultant.js";
+import { useCodeEditor } from "./composables/useCodeEditor.js";
 
-// Navigasi berorientasi user (bukan subsystem internal AETHER).
-// `icon` = path SVG (stroke) inline — tanpa dependency icon baru.
-const navItems = [
-  {
-    id: "agent",
-    label: "Workbench",
-    icon: "M3 4h18v12H3zM8 20h8M12 16v4",
-  },
-  {
-    id: "tasks",
-    label: "Tasks",
-    icon: "M9 6h11M9 12h11M9 18h11M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2",
-  },
-  {
-    id: "projects",
-    label: "Projects",
-    icon: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
-  },
-  {
-    id: "backup",
-    label: "Backup",
-    icon: "M12 3v10M8 9l4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2",
-  },
-  {
-    id: "extension",
-    label: "Extension",
-    icon: "M12 2l7 4v8l-7 4-7-4V6zM12 12v8M5 6l7 6 7-6",
-  },
-  {
-    id: "settings",
-    label: "Settings",
-    icon: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 7 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9H1a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 2.6 7a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H7a1.7 1.7 0 0 0 1-1.5V1a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V7a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z",
-  },
-];
-
-const activeNav = ref("agent");
-const health = ref(null);
-const projects = ref([]);
-const tasks = ref([]);
-// Task History (persistent .aether/log/ via History API) — newest first.
-const taskHistory = ref([]);
-const selectedProjectId = ref("");
-// Target konfirmasi hapus project (page Projects, registry-only).
-const projectToDelete = ref(null);
-// Project yang Project Settings / Policy-nya sedang dibuka (page Projects).
-// Policy melekat PER PROJECT (`.aether/permissions.json`) — bukan global.
-// Dibuka sebagai MODAL (bukan panel inline di bawah tombol gear).
-const policyProject = ref(null);
-// Konfirmasi Close Project (dialog sebelum benar-benar menutup project).
-const closeProjectConfirm = ref(false);
-// Konfirmasi Stop Task (confirmation layer di depan aksi Stop agent-input).
-const stopConfirmOpen = ref(false);
-const stopInProgress = ref(false);
-// Approval (ASK): action Agent ditahan policy -> user Allow/Deny via modal.
-// Approval terikat ke task/session (dari payload event) agar tidak tertukar.
-// List bisa >1 (beberapa task), jadi disimpan sebagai antrian.
-const approvals = ref([]);
-const submitting = ref(false);
-const error = ref("");
-const notice = ref("");
-const connected = ref(false);
-
-// Alamat gateway yang DITAMPILKAN di sidebar = origin AKTUAL browser (host + port
-// yang benar-benar dipakai server). Frontend production di-serve oleh gateway
-// yang sama, jadi `window.location` selalu menunjuk port aktual (termasuk saat
-// port dari `data/settings.json` dipakai atau fallback ke port lain). TIDAK ada
-// port hardcode di UI. Aman saat SSR (Node tanpa `window`) -> string kosong.
-const gatewayAddress = computed(() =>
-  typeof window !== "undefined" && window.location ? window.location.host : ""
-);
-
-// Active Project (single-user local app; bukan login/session user).
-const activeProject = ref(null);
-const launcherProjects = ref([]);
-const launcherBusy = ref(false);
-// Project/session terakhir (persisted active project) untuk ditawarkan
-// "buka kembali" di Project Launcher saat AETHER dibuka.
-const lastProject = ref(null);
-
-// Konfigurasi AETHER (provider/model/mode) — TIDAK hardcode di frontend.
-const config = ref({});
-const selectedMode = ref("");
-// Provider Instance + Model dari konfigurasi LLM tersimpan (SQLite).
-// New Task memakai ini (bukan settings/.env) untuk memilih provider+model.
-const llmProviders = ref([]);
-const selectedProviderInstanceId = ref("");
-const selectedModelId = ref("");
-// Execution mode (Task 01): queue | parallel — hanya parameter task.
-const selectedExecutionMode = ref("queue");
-
-// State task/workspace (diisi dari #50 + #51).
+// ---------------------------------------------------------------------------
+// State BERSAMA (dipakai lintas modul): task yang SEDANG dipantau + project
+// aktif. Dibuat di composition root agar hanya ada SATU task yang dipantau.
+// ---------------------------------------------------------------------------
 const task = reactive({ id: "", text: "", status: "idle", executionMode: "queue" });
-const events = ref([]);
-// Activity dari persistent log (Activity API). null = pakai live events (SSE).
-const historyEvents = ref(null);
-// Final Agent Report (Report API, .aether/log/). null = belum dimuat.
-const currentReport = ref(null);
-const reportOpen = ref(false);
-const reportTaskId = ref("");
-const reportStatus = ref("");
-// Changes per-task. Task baru tidak menimpa changes milik task lain.
-// Key = task_id. Nilai = array of change objects (path, old_path, kind, diff, dll).
-const changesByTask = ref({});
-const validation = reactive({ state: "pending" });
+const selectedProjectId = ref("");
 
-// Changes yang sedang ditampilkan mengikuti task yang sedang dibuka.
-const changes = computed(() => changesByTask.value[task.id || ""] || []);
-// Header: gabungan file unik dari seluruh task aktif/pending.
-const aggregateChanges = computed(() => {
-  const ids = new Set();
-  for (const item of [...queueItems.value, ...tasks.value]) {
-    const state = String(item.queue_state || item.status || "").toLowerCase();
-    if (["pending", "queued", "running", "prepared", "planning", "executing", "validating"].includes(state)) {
-      if (item.task_id || item.id) ids.add(item.task_id || item.id);
-    }
-  }
-  if (task.id && isViewingRunningTask()) ids.add(task.id);
-  const paths = new Set();
-  for (const id of ids) for (const change of changesByTask.value[id] || []) {
-    if (change.path) paths.add(change.path);
-  }
-  return paths;
-});
-
-const runtime = reactive({ phase: "", activity: "", provider: "", model: "", tool: "" });
-
-// Activity Phase (UI) — aktivitas NYATA Agent dari event `phase_changed` (Task 1).
-// Hanya nilai planning/inspecting/editing/running/validating yang masuk ke sini;
-// nilai internal runtime (replan/provider_fallback) TIDAK dipakai untuk lifecycle.
-const activityPhase = ref("");
-// Milestone lifecycle yang SUDAH pernah dicapai (index step 0..5). Tetap `done`
-// walau current phase kembali ke step sebelumnya (Agent boleh mundur aktivitas).
-const lifecycleMilestones = ref([]);
-
-// --- Task Card: execution timing (Provider/Model/Duration) -----------------
-// Sumber waktu = timestamp event lifecycle AETHER yang SUDAH ADA:
-//   - SSE live (#51): `timestamp` epoch detik
-//   - history log (.aether/log via Activity API): `timestamp` ISO string
-// TIDAK ada polling/timer backend baru. Interval frontend di bawah hanya
-// me-refresh TAMPILAN durasi live (bukan sumber kebenaran durasi).
-const taskStartedAt = ref(null); // ms epoch saat task BENAR-BENAR mulai dieksekusi
-const taskEndedAt = ref(null); // ms epoch saat task mencapai status terminal
-const nowTick = ref(Date.now()); // detak tampilan durasi live
-// Ticker TAMPILAN durasi live: interval hidup HANYA selama task berjalan dan
-// dibersihkan saat terminal/unmount (implementasi di ./timeUtils.js).
-const durationTicker = createDurationTicker(() => {
-  nowTick.value = Date.now();
-});
-
-// Live "Agent reasoning." indicator: true HANYA selama AETHER menunggu respons
-// LLM. Ini SATU elemen UI (bukan log/event baru, bukan subsystem baru) yang
-// dikendalikan event SSE EXISTING: provider_request (mulai) / provider_response
-// (selesai/error), dengan terminal event sebagai pengaman. Tidak ada timer JS
-// maupun polling — animasi titik sepenuhnya CSS.
-const isReasoning = ref(false);
-// Penanda refresh File Explorer (dinaikkan setelah agent selesai membuat file).
-const explorerRefresh = ref(0);
-// Live filesystem change terakhir (dari event change_detected) untuk update
-// INCREMENTAL File Explorer tanpa full reload. `seq` memastikan setiap event
-// tetap memicu walau isinya sama.
-const liveFsChange = ref(null);
-let liveFsChangeSeq = 0;
-
-// Rolling window frontend untuk feed SSE live. Bukan pagination/history tanpa
-// batas: window dibatasi, sedangkan history lengkap dibaca dari .aether/log/
-// via Activity API saat membuka task lama.
-const MAX_ACTIVITY = 500;
-
-// The queue stream and task stream intentionally overlap for the viewed task.
-// SSE carries a globally stable event_id (and a store sequence fallback), so
-// use that identity rather than event shape/content: identical tool calls are
-// legitimate and must not be collapsed merely because their payload matches.
-// Dedup key includes task_id to avoid cross-task collisions (defensive).
-const handledEventIds = new Set();
-const MAX_HANDLED_EVENT_IDS = 2000;
-function isDuplicateEvent(evt) {
-  const id = evt && (evt.event_id || evt.id);
-  const sequence = evt && evt.sequence;
-  const taskId = evt && evt.task_id;
-  if (id == null && sequence == null) return false;
-  const key = id != null
-    ? `id:${taskId || "global"}:${id}`
-    : `seq:${taskId || "global"}:${sequence}`;
-  if (handledEventIds.has(key)) return true;
-  handledEventIds.add(key);
-  if (handledEventIds.size > MAX_HANDLED_EVENT_IDS) {
-    handledEventIds.delete(handledEventIds.values().next().value);
-  }
-  return false;
-}
-
-function pushRolling(list, item, max) {
-  list.push(item);
-  if (list.length > max) list.splice(0, list.length - max);
-}
-
-// Event yang ditampilkan Agent Activity: live SSE atau history dari API.
-const activityEvents = computed(() => historyEvents.value || events.value);
-
-// Reasoning status hanya relevan untuk alur LIVE (bukan saat menampilkan
-// activity task lama dari persistent log). Sumber tetap satu: isReasoning.
-const showReasoning = computed(() => isReasoning.value && !historyEvents.value);
-
-// Durasi hidup (task masih dieksekusi) -> timer tampilan berjalan. Begitu
-// `taskEndedAt` terisi (status terminal diterima UI) timer berhenti dan durasi
-// "terkunci" pada nilai final; reactive update/SSE tidak me-reset-nya karena
-// `taskStartedAt` diset SEKALI per task.
-const taskTimerLive = computed(
-  () => taskStartedAt.value != null && taskEndedAt.value == null
-);
-
-function startDurationTimer() {
-  durationTicker.start();
-}
-
-function stopDurationTimer() {
-  durationTicker.stop();
-}
-
-// Interval hidup hanya selama task berjalan; dibersihkan saat terminal/unmount
-// (tidak ada timer nyangkut / memory leak).
-watch(taskTimerLive, (on) => (on ? startDurationTimer() : stopDurationTimer()));
-
-const taskDurationMs = computed(() => {
-  if (taskStartedAt.value == null) return null;
-  const end = taskEndedAt.value != null ? taskEndedAt.value : nowTick.value;
-  return Math.max(0, end - taskStartedAt.value);
-});
-const taskDurationLabel = computed(() => formatDuration(taskDurationMs.value));
-
-// --- Execution Mode (Task 04) — ditampilkan di Task Card / History / Queue ---
-// Normalisasi: task lama tanpa execution_mode -> "queue" (backward compat).
-function normalizeExecutionMode(raw) {
-  const v = String(raw || "").trim().toLowerCase();
-  return v === "parallel" ? "parallel" : "queue";
-}
-function executionLabel(mode) {
-  return normalizeExecutionMode(mode) === "parallel" ? "Parallel" : "Queue";
-}
-const taskExecutionMode = computed(() => normalizeExecutionMode(task.executionMode));
-const taskExecutionLabel = computed(() => executionLabel(task.executionMode));
-// Round: LLM invocation count (provider_request) — sudah dihitung sebagai
-// taskLlmRounds. Ditampilkan di Task Card sebagai "Round N" bila ada.
-const taskRoundLabel = computed(() => (taskLlmRounds.value > 0 ? `Round ${taskLlmRounds.value}` : ""));
-
-// Provider/Model yang BENAR-BENAR dipakai task. Sumber: event lifecycle
-// provider_request/provider_response (payload provider + model) dari SSE live
-// ATAU persistent log saat task lama dibuka. TIDAK memakai default/global.
-const taskProviderModel = computed(() => {
-  let provider = "";
-  let model = "";
-  const list = activityEvents.value || [];
-  for (let i = list.length - 1; i >= 0; i--) {
-    const raw = list[i] || {};
-    const type = raw.event_type || raw.event || "";
-    if (type === "provider_request" || type === "provider_response") {
-      const d = raw.payload || raw.data || {};
-      if (!provider && d.provider) provider = String(d.provider);
-      if (!model && d.model) model = String(d.model);
-      if (provider && model) break;
-    }
-  }
-  // Fallback terakhir: nilai runtime task AKTIF (tetap task-specific, bukan
-  // konfigurasi global). Bila tetap kosong -> bagian ini tidak ditampilkan.
-  if (!provider) provider = runtime.provider || "";
-  if (!model) model = runtime.model || "";
-  return { provider, model };
-});
-const taskProvider = computed(() => taskProviderModel.value.provider);
-const taskModel = computed(() => taskProviderModel.value.model);
-
-// --- Task Card: telemetry (LLM Rounds / Tool Calls / Tokens) ---------------
-// Ditambahkan sebagai BAGIAN DARI metadata Agent Card yang sama (`.task-meta`),
-// BUKAN sistem telemetry kedua. Semua angka dihitung dari event lifecycle
-// AETHER yang SUDAH ADA (SSE live #51 atau persistent log via Activity API):
-//   - LLM Rounds : jumlah event `provider_request` = jumlah pemanggilan
-//                  LLM/provider AKTUAL pada loop task (1 event = 1 invocation).
-//   - Tool Calls : jumlah event `tool_called` = jumlah eksekusi tool AKTUAL.
-//   - Tokens     : token usage AKTUAL dari provider (payload `usage` pada
-//                  `provider_response`) bila dilaporkan; TIDAK memakai estimasi
-//                  tokenizer/string lokal. Format angka memakai helper murni
-//                  `./tokenFormat.js` (dapat diuji: tokenFormat.test.mjs).
-//                  Bila provider belum melaporkan usage -> tampil "—".
-
-// REDUCE sederhana atas event yang ditampilkan: nilai ikut lifecycle task
-// (naik saat event baru tiba, diam saat task mencapai status final).
-const taskTelemetry = computed(() => {
-  let rounds = 0;
-  let toolCalls = 0;
-  let tokens = 0;
-  let hasTokens = false;
-  const list = activityEvents.value || [];
-  for (const raw of list) {
-    const type = (raw && (raw.event_type || raw.event)) || "";
-    if (type === "provider_request") {
-      rounds += 1;
-    } else if (type === "tool_called") {
-      toolCalls += 1;
-    } else if (type === "provider_response") {
-      const total = usageTokens(raw.payload || raw.data || {});
-      if (total != null) {
-        tokens += total;
-        hasTokens = true;
-      }
-    }
-  }
-  return { rounds, toolCalls, tokens: hasTokens ? tokens : null };
-});
-const taskLlmRounds = computed(() => taskTelemetry.value.rounds);
-const taskToolCalls = computed(() => taskTelemetry.value.toolCalls);
-const taskTokensLabel = computed(() => formatTokens(taskTelemetry.value.tokens));
-// Tooltip menampilkan angka PENUH (mis. "140,500,000 tokens") bila provider
-// melaporkan usage; selain itu menjelaskan bahwa provider tidak melaporkan.
-const taskTokensTooltip = computed(() => {
-  const n = taskTelemetry.value.tokens;
-  if (n == null) return "Provider token usage not reported";
-  return `Tokens (actual provider usage): ${formatTokensFull(n)}`;
-});
-const showTaskTelemetry = computed(
-  () =>
-    Boolean(task.id) &&
-    (taskLlmRounds.value > 0 ||
-      taskToolCalls.value > 0 ||
-      taskTelemetry.value.tokens != null)
-);
-
-const showTaskMeta = computed(() =>
-  Boolean(
-    taskProvider.value ||
-      taskModel.value ||
-      (task.id && taskExecutionLabel.value) ||
-      taskRoundLabel.value ||
-      taskDurationLabel.value ||
-      showTaskTelemetry.value
-  )
-);
-
-// --- Copy Agent Activity (button di header card) ----------------------------
-// Snapshot teks dibangun frontend-only dari data activity yang SUDAH ditampilkan
-// (activityEvents) + metadata Agent Card yang sudah dihitung. Bukan sumber data
-// baru, bukan panggilan backend.
-const activityCopied = ref(false);
-let activityCopyTimer = null;
-
-async function copyAgentActivity() {
-  const text = buildAgentActivityCopy({
-    events: activityEvents.value || [],
-    meta: {
-      taskId: task.id,
-      status: task.status,
-      provider: taskProvider.value,
-      model: taskModel.value,
-      duration: taskDurationLabel.value,
-      execution: taskExecutionLabel.value,
-      llmRounds: taskLlmRounds.value,
-      toolCalls: taskToolCalls.value,
-      tokens: taskTokensLabel.value,
-    },
-  });
-  if (!text) return;
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch (e) {
-    return; // clipboard tidak tersedia (http non-secure) -> abaikan diam-diam
-  }
-  activityCopied.value = true;
-  if (activityCopyTimer) clearTimeout(activityCopyTimer);
-  activityCopyTimer = setTimeout(() => {
-    activityCopied.value = false;
-    activityCopyTimer = null;
-  }, 1400);
-}
-
-// Event hanya boleh mengubah timing task yang SEDANG ditampilkan (stream bisa
-// saja membawa event task lain).
-function isCurrentTaskEvent(evt) {
-  return Boolean(evt && evt.task_id && task.id && evt.task_id === task.id);
-}
-
-// Task lama (persistent log): hitung timing dari event lifecycle yang ada.
-// task_started = mulai eksekusi; task_completed/failed/cancelled = selesai.
-// Fallback AMAN: first/last timestamp log bila event start/terminal tidak ada.
-function applyHistoryTiming(info, evts) {
-  taskStartedAt.value = null;
-  taskEndedAt.value = null;
-  for (const raw of evts || []) {
-    const type = (raw && (raw.event_type || raw.event)) || "";
-    if (type === "task_started" && taskStartedAt.value == null) {
-      taskStartedAt.value = eventTimeMs(raw);
-    } else if (
-      (type === "task_completed" ||
-        type === "task_failed" ||
-        type === "task_cancelled") &&
-      taskEndedAt.value == null
-    ) {
-      taskEndedAt.value = eventTimeMs(raw);
-    }
-  }
-  const status = String((info && info.status) || task.status || "").toLowerCase();
-  const terminal =
-    status === "completed" || status === "failed" || status === "cancelled";
-  if (taskStartedAt.value == null && info && info.first_timestamp) {
-    taskStartedAt.value = eventTimeMs({ timestamp: info.first_timestamp });
-  }
-  if (terminal && taskEndedAt.value == null && info && info.last_timestamp) {
-    taskEndedAt.value = eventTimeMs({ timestamp: info.last_timestamp });
-  }
-  if (!terminal) taskEndedAt.value = null;
-  stopDurationTimer();
-}
-
-let source = null;
-// Global queue stream is kept separate from the detail stream. The detail
-// stream is always task-scoped; queue events remain global by design.
-let queueSource = null;
-
-const hasActiveTask = computed(() => Boolean(task.id));
-
-// ID task yang BENAR-BENAR sedang RUNNING di Global Task Queue (satu sumber
-// kebenaran = TaskRecord backend, GET /api/tasks/queue). Bukan state/mesin
-// kedua: hanya proyeksi status antrian existing. Dipakai sebagai target tombol
-// Stop agar Stop SELALU merujuk ke task yang benar-benar berjalan — bukan task
-// terakhir yang dikirim/dibuat/dipilih.
-const runningTaskId = ref("");
-// Item antrian aktif (pending/running/disabled) dari GET /api/tasks/queue.
-// Dipakai badge jumlah mode QUEUE di halaman Tasks. Sumber sama persis dengan
-// QueuePanel — BUKAN queue subsystem kedua.
-const queueItems = ref([]);
-// Badge QUEUE = jumlah item non-terminal (endpoint queue hanya mengembalikan
-// pending/running/disabled; task terminal tidak masuk antrian).
-const queueCount = computed(() => queueItems.value.length);
-// CATATAN: `terminalTaskId` (task_id terakhir yang mencapai status terminal)
-// dideklarasikan di bagian Consultant di bawah; dipakai juga di sini agar
-// refresh antrian TIDAK memunculkan kembali task yang sudah berhenti.
-let refreshRunningTaskGen = 0;
-async function refreshRunningTask() {
-  const cur = ++refreshRunningTaskGen;
-  try {
-    const data = await listTaskQueue(selectedProjectId.value || null);
-    if (cur !== refreshRunningTaskGen) return;
-    const items = data.tasks || [];
-    queueItems.value = items;
-    // Jangan anggap "running" task yang sudah kita ketahui terminal: respons
-    // antrian bisa saja masih memuat status lama tepat setelah task selesai.
-    const running = items.find(
-      (t) => t.queue_state === "running" && t.task_id !== terminalTaskId.value
-    );
-    // Fallback follow: bila scheduler sudah menjalankan task yang kita antrikan
-    // (deferred) sementara kita TIDAK memantau task running mana pun -> ikuti
-    // task itu. Menutup celah race bila event `task_started` tiba lebih dulu
-    // dari respons antrian ini (atau koneksi SSE sempat terputus).
-    if (
-      running &&
-      shouldFollowStartedTask({
-        startedTaskId: running.task_id,
-        viewedTaskId: task.id || "",
-        isViewingRunning: isViewingRunningTask(),
-        viewingHistory: Boolean(historyEvents.value),
-        deferredTaskIds,
-      })
-    ) {
-      {
-        const d2 = deferredTaskIds.get(running.task_id);
-        const d2Mode = typeof d2 === "object" && d2 ? d2.executionMode : null;
-        adoptRunningTask(running.task_id, running.task, running.execution_mode || running.executionMode || d2Mode);
-      }
-    }
-    runningTaskId.value = running ? running.task_id : "";
-  } catch {
-    // Endpoint queue belum tersedia: pertahankan state existing (fallback).
-  }
-}
-
-// Task yang berjalan sudah mencapai status terminal -> lepas target tombol Stop
-// SECARA SINKRON (tanpa menunggu refresh antrian async). Ini yang menjamin
-// tombol Stop LANGSUNG hilang saat task selesai/gagal/cancel, tanpa jendela
-// race. Hanya pemilik slot yang dilepas (bila diketahui).
-function releaseRunningTask(taskId) {
-  if (!runningTaskId.value) return;
-  if (!taskId || taskId === runningTaskId.value) runningTaskId.value = "";
-}
-
-// Task yang kita ANTRIKAN: task yang dibuat saat ADA task lain yang benar-benar
-// running, sehingga UI SENGAJA tidak berpindah ke task itu (B tetap pending di
-// daftar antrian). Map task_id -> teks task, dipakai agar UI dapat MENGIKUTI
-// task ini begitu scheduler benar-benar menjalankannya (event task_started).
-// Ini BUKAN queue subsystem kedua: hanya penanda UI.
-const deferredTaskIds = new Map();
-
-// Apakah yang SEDANG dipantau benar-benar task yang berjalan? Sumber utama =
-// Global Task Queue (runningTaskId); fallback = status lifecycle task yang
-// dipantau (bila respons antrian belum termuat). SENGAJA bukan state kedua.
-const ACTIVE_TASK_STATUSES = ["running", "prepared", "planning", "executing", "validating"];
-function isViewingRunningTask() {
-  if (isViewedTaskRunning(task.id, runningTaskId.value)) return true;
-  return (
-    Boolean(task.id) &&
-    ACTIVE_TASK_STATUSES.includes(String(task.status || "").toLowerCase())
-  );
-}
-
-// Pastikan stream SSE terbuka (tanpa menutup/membuka ulang bila sudah ada).
-function ensureStream() {
-  if (!source) connectStream();
-}
-
-// Pindahkan pantauan (Task Card + Agent Activity) ke task yang BENAR-BENAR
-// mulai running. Dipakai HANYA saat UI mengikuti task antrian berikutnya
-// setelah task sebelumnya selesai. Murni memilih task mana yang ditampilkan:
-// TIDAK menyentuh scheduler/queue backend.
-function adoptRunningTask(taskId, text = "", executionMode = null) {
-  if (!taskId || taskId === task.id) return;
-  task.id = taskId;
-  if (text) task.text = text;
-  task.status = "running";
-  if (executionMode) task.executionMode = normalizeExecutionMode(executionMode);
-  runningTaskId.value = taskId;
-  // Task ini tidak lagi "tertunda" follow.
-  deferredTaskIds.delete(taskId);
-  // Pantauan berpindah task -> buang activity/timing task sebelumnya.
-  resetWorkspace();
-  ensureStream();
-  if (taskStartedAt.value == null) taskStartedAt.value = Date.now();
-}
-
-// isRunning = ADA task yang sedang RUNNING (bukan apakah task yang sedang
-// ditampilkan running). Dipakai untuk MENAMPILKAN tombol Stop + indikator UI.
-// SENGAJA TIDAK dipakai untuk men-disable input/Submit: Agent Input selalu bisa
-// submit (task baru masuk Global Task Queue sebagai pending/queued).
-const isRunning = computed(() => Boolean(runningTaskId.value));
-
-// Agent status kecil (dari state/event AETHER sebenarnya, bukan fake).
-const agentStatus = computed(() => {
-  const s = (task.status || "idle").toLowerCase();
-  if (s === "running" || s === "prepared" || s === "planning" || s === "executing")
-    return { label: "Running", cls: "running" };
-  if (s === "validating") return { label: "Validating", cls: "running" };
-  // Menunggu execution slot di Global Task Queue (bukan running).
-  if (s === "queued") return { label: "Queued", cls: "queued" };
-  if (s === "completed") return { label: "Completed", cls: "completed" };
-  if (s === "failed") return { label: "Failed", cls: "failed" };
-  if (s === "cancelled") return { label: "Stopping", cls: "warn" };
-  return { label: "Ready", cls: "ready" };
-});
-
-// Sidebar: Workspace (agent/tasks/projects) & Configuration (settings).
-const workspaceNav = computed(() => navItems.filter((i) => i.id !== "settings"));
-const settingsItem = computed(() => navItems.find((i) => i.id === "settings") || {});
-function navBadge(id) {
-  if (id === "tasks") return queueItems.value.length || null;
-  if (id === "projects") return projects.value.length || null;
-  return null;
-}
-
-// Footer status bar (dari runtime AETHER, bukan hardcode).
-const modelLabel = computed(() => runtime.model || config.value.model || "—");
-const providerLabel = computed(() => runtime.provider || config.value.provider || "—");
-// Versi AETHER untuk footer (sumber sama dengan data/version.json).
-const aetherVersion = versionInfo.version;
-
-// Task Composer modal (dibuka dari agent input).
-const composerOpen = ref(false);
-function openComposer() {
-  composerOpen.value = true;
-}
-function closeComposer() {
-  composerOpen.value = false;
-}
-
-// Consultant (modal). Reasoning, Project Bible, tool boundary, dan session
-// context dijalankan backend (endpoint Consultant). App hanya membuka modal dan
-// mengirim Task Proposal yang dihasilkan ke alur task Agent yang sudah ada.
-const consultantOpen = ref(false);
-// Persist active consultant session ID across reloads (localStorage).
-const activeConsultantSessionId = ref("");
-// Load from localStorage on startup.
-try {
-  const stored = window.localStorage.getItem("aether-active-consultant-session");
-  if (stored) activeConsultantSessionId.value = stored;
-} catch (_) {/* ignore */}
-// Panel TASKS di Consultant (SATU queue global AETHER). Penanda refresh untuk
-// QueuePanel; dinaikkan setelah Run Task / event terminal task.
+// Penanda refresh QueuePanel (dinaikkan saat submit/terminal/stop task).
 const queueRefresh = ref(0);
-// Setiap refresh antrian (submit/terminal/stop) -> perbarui "task running" saat
-// ini dari sumbernya. Event-driven (BUKAN polling baru): hanya mengikuti penanda
-// refresh yang sudah ada (queueRefresh), yang sama dipakai panel TASKS.
-watch(queueRefresh, () => {
-  refreshRunningTask();
+const bumpQueueRefresh = () => { queueRefresh.value += 1; };
+
+// Halaman Tasks: SATU halaman, DUA mode (QUEUE live + HISTORY arsip). Default
+// saat halaman dibuka = QUEUE. Data queue & history TIDAK dicampur.
+const taskPageMode = ref("queue");
+
+// Health gateway (indikator sistem).
+const health = ref(null);
+
+// Notifikasi global (banner error + notice sementara).
+const { error, notice, setError, clearNotice, showNotice } = useNotifications();
+
+// ---------------------------------------------------------------------------
+// Wiring modul. Ketergantungan lintas-modul yang melingkar diberikan sebagai
+// callback LAZY (dievaluasi saat runtime) melalui `let` di bawah, sehingga
+// tidak ada modul yang perlu meng-import modul lain.
+// ---------------------------------------------------------------------------
+let activity = null;
+let stream = null;
+
+// Chrome shell (navigasi + label header/footer).
+const shell = useShellState({
+  getRuntime: () => activity.runtime,
+  getConfig: () => composer.config,
+  getQueueCount: () => queue.queueItems.value.length,
+  getProjectCount: () => workspace.projects.value.length,
 });
 
-// Mode halaman Tasks: QUEUE (live/actionable) vs HISTORY (arsip read-only).
-// SATU halaman, DUA fungsi berbeda — data queue & history TIDAK dicampur.
-// Default saat halaman dibuka = QUEUE.
-const taskPageMode = ref("queue");
-watch(activeNav, (nav) => {
+// Daftar task + history (arsip) untuk project aktif.
+const taskData = useTaskData({ selectedProjectId });
+
+// Timing/durasi Task Card.
+const timing = useTaskTiming({ getStatus: () => task.status });
+
+// Changes per-task (isolasi antar task).
+const changesState = useChanges({
+  task,
+  isViewingRunningTask: () => queue.isViewingRunningTask(),
+  // Id task aktif/pending dari queue + daftar task (untuk agregasi changes).
+  getActiveTaskIds: () => {
+    const ids = new Set();
+    for (const item of [...queue.queueItems.value, ...taskData.tasks.value]) {
+      const state = String(item.queue_state || item.status || "").toLowerCase();
+      if (ACTIVE_TASK_STATES.includes(state)) {
+        if (item.task_id || item.id) ids.add(item.task_id || item.id);
+      }
+    }
+    return ids;
+  },
+});
+
+// Approval (ASK) Allow/Deny.
+const approvalsState = useApprovals();
+
+// Global Task Queue + task yang dipantau.
+const queue = useTaskQueue({
+  task,
+  selectedProjectId,
+  resetWorkspace: () => activity && activity.resetWorkspace(),
+  ensureStream: () => stream && stream.ensureStream(),
+  markStartedIfUnset: timing.markStartedIfUnset,
+  bumpQueueRefresh,
+  getViewingHistory: () => Boolean(activity && activity.historyEvents.value),
+  openTask: (taskId) => taskLifecycle.openHistoryTask(taskId),
+  setError,
+});
+
+// SSE (#51): stream global queue + stream task-scoped.
+stream = useEventStream({
+  task,
+  handleEvent: (evt) => activity && activity.handleEvent(evt),
+});
+
+// Agent Activity + event state (#51).
+activity = useAgentActivity({
+  task,
+  timing,
+  changes: changesState,
+  queue,
+  approvals: approvalsState,
+  bumpQueueRefresh,
+  refreshTaskHistory: () => taskData.refreshTaskHistory(),
+  clearReport: () => taskLifecycle && taskLifecycle.clearReport(),
+  getCopyMeta: () => ({
+    taskId: task.id,
+    status: task.status,
+    provider: telemetry.taskProvider.value,
+    model: telemetry.taskModel.value,
+    duration: timing.taskDurationLabel.value,
+    execution: lifecycle.taskExecutionLabel.value,
+    llmRounds: telemetry.taskLlmRounds.value,
+    toolCalls: telemetry.taskToolCalls.value,
+    tokens: telemetry.taskTokensLabel.value,
+  }),
+});
+
+// Lifecycle step + status/tag task (presentasi).
+const lifecycle = useLifecycle({
+  task,
+  activityPhase: activity.activityPhase,
+  lifecycleMilestones: activity.lifecycleMilestones,
+  isRunning: queue.isRunning,
+});
+
+// Telemetry Agent Card (provider/model + rounds/tool calls/tokens).
+const telemetry = useTaskTelemetry({
+  activityEvents: activity.activityEvents,
+  runtime: activity.runtime,
+  task,
+  taskExecutionLabel: lifecycle.taskExecutionLabel,
+  taskDurationLabel: timing.taskDurationLabel,
+});
+
+// Task Composer + konfigurasi LLM New Task.
+const composer = useComposer({
+  submitTask: (text, providerId, modelId, executionMode, images) =>
+    taskLifecycle.submitTask(text, providerId, modelId, executionMode, images),
+});
+
+// Lifecycle task: submit/stop + buka task history + report.
+const taskLifecycle = useTaskLifecycle({
+  task,
+  taskData,
+  timing,
+  changes: changesState,
+  activity,
+  queue,
+  stream,
+  selectedProjectId,
+  selectedMode: composer.selectedMode,
+  selectedProviderInstanceId: composer.selectedProviderInstanceId,
+  selectedModelId: composer.selectedModelId,
+  selectedExecutionMode: composer.selectedExecutionMode,
+  closeComposer: composer.closeComposer,
+  setActiveNav: (v) => { shell.activeNav.value = v; },
+  setError,
+  bumpQueueRefresh,
+});
+
+// Workspace / project state.
+const workspace = useWorkspace({
+  task,
+  selectedProjectId,
+  taskData,
+  changes: changesState,
+  activity,
+  stream,
+  setActiveNav: (v) => { shell.activeNav.value = v; },
+  setError,
+  clearNotice,
+  showNotice,
+});
+
+// Consultant (modal) + Task Proposal -> task Agent.
+const consultant = useConsultant({
+  submitTask: (text, providerId, modelId, executionMode) =>
+    taskLifecycle.submitTask(text, providerId, modelId, executionMode),
+  bumpQueueRefresh,
+});
+
+// Modal editor kode (Monaco).
+const codeEditor = useCodeEditor({ setError });
+
+// ---------------------------------------------------------------------------
+// Watchers (composition-level, bukan logic domain).
+// ---------------------------------------------------------------------------
+
+// Setiap refresh antrian (submit/terminal/stop) -> perbarui "task running".
+watch(queueRefresh, () => {
+  queue.refreshRunningTask();
+});
+
+// Halaman Tasks dibuka -> mode QUEUE + segarkan dari sumber masing-masing.
+watch(shell.activeNav, (nav) => {
   if (nav === "tasks") {
     taskPageMode.value = "queue";
-    // Segarkan kedua mode dari sumbernya masing-masing (queue API + History API).
-    refreshRunningTask();
-    refreshTaskHistory();
+    queue.refreshRunningTask();
+    taskData.refreshTaskHistory();
   }
 });
 
-// Refresh data task saat project aktif berubah. Sidebar Tasks (queueItems)
-// WAJIB ikut di-refresh: badge sidebar & panel QUEUE membaca queueItems dari
-// endpoint /tasks/queue, bukan `tasks`. Tanpa ini, antrian project sebelumnya
-// tertinggal (stale) saat user berpindah project.
+// Project aktif berubah -> refresh daftar task (queue), history, & running.
 watch(selectedProjectId, () => {
-  refreshTasks();
-  refreshTaskHistory();
-  refreshRunningTask();
-});
-function openConsultant() {
-  consultantOpen.value = true;
-}
-function closeConsultant() {
-  // Persist active session when closing modal.
-  try {
-    window.localStorage.setItem(
-      "aether-active-consultant-session",
-      activeConsultantSessionId.value
-    );
-  } catch (_) {/* ignore */}
-  consultantOpen.value = false;
-}
-
-function onConsultantSessionChange(id) {
-  activeConsultantSessionId.value = id || "";
-  try {
-    window.localStorage.setItem(
-      "aether-active-consultant-session",
-      activeConsultantSessionId.value
-    );
-  } catch (_) {/* ignore */}
-}
-
-// Task Proposal dari Consultant -> task Agent (alur task existing submitTask).
-// Modal Consultant SENGAJA tetap terbuka agar user dapat terus melihat
-// percakapan/aktivitas Consultant setelah task dikirim ke Agent.
-// `submittedTaskId` = task yang baru dibuat (dipakai ConsultantChat untuk
-// men-disable tombol Run Task milik Task Proposal itu sampai task terminal).
-const submittedTaskId = ref("");
-// task_id terakhir yang mencapai status terminal (completed/failed/cancelled).
-const terminalTaskId = ref("");
-// Payload bisa object { text, providerInstanceId, modelId, executionMode } (bentuk baru dari
-// card Task Proposal) ATAU string lama (backward compatible). Provider/model
-// dari card proposal (runner) dipakai untuk task ini; pilihan header (chat)
-// TIDAK diubah. executionMode (queue/parallel) juga diteruskan.
-async function runConsultantTask(payload) {
-  const text = typeof payload === "string" ? payload : payload && payload.text;
-  if (!text) return;
-  const overrideProviderId =
-    payload && typeof payload === "object" ? payload.providerInstanceId : null;
-  const overrideModelId =
-    payload && typeof payload === "object" ? payload.modelId : null;
-  const overrideExecutionMode =
-    payload && typeof payload === "object" ? payload.executionMode : null;
-  const record = await submitTask(text, overrideProviderId, overrideModelId, overrideExecutionMode);
-  // Beri tahu ConsultantChat task mana milik tombol Run Task. WAJIB memakai
-  // task_id yang BARU dibuat (dari respons createTask), BUKAN task.id: task.id
-  // adalah task yang sedang DIPANTAU, yang bisa jadi Task A lain yang masih
-  // running saat Task B hanya masuk antrian (pending).
-  submittedTaskId.value = (record && record.task_id) || "";
-  queueRefresh.value += 1;
-}
-
-// Panel TASKS di Consultant (SATU queue global AETHER). Refresh dipicu setelah
-// Run Task / event terminal task. Bukan queue subsystem kedua.
-async function stopQueueTask(taskId) {
-  if (!taskId) return;
-  try {
-    await cancelTask(taskId);
-  } catch (e) {
-    error.value = e.message || "Failed to stop task.";
-  } finally {
-    queueRefresh.value += 1;
-  }
-}
-// View Task dari Task List (klik kiri pada item RUNNING): buka task yang
-// DIPILIH (task_id item yang diklik — BUKAN runningTaskId global) lewat alur
-// history/activity existing. Guard defensif: hanya object task valid dengan
-// queue_state="running" yang boleh membuka Latest Task; task pending/disabled
-// tidak mengubah tampilan.
-function viewQueueTask(t) {
-  if (!t || !t.task_id) return;
-  if (t.queue_state !== "running") return;
-  openHistoryTask(t.task_id);
-}
-
-// Dot warna Agent di sidebar.
-const agentDotClass = computed(() => {
-  const c = agentStatus.value.cls;
-  if (c === "failed") return "err";
-  if (c === "warn" || c === "running") return "warn";
-  return "";
+  taskData.refreshTasks();
+  taskData.refreshTaskHistory();
+  queue.refreshRunningTask();
 });
 
-// Tag status task (di header card).
-const taskTag = computed(() => {
-  const s = (task.status || "idle").toLowerCase();
-  if (s === "completed") return { label: "completed", cls: "validated" };
-  if (s === "failed") return { label: "failed", cls: "failed" };
-  if (s === "cancelled") return { label: "stopped", cls: "modified" };
-  if (s === "queued") return { label: "queued", cls: "queued" };
-  if (isRunning.value) return { label: "running", cls: "validated" };
-  return { label: "idle", cls: "idle" };
-});
-
-// Lifecycle: presentasi AKTIVITAS NYATA Agent (bukan status generik).
-// Sumber: status task + activity phase terakhir (`phase_changed`) + milestone
-// yang sudah dicapai. TIDAK memakai `runtime.phase` internal (replan/
-// provider_fallback), TIDAK memakai timer/round count/jumlah tool call.
-const LIFECYCLE_STEPS = ["Planning", "Inspecting", "Editing", "Running", "Validating", "Completed"];
-const lifecycleStates = computed(() =>
-  buildLifecycleStates({
-    hasTask: Boolean(task.id),
-    status: task.status,
-    currentPhase: activityPhase.value,
-    milestones: lifecycleMilestones.value,
-    count: LIFECYCLE_STEPS.length,
-  })
-);
-const lifecycleSteps = computed(() =>
-  LIFECYCLE_STEPS.map((label, i) => ({ label, state: lifecycleStates.value[i] || "" }))
-);
-const lifecyclePct = computed(() => {
-  let max = -1;
-  lifecycleStates.value.forEach((state, i) => {
-    if (state === "done" || state === "active") max = i;
-  });
-  if (max <= 0) return 0;
-  return Math.round((max / (LIFECYCLE_STEPS.length - 1)) * 100);
-});
-
-// Page header (tasks/projects/settings).
-const pageTitle = computed(() => {
-  if (activeNav.value === "tasks") return "Tasks";
-  if (activeNav.value === "projects") return "Projects";
-  if (activeNav.value === "backup") return "Backup";
-  if (activeNav.value === "extension") return "Extension";
-  if (activeNav.value === "settings") return "Settings";
-  return "Workbench";
-});
-const pageDesc = computed(() => {
-  if (activeNav.value === "tasks") return "Live task queue and past task history.";
-  if (activeNav.value === "projects") return "Workspaces registered in AETHER.";
-  if (activeNav.value === "backup") return "GitHub backup, checkpoints, and recovery for the active project.";
-  if (activeNav.value === "extension") return "Manage AETHER extensions.";
-  if (activeNav.value === "settings") return "Configure providers and models used by the AETHER workbench.";
-  return "";
-});
-
-// Extension management refresh key — incremented after operations that need catalog refresh
-const extensionRefreshKey = ref(0);
-
-function statusTagClass(s) {
-  const v = (s || "").toLowerCase();
-  if (v === "completed") return "status-on";
-  if (v === "failed") return "status-err";
-  if (v === "running" || v === "prepared" || v === "validating" || v === "planning") return "status-run";
-  return "status-off";
-}
-
-// Format timestamp persistent log (ISO string) untuk kolom History.
-function formatTs(raw) {
-  if (!raw) return "—";
-  const d = new Date(raw);
-  return Number.isNaN(d.getTime()) ? String(raw) : d.toLocaleString();
-}
-
-// Feedback copy prompt untuk History table
-const historyCopyFeedback = ref("");
-
-async function copyHistoryPrompt(t) {
-  const text = t.task || "";
-  if (!text) return;
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch (e) {
-    return;
-  }
-  historyCopyFeedback.value = t.task_id;
-  setTimeout(() => {
-    if (historyCopyFeedback.value === t.task_id) historyCopyFeedback.value = "";
-  }, 1200);
-}
-
-// Grouping task history by time (TODAY, YESTERDAY, OLDER) berdasarkan last_timestamp.
-const HISTORY_GROUPS = ["TODAY", "YESTERDAY", "OLDER"];
-
-function taskTimeGroup(raw) {
-  if (!raw || !raw.last_timestamp) return "OLDER";
-  const d = new Date(raw.last_timestamp);
-  if (Number.isNaN(d.getTime())) return "OLDER";
-  const now = new Date();
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const yesterdayStart = new Date(todayStart);
-  yesterdayStart.setDate(yesterdayStart.getDate() - 1);
-  if (d >= todayStart) return "TODAY";
-  if (d >= yesterdayStart && d < todayStart) return "YESTERDAY";
-  return "OLDER";
-}
-
-const groupedTaskHistory = computed(() => {
-  const groups = {};
-  for (const t of taskHistory.value) {
-    const g = taskTimeGroup(t);
-    if (!groups[g]) groups[g] = [];
-    groups[g].push(t);
-  }
-  // Urutkan grup: TODAY, YESTERDAY, OLDER
-  const result = [];
-  for (const key of HISTORY_GROUPS) {
-    if (groups[key] && groups[key].length) {
-      result.push({ label: key, items: groups[key] });
-    }
-  }
-  return result;
-});
-
-// --- Event handling (#51) --------------------------------------------------
-// Filter tampilan Changes: file di dalam `.aether/**` adalah metadata internal
-// AETHER (Bible, log, dsb.), BUKAN perubahan project. Ini murni layer
-// presentasi UI; ChangeTracker/ProjectBrain/logging tidak diubah.
-function isAetherMetadata(path) {
-  if (!path) return false;
-  const normalized = String(path).replace(/\\/g, "/").replace(/^\.\//, "");
-  return (
-    normalized === ".aether" ||
-    normalized.startsWith(".aether/") ||
-    normalized.includes("/.aether/")
-  );
-}
-
-// Upsert perubahan per task (berdasarkan task_id pada event live).
-// Satu file = satu baris di Changes panel tiap task; file yang sama diedit
-// berkali-kali memperbarui barisnya (bukan menumpuk duplikat). Move/rename
-// memindahkan baris lama ke path baru. Data disimpan per-task sehingga task
-// baru tidak menimpa changes milik task lain. Bucket task_id dibuat otomatis
-// ketika belum ada.
-function upsertChange(entry, taskId) {
-  const bucketId = taskId || task.id || "";
-  const list = changesByTask.value[bucketId] || (changesByTask.value[bucketId] = []);
-  const idx = list.findIndex((c) => c.path === entry.path);
-  if (idx >= 0) {
-    list[idx] = { ...list[idx], ...entry };
-    return;
-  }
-  const kind = String(entry.kind || "").toLowerCase();
-  if ((kind.includes("move") || kind.includes("renam")) && entry.old_path) {
-    const oi = list.findIndex((c) => c.path === entry.old_path);
-    if (oi >= 0) {
-      list[oi] = { ...list[oi], ...entry };
-      return;
-    }
-  }
-  list.push(entry);
-}
-
-function handleEvent(evt) {
-  if (!evt || !evt.event_type) return;
-
-  // Approval (ASK) bersifat GLOBAL (satu queue/task lintas project): action
-  // ditahan pada task mana pun harus tetap bisa di-Allow/Deny. Ditangani
-  // SEBELUM filter task di bawah, dan selalu tertaut ke task_id payload-nya
-  // sehingga approval TIDAK tertukar antar task. Approval juga tidak
-  // didedup (bisa berulang untuk task yang sama).
-  if (evt.event_type === "approval_requested" || evt.event_type === "approval_resolved") {
-    handleApprovalEvent(evt);
-    return;
-  }
-
-  // SSE dapat dikirim dua kali untuk event yang SAMA: stream global queue
-  // (tanpa task_id filter) dan stream task-scoped (task_id filter). Keduanya
-  // dapat event yang sama -> deduplikasi berdasarkan event_id/sequence
-  // (stabil & global) agar tiap event diproses tepat satu kali. Hanya dilakukan
-  // SETELAH approval (approval tidak butuh dedup).
-  if (isDuplicateEvent(evt)) return;
-
-  // Queue events (global, tidak task-scoped): task_queued, task_started.
-  // Dipakai untuk refresh QueuePanel dan badge sidebar secara reactive.
-  if (evt.event_type === "task_queued" || evt.event_type === "task_started") {
-    queueRefresh.value += 1;
-  }
-
-  // Stream SSE bersifat GLOBAL (satu queue global AETHER): event untuk task
-  // LAIN tidak boleh mengubah Task Card/Agent Activity/runtime task yang sedang
-  // dipantau — inilah mekanisme bug "UI ikut pindah ke Task B yang masih
-  // pending lalu Agent seolah berhenti". PENGECUALIAN: task yang KITA antrikan
-  // BENAR-BENAR mulai running setelah task sebelumnya selesai -> UI mengikuti.
-  const viewedId = task.id || "";
-  const evtTaskId = evt.task_id || "";
-  if (evtTaskId && viewedId && evtTaskId !== viewedId) {
-    if (
-      evt.event_type === "task_started" &&
-      shouldFollowStartedTask({
-        startedTaskId: evtTaskId,
-        viewedTaskId: viewedId,
-        isViewingRunning: isViewingRunningTask(),
-        viewingHistory: Boolean(historyEvents.value),
-        deferredTaskIds,
-      })
-    ) {
-      { // teks + executionMode dibaca SEBELUM adoptRunningTask menghapus entri deferred.
-        const deferred = deferredTaskIds.get(evtTaskId);
-        const dText = typeof deferred === "string" ? deferred : (deferred && deferred.task) || "";
-        const dMode = typeof deferred === "object" && deferred ? deferred.executionMode : null;
-        adoptRunningTask(evtTaskId, dText, dMode);
-      }
-      // lanjut: proses event task_started untuk task yang baru diadopsi.
-    } else {
-      return;
-    }
-  }
-
-  // Event live untuk task aktif -> tampilkan alur SSE (bukan history lama).
-  if (evt.task_id && task.id && evt.task_id === task.id) {
-    historyEvents.value = null;
-  }
-  pushRolling(events.value, evt, MAX_ACTIVITY);
-  const p = evt.payload || {};
-
-  switch (evt.event_type) {
-    case "task_started":
-      task.status = "running";
-      // Task baru mulai: pastikan reasoning status task sebelumnya sudah bersih.
-      isReasoning.value = false;
-      // Task ini BENAR-BENAR mulai running -> jadikan target tombol Stop.
-      runningTaskId.value = evt.task_id || runningTaskId.value || "";
-      runtime.activity = "Starting task";
-      // Timer Task Card mulai dari timestamp START eksekusi (bukan saat card
-      // dibuat). Diset SEKALI: reactive update/SSE berikutnya tidak me-reset.
-      if (isCurrentTaskEvent(evt) && taskStartedAt.value == null) {
-        taskStartedAt.value = eventTimeMs(evt);
-      }
-      // task_started -> lifecycle step pertama aktif (Planning). Activity phase
-      // dari `phase_changed` akan menggantikannya begitu aktivitas nyata terjadi.
-      activityPhase.value = "planning";
-      lifecycleMilestones.value = addMilestone(lifecycleMilestones.value, 0);
-      // Audio feedback HANYA saat task BENAR-BENAR mulai berjalan (transisi
-      // status nyata), bukan saat user klik Run Task/Send. Dedup di
-      // audioRegistry mencegah dobel-putar bila event running diterima ulang.
-      playStatusSound("running");
-      break;
-    case "phase_changed": {
-      // Activity phase (Task 1) menggerakkan lifecycle. Nilai internal runtime
-      // (replan/provider_fallback) DIABAIKAN di sini: hanya phase yang dikenal
-      // yang mengubah current step + mencatat milestone.
-      const phaseIdx = activityPhaseIndex(p.phase);
-      if (phaseIdx >= 0) {
-        activityPhase.value = String(p.phase).trim().toLowerCase();
-        lifecycleMilestones.value = addMilestone(lifecycleMilestones.value, phaseIdx);
-      }
-      if (p.phase) {
-        // Dipertahankan untuk fitur UI lain yang masih memakai runtime.phase.
-        runtime.phase = p.phase;
-        runtime.activity = p.phase;
-      }
-      break;
-    }
-    case "provider_request":
-      if (p.provider) runtime.provider = p.provider;
-      if (p.model) runtime.model = p.model;
-      // AETHER mulai menunggu respons LLM -> tampilkan SATU reasoning status.
-      // Dipanggil berulang kali pun tetap satu elemen (state boolean), bukan
-      // entri activity/log baru.
-      isReasoning.value = true;
-      break;
-    case "provider_response":
-      if (p.provider) runtime.provider = p.provider;
-      if (p.model) runtime.model = p.model;
-      // Respons LLM diterima (atau error provider) -> hentikan reasoning status.
-      isReasoning.value = false;
-      break;
-    case "tool_called":
-      if (p.tool) {
-        runtime.tool = p.tool;
-        runtime.activity = `Running ${p.tool}`;
-      }
-      break;
-    case "tool_completed":
-      // Tool events tampil di Agent Activity (unified timeline).
-      break;
-    case "observation_received":
-      // Observation mentah tidak ditampilkan (hindari dump isi file panjang).
-      break;
-    case "validation_started":
-      validation.state = "running";
-      task.status = "validating";
-      // Mekanisme validation EXISTING (backend) -> Validating. Bukan tebakan
-      // dari terminal command: event ini memang menandakan validasi berjalan.
-      activityPhase.value = "validating";
-      lifecycleMilestones.value = addMilestone(lifecycleMilestones.value, VALIDATING_STEP);
-      break;
-    case "validation_completed":
-      validation.state = p.success === false ? "err" : "ok";
-      break;
-    case "recovery_started":
-      runtime.activity = "Recovery started";
-      break;
-    case "recovery_completed":
-      runtime.activity = "Recovery completed";
-      break;
-    case "change_detected":
-      // Sembunyikan `.aether/**` di daftar Changes (metadata internal AETHER).
-      if (!isAetherMetadata(p.path)) {
-        // Upsert (bukan push buta): satu file = satu baris, file yang diedit
-        // berkali-kali memperbarui barisnya. Changes panel ikut update live.
-        upsertChange({
-          kind: p.kind || "change",
-          path: p.path,
-          old_path: p.old_path,
-          detail: p.detail,
-          additions: p.additions,
-          deletions: p.deletions,
-          diff: p.diff,
-        }, evt.task_id || task.id);
-        // Update File Explorer secara INCREMENTAL (refresh direktori terdampak
-        // saja; expanded/selected dipertahankan), TANPA menunggu task selesai.
-        liveFsChange.value = {
-          seq: ++liveFsChangeSeq,
-          path: p.path,
-          kind: p.kind || "change",
-          old_path: p.old_path || "",
-        };
-      }
-      break;
-    case "task_completed":
-      task.status = "completed";
-      // Task selesai -> reasoning status harus benar-benar berhenti.
-      isReasoning.value = false;
-      runtime.activity = "";
-      // Timer Task Card berhenti pada status final (durasi terkunci).
-      if (isCurrentTaskEvent(evt) && taskEndedAt.value == null) {
-        taskEndedAt.value = eventTimeMs(evt);
-      }
-      // Refresh File Explorer setelah agent selesai (file baru terlihat).
-      explorerRefresh.value += 1;
-      // Task terminal: lepas target tombol Stop SECARA SINKRON (tombol langsung
-      // hilang), baru refresh antrian untuk memilih task running berikutnya.
-      terminalTaskId.value = evt.task_id || task.id || "";
-      releaseRunningTask(terminalTaskId.value);
-      queueRefresh.value += 1;
-      playStatusSound("completed");
-      refreshTaskHistory();
-      dropApprovalsForTask(evt.task_id || task.id || "");
-      break;
-    case "task_failed":
-      task.status = "failed";
-      // Task gagal -> hentikan reasoning status.
-      isReasoning.value = false;
-      // Timer Task Card berhenti pada status final (durasi terkunci).
-      if (isCurrentTaskEvent(evt) && taskEndedAt.value == null) {
-        taskEndedAt.value = eventTimeMs(evt);
-      }
-      // Task terminal: tombol Stop langsung hilang (sinkron, tanpa race).
-      terminalTaskId.value = evt.task_id || task.id || "";
-      releaseRunningTask(terminalTaskId.value);
-      queueRefresh.value += 1;
-      playStatusSound("failed");
-      refreshTaskHistory();
-      dropApprovalsForTask(evt.task_id || task.id || "");
-      break;
-    case "task_cancelled":
-      task.status = "cancelled";
-      // Task dibatalkan -> hentikan reasoning status (tidak ada animasi nyangkut).
-      isReasoning.value = false;
-      // Execution benar-benar berhenti -> indikator Agent kembali idle.
-      runtime.activity = "";
-      runtime.tool = "";
-      // Timer Task Card berhenti pada status final (durasi terkunci).
-      if (isCurrentTaskEvent(evt) && taskEndedAt.value == null) {
-        taskEndedAt.value = eventTimeMs(evt);
-      }
-      // Task terminal: tombol Stop langsung hilang (sinkron, tanpa race).
-      terminalTaskId.value = evt.task_id || task.id || "";
-      releaseRunningTask(terminalTaskId.value);
-      queueRefresh.value += 1;
-      playStatusSound("cancelled");
-      refreshTaskHistory();
-      dropApprovalsForTask(evt.task_id || task.id || "");
-      break;
-    default:
-      break;
-  }
-}
-
-function connectStream() {
-  // Close existing detail stream
-  if (source) source.close();
-
-  // Ensure global queue stream is open (for task_queued/task_started events)
-  if (!queueSource) {
-    queueSource = openEventStream({ onEvent: handleEvent });
-    queueSource.onopen = () => {
-      connected.value = true;
-    };
-    queueSource.onerror = () => {
-      connected.value = false;
-    };
-  }
-
-  // Open task-scoped stream when task.id is set
-  if (task.id) {
-    source = openEventStream({ taskId: task.id, onEvent: handleEvent });
-    source.onopen = () => {
-      connected.value = true;
-    };
-    source.onerror = () => {
-      connected.value = false;
-    };
-  } else {
-    source = null;
-  }
-}
-
-function resetWorkspace() {
-  events.value = [];
-  // changesByTask TIDAK dihapus di sini — data per-task dipertahankan.
-  // Hanya historyEvents/currentReport/runtime/lifecycle yang direset.
-  historyEvents.value = null;
-  currentReport.value = null;
-  validation.state = "pending";
-  runtime.phase = "";
-  runtime.activity = "";
-  runtime.provider = "";
-  runtime.model = "";
-  runtime.tool = "";
-  // Task baru/workspace kosong -> lifecycle kembali ke awal (belum ada aktivitas).
-  activityPhase.value = "";
-  lifecycleMilestones.value = [];
-  // Workspace direset untuk task baru -> tidak ada reasoning status tersisa.
-  isReasoning.value = false;
-  liveFsChange.value = null;
-  // Task baru/workspace kosong -> reset timing Task Card + hentikan timer.
-  taskStartedAt.value = null;
-  taskEndedAt.value = null;
-  stopDurationTimer();
-}
-
-// Total reset changes: HANYA dipanggil ketika tidak ada task aktif/pending
-// (semua task terminal) dan user memulai task baru. Dipanggil dari submitTask
-// saat adoption baru.
-function resetAllChanges() {
-  changesByTask.value = {};
-}
-
-// --- Data loading ----------------------------------------------------------
-let refreshTasksGen = 0;
-async function refreshTasks() {
-  const cur = ++refreshTasksGen;
-  try {
-    const data = await listTasks(selectedProjectId.value || null);
-    if (cur !== refreshTasksGen) return;
-    tasks.value = data.tasks || [];
-  } catch {
-    // Endpoint list mungkin belum tersedia; UI tetap aman.
-  }
-}
-
-// Task History dari persistent log (.aether/log/ via History API), newest first.
-async function refreshTaskHistory() {
-  try {
-    const data = await listTaskHistory(selectedProjectId.value || null);
-    taskHistory.value = data.tasks || [];
-  } catch {
-    // Endpoint history mungkin belum tersedia; UI tetap aman.
-  }
-}
-
-// --- Task submit / stop (#50) ----------------------------------------------
-async function submitTask(
-  text,
-  overrideProviderInstanceId = null,
-  overrideModelId = null,
-  overrideExecutionMode = null,
-  images = null
-) {
-  error.value = "";
-  submitting.value = true;
-  try {
-    // Provider Instance + Model dari konfigurasi LLM tersimpan (SQLite)
-    // diteruskan sebagai metadata ke mekanisme AETHER existing. Runtime
-    // merakit provider + api_url + api_key + model dari DB ini (bukan .env).
-    // Mode tetap routing signal.
-    // Override per-task (mis. dari card Task Proposal Consultant) MENANG atas
-    // pilihan global; bila tidak diisi -> perilaku default (pilihan global).
-    const providerId = overrideProviderInstanceId || selectedProviderInstanceId.value;
-    const modelId = overrideModelId || selectedModelId.value;
-    const metadata = {};
-    if (providerId) metadata.provider_instance_id = providerId;
-    if (modelId) metadata.model_id = modelId;
-    if (selectedMode.value) metadata.mode = selectedMode.value;
-    // execution_mode — Task 01: queue | parallel (hanya parameter niat).
-    const executionMode = overrideExecutionMode || selectedExecutionMode.value || "queue";
-    const record = await createTask(
-      text,
-      selectedProjectId.value || null,
-      Object.keys(metadata).length ? metadata : null,
-      executionMode,
-      images || null
-    );
-    // Status awal = KEBENARAN backend, BUKAN optimistik. Task yang dikirim
-    // (Workbench Agent Input maupun Consultant Run Task) masuk SATU Global Task
-    // Queue; bila slot eksekusi sedang terpakai, backend mengembalikan
-    // queue_state="pending" -> task belum berjalan (menunggu slot) dan
-    // ditampilkan sebagai "queued", bukan "running". Promosi ke running datang
-    // dari SSE `task_started` (atau queue_state="running" pada respons ini).
-    const queueState = record.queue_state;
-    // Pisahkan "task yang baru dibuat" dari "task yang sedang dipantau". Bila ada
-    // task yang BENAR-BENAR running sedang dipantau, submit task baru TIDAK boleh
-    // meng-overwrite tampilan/streamnya: task baru hanya masuk antrian (pending).
-    const adopt = shouldAdoptSubmittedTask({
-      queueState,
-      isViewingRunning: isViewingRunningTask(),
-    });
-
-    if (adopt) {
-      task.id = record.task_id;
-      task.text = record.task;
-      task.executionMode = normalizeExecutionMode(record.execution_mode || record.executionMode || executionMode);
-      if (queueState === "pending") {
-        // Menunggu execution slot Global Task Queue -> "queued" (bukan running).
-        task.status = "queued";
-      } else if (queueState === "running") {
-        task.status = "running";
-        // Task ini langsung mendapat slot -> target tombol Stop.
-        runningTaskId.value = record.task_id;
-      } else {
-        task.status = record.status || "prepared";
-      }
-      // Reset seluruh changes HANYA ketika tidak ada task aktif/pending lain
-      // (bukan saat pindah tampilan atau saat task lain masih berjalan).
-      const hasOtherActive = [...queueItems.value, ...tasks.value].some((item) => {
-        const id = item.task_id || item.id || "";
-        const st = String(item.queue_state || item.status || "").toLowerCase();
-        return id !== record.task_id &&
-          ["pending", "queued", "running", "prepared", "planning", "executing", "validating"].includes(st);
-      });
-      if (!hasOtherActive) resetAllChanges();
-      resetAudioTracker();
-      resetWorkspace();
-      // Bila task LANGSUNG mendapat slot eksekusi (queue_state="running"), mulai
-      // timer dari sekarang. Pengaman bila event task_started terlewat sebelum
-      // SSE tersambung; bila event datang, nilai ini TIDAK ditimpa (guard == null).
-      if (queueState === "running" && taskStartedAt.value == null) {
-        taskStartedAt.value = Date.now();
-      }
-      connectStream();
-    } else {
-      // Task A sedang running & dipantau -> biarkan TETAP tampil. Task B baru
-      // masuk Global Task Queue sebagai pending (terlihat di panel TASKS),
-      // TIDAK diadopsi dan TIDAK me-rebind stream. Ingat B agar UI mengikuti
-      // begitu scheduler benar-benar menjalankannya (setelah A selesai).
-      // Simpan juga execution_mode agar Task Card menampilkan mode yang benar
-      // saat B akhirnya diadopsi (fallback SSE tidak membawa execution_mode).
-      deferredTaskIds.set(record.task_id, {
-        task: record.task,
-        executionMode: normalizeExecutionMode(record.execution_mode || record.executionMode || executionMode),
-      });
-      // Stream harus tetap terbuka agar event task_started B nanti terlihat.
-      ensureStream();
-    }
-    await refreshTasks();
-    composerOpen.value = false;
-    // Task baru -> panel TASKS (queue global) ikut refresh meski dibuat dari
-    // Agent Input (satu queue yang sama).
-    queueRefresh.value += 1;
-    // Kembalikan record: pemanggil (mis. Run Task Consultant) memakai task_id
-    // task yang BARU dibuat, yang belum tentu == task yang sedang dipantau.
-    return record;
-  } catch (e) {
-    error.value = e.message || "Failed to create task.";
-    return null;
-  } finally {
-    submitting.value = false;
-  }
-}
-
-// Handler TaskComposer (Agent Input): payload { text, images } (bentuk baru)
-// ATAU string lama (backward compatible). Attachment gambar diteruskan sebagai
-// parameter ke-5 submitTask TANPA mengubah urutan override provider/model/mode
-// (yang dipakai card Task Proposal Consultant).
-async function onComposerSubmit(payload) {
-  const text = typeof payload === "string" ? payload : (payload && payload.text) || "";
-  if (!text) return null;
-  const images =
-    payload && typeof payload === "object" ? payload.images || null : null;
-  return submitTask(text, null, null, null, images);
-}
-
-async function stopTask() {
-  // Target Stop = task yang BENAR-BENAR RUNNING (Global Task Queue). Fallback
-  // ke task aktif hanya bila id running belum diketahui (mis. antrian sedang
-  // dimuat). Mekanisme penghentian tetap cancel_task existing (bukan sistem
-  // cancellation baru). Send TIDAK pernah menghentikan task.
-  const targetId = runningTaskId.value || task.id;
-  if (!targetId) return;
-  try {
-    const record = await cancelTask(targetId);
-    // Jangan menimpa status tampilan task lain yang sedang dibuka.
-    if (targetId === task.id) task.status = record.status || "cancelled";
-  } catch (e) {
-    error.value = e.message || "Failed to stop task.";
-  } finally {
-    runningTaskId.value = "";
-    // Scheduler existing akan mempromosikan task pending berikutnya; refresh
-    // antrian + sinkronkan target Stop ke task running yang baru (bila ada).
-    queueRefresh.value += 1;
-    refreshRunningTask();
-  }
-}
-
-// --- Stop confirmation (confirmation layer di depan aksi Stop) --------------
-function requestStop() {
-  if (!isRunning.value) return;
-  if (stopInProgress.value) return;
-  stopConfirmOpen.value = true;
-}
-
-function cancelStopConfirm() {
-  if (stopInProgress.value) return;
-  stopConfirmOpen.value = false;
-}
-
-async function confirmStop() {
-  if (stopInProgress.value) return;
-  stopInProgress.value = true;
-  stopConfirmOpen.value = false;
-  try {
-    await stopTask();
-  } finally {
-    stopInProgress.value = false;
-  }
-}
-
-function onStopConfirmKeydown(e) {
-  if (e.key === 'Escape' && stopConfirmOpen.value) {
-    cancelStopConfirm();
-  }
-}
-
-watch(stopConfirmOpen, (open) => {
+// Konfirmasi Stop Task: pasang/lepas listener Escape.
+watch(taskLifecycle.stopConfirmOpen, (open) => {
   if (open) {
-    document.addEventListener('keydown', onStopConfirmKeydown);
+    document.addEventListener('keydown', taskLifecycle.onStopConfirmKeydown);
   } else {
-    document.removeEventListener('keydown', onStopConfirmKeydown);
+    document.removeEventListener('keydown', taskLifecycle.onStopConfirmKeydown);
   }
 });
 
-// Buka task dari persistent log (History/Activity/Report API). Berfungsi untuk
-// task lama walau SessionStore sudah kosong / proses sudah restart.
-async function openHistoryTask(taskId) {
-  error.value = "";
-  const projectId = selectedProjectId.value || null;
-  try {
-    const info = await getTaskHistory(taskId, projectId);
-    task.id = info.task_id || taskId;
-    task.text = info.task || "";
-    task.status = info.status || "incomplete";
-    // Task lama: execution_mode bisa ada di info.execution_mode (dari TaskRecord
-    // to_dict) atau tidak ada sama sekali -> fallback "queue".
-    task.executionMode = normalizeExecutionMode(info.execution_mode || info.executionMode);
-    // Activity (chronological) dari persistent log.
-    const activity = await getTaskActivity(taskId, projectId);
-    historyEvents.value = activity.events || [];
-    // Reconstruct changes per task from history events.
-    changesByTask.value[taskId] = [];
-    for (const raw of historyEvents.value || []) {
-      if (raw.event_type === "change_detected") {
-        const p = raw.payload || {};
-        if (!isAetherMetadata(p.path)) {
-          upsertChange({
-            kind: p.kind || "change",
-            path: p.path,
-            old_path: p.old_path,
-            detail: p.detail,
-            additions: p.additions,
-            deletions: p.deletions,
-            diff: p.diff,
-          }, taskId);
-        }
-      }
-    }
-    // Lifecycle task lama: rekonstruksi activity phase + milestone dari event
-    // yang tersimpan (phase_changed/task_started). Status terminal tetap dari
-    // info.status sehingga Completed/Failed/Cancelled benar.
-    const histLifecycle = lifecycleFromEvents(historyEvents.value);
-    activityPhase.value = histLifecycle.currentPhase;
-    lifecycleMilestones.value = histLifecycle.milestones;
-    // Timing Task Card dari event lifecycle log (start eksekusi -> terminal).
-    // Fallback aman bila task lama tidak punya event start/terminal.
-    applyHistoryTiming(info, historyEvents.value);
-    // Report final (bila ada) dari persistent log.
-    try {
-      const report = await getTaskReport(taskId, projectId);
-      currentReport.value = report.report ?? null;
-    } catch {
-      currentReport.value = null;
-    }
-    activeNav.value = "agent";
-  } catch (e) {
-    error.value = e.message || "Failed to load task history.";
-  }
-}
-
-// Buka Report viewer untuk sebuah task (Report API -> .aether/log/).
-async function openReport(taskId) {
-  error.value = "";
-  if (!taskId) return;
-  try {
-    const data = await getTaskReport(taskId, selectedProjectId.value || null);
-    reportTaskId.value = data.task_id || taskId;
-    reportStatus.value = data.status || "";
-    currentReport.value = data.report ?? null;
-    reportOpen.value = true;
-  } catch (e) {
-    error.value = e.message || "Failed to load report.";
-  }
-}
-
-// --- Project Launcher / Active Project -------------------------------------
-async function refreshLauncherProjects() {
-  try {
-    const data = await getProjects();
-    launcherProjects.value = data.projects || [];
-    // Page Projects memakai daftar yang sama (satu sumber data: GET /projects).
-    projects.value = launcherProjects.value;
-  } catch {
-    launcherProjects.value = [];
-    projects.value = [];
-  }
-}
-
-async function openProject(projectId) {
-  launcherBusy.value = true;
-  error.value = "";
-  try {
-    const data = await setActiveProject(projectId);
-    activeProject.value = data.active_project || null;
-    selectedProjectId.value = projectId;
-    // Refresh task list dan history saat project berubah
-    await refreshTasks();
-    await refreshTaskHistory();
-    await enterWorkbench();
-  } catch (e) {
-    error.value = e.message || "Failed to open project.";
-  } finally {
-    launcherBusy.value = false;
-  }
-}
-
-async function createNewProject({ name, path }) {
-  launcherBusy.value = true;
-  error.value = "";
-  try {
-    const record = await createProject(name, path);
-    await refreshLauncherProjects();
-    activeProject.value = record;
-    selectedProjectId.value = record.id;
-    await enterWorkbench();
-    // Tampilkan policy project BARU. Nilainya berasal dari `.aether/permissions.json`
-    // yang dibuat backend saat project dibuat (Default Project Permission Matrix)
-    // — dibaca lewat endpoint policy existing, BUKAN konfigurasi kedua di frontend.
-    openProjectPolicy(record);
-  } catch (e) {
-    error.value = e.message || "Failed to create project.";
-  } finally {
-    launcherBusy.value = false;
-  }
-}
-
-async function removeProject(projectId) {
-  launcherBusy.value = true;
-  error.value = "";
-  try {
-    await deleteProject(projectId);
-    await refreshLauncherProjects();
-  } catch (e) {
-    error.value = e.message || "Failed to delete project.";
-  } finally {
-    launcherBusy.value = false;
-  }
-}
-
-// --- Projects page: Hapus Project (REGISTRY-ONLY) --------------------------
-// Hapus = hapus RECORD project dari daftar AETHER. TIDAK menghapus
-// folder/file project di disk (backend: DELETE /api/projects/<id> ->
-// ProjectStore.delete_project -> DELETE FROM projects, tanpa menyentuh
-// filesystem). Frontend hanya memicu endpoint yang sudah ada.
-let noticeTimer = null;
-
-function askProjectDelete(project) {
-  if (!project || !project.id) return;
-  error.value = "";
-  notice.value = "";
-  projectToDelete.value = project;
-}
-
-function cancelProjectDelete() {
-  projectToDelete.value = null;
-}
-
-// --- Projects page: Project Settings / Policy (PROJECT-LOCAL) --------------
-// Policy disimpan per project di `<root>/.aether/permissions.json`. Hanya
-// project yang dipilih yang terpengaruh; project lain tidak berubah.
-function openProjectPolicy(project) {
-  if (!project || !project.id) return;
-  error.value = "";
-  notice.value = "";
-  policyProject.value = project;
-}
-
-function closeProjectPolicy() {
-  policyProject.value = null;
-}
-
-// --- Approval (ASK): modal Allow/Deny untuk action Agent yang ditahan --------
-// Approval dari SSE `approval_requested` masuk ke antrian `approvals`. Modal
-// menampilkan SATU approval (yang paling awal) pada satu waktu agar keputusan
-// tidak ambigu. Allow/Deny dikirim ke endpoint resolve -> backend meneruskan
-// ke gate yang menahan action (terikat task/session yang benar).
-function upsertApproval(entry) {
-  if (!entry || !entry.request_id) return;
-  const list = approvals.value;
-  const idx = list.findIndex((a) => a.request_id === entry.request_id);
-  if (idx >= 0) {
-    list[idx] = { ...list[idx], ...entry };
-    return;
-  }
-  list.push(entry);
-}
-
-function removeApproval(requestId, status = "") {
-  if (!requestId) return;
-  approvals.value = approvals.value.filter((a) => a.request_id !== requestId);
-}
-
-function handleApprovalEvent(evt) {
-  const p = evt.payload || {};
-  if (evt.event_type === "approval_requested") {
-    upsertApproval({
-      request_id: p.request_id,
-      tool: p.tool,
-      target: p.target,
-      action_class: p.action_class,
-      matrix_action: p.matrix_action,
-      scope: p.scope,
-      reason: p.reason,
-      task_id: p.task_id || evt.task_id || "",
-      session_id: p.session_id || evt.session_id || "",
-      status: "pending",
-    });
-  } else if (evt.event_type === "approval_resolved") {
-    removeApproval(p.request_id, p.status);
-  }
-}
-
-const approvalBusy = ref(false);
-const approvalError = ref("");
-
-async function decideApproval(allow) {
-  const current = approvals.value[0];
-  if (!current || approvalBusy.value) return;
-  approvalBusy.value = true;
-  approvalError.value = "";
-  try {
-    await resolveApproval(current.request_id, allow);
-    removeApproval(current.request_id, allow ? "allowed" : "denied");
-  } catch (e) {
-    approvalError.value = e.message || "Failed to submit decision.";
-  } finally {
-    approvalBusy.value = false;
-  }
-}
-
-// Cleanup approval yang menggantung saat task yang memilikinya sudah terminal
-// (task_completed/failed/cancelled) — gate backend akan timeout/DENY sendiri,
-// jadi UI tidak perlu menampilkan modal basi.
-function dropApprovalsForTask(taskId) {
-  if (!taskId) return;
-  approvals.value = approvals.value.filter((a) => a.task_id !== taskId);
-}
-
-async function confirmProjectDelete() {
-  const project = projectToDelete.value;
-  if (!project) return;
-  launcherBusy.value = true;
-  error.value = "";
-  try {
-    await deleteProject(project.id);
-    projectToDelete.value = null;
-    const wasActive = Boolean(activeProject.value && activeProject.value.id === project.id);
-    if (selectedProjectId.value === project.id) selectedProjectId.value = "";
-    if (wasActive) {
-      // Project aktif dihapus: backend sudah membersihkan active state ->
-      // kembalikan UI ke Project Launcher agar tetap konsisten.
-      activeProject.value = null;
-      if (lastProject.value && lastProject.value.id === project.id) lastProject.value = null;
-      task.id = "";
-      task.text = "";
-      task.status = "idle";
-      // Project aktif dihapus = tidak ada task aktif/pending di project ini ->
-      // reset changes global.
-      resetAllChanges();
-    }
-    await refreshLauncherProjects();
-    notice.value = `"${project.name}" dihapus dari daftar AETHER. File/folder di disk TIDAK dihapus.`;
-    if (noticeTimer) clearTimeout(noticeTimer);
-    noticeTimer = setTimeout(() => {
-      notice.value = "";
-    }, 5000);
-  } catch (e) {
-    // Error: JANGAN hapus entri secara optimistik — entri tetap tampil.
-    error.value = e.message || "Failed to delete project.";
-  } finally {
-    launcherBusy.value = false;
-  }
-}
-
-// Close Project: minta konfirmasi dulu sebelum benar-benar menutup project.
-// Tombol Close Project (sidebar) memanggil ini, bukan langsung menutup.
-function askCloseProject() {
-  closeProjectConfirm.value = true;
-}
-
-function cancelCloseProject() {
-  closeProjectConfirm.value = false;
-}
-
-async function confirmCloseProject() {
-  closeProjectConfirm.value = false;
-  await closeProject();
-}
-
-// Close Project: clear active project -> kembali ke Project Launcher.
-// TIDAK menghapus folder filesystem.
-async function closeProject() {
-  const previous = activeProject.value;
-  try {
-    await closeActiveProject();
-  } catch {
-    // Tetap lanjut ke launcher walau request gagal.
-  }
-  activeProject.value = null;
-  // Tampilkan project terakhir di launcher agar bisa dibuka kembali.
-  lastProject.value = previous || null;
-  selectedProjectId.value = "";
-  task.id = "";
-  task.text = "";
-  task.status = "idle";
-  // Project ditutup = tidak ada task aktif/pending di project ini -> reset changes.
-  resetAllChanges();
-  resetWorkspace();
-  await refreshLauncherProjects();
-}
-
-// Buka Windows Explorer pada active project (path dari backend, bukan frontend).
-async function openExplorer() {
-  try {
-    await openInExplorer();
-  } catch (e) {
-    error.value = e.message || "Gagal membuka Explorer.";
-  }
-}
-
-// Kode editor (Monaco) — dibuka dari File Explorer / panel CHANGES.
-// `editorFile` = { path, name } dari Explorer (path relatif, bukan path baru).
-// Tidak ada penulisan file dari browser: semua lewat API file backend existing.
-const editorOpen = ref(false);
-const editorFile = ref(null);
-
-function openFileInEditor(file) {
-  const path = file && (file.path || file.file_path);
-  if (!path) return;
-  error.value = "";
-  editorFile.value = { path, name: (file && file.name) || String(path).split("/").pop() };
-  editorOpen.value = true;
-}
-
-function closeCodeEditor() {
-  editorOpen.value = false;
-  editorFile.value = null;
-}
-
-// Feedback error editor memakai mekanisme error banner AETHER yang sudah ada.
-function onEditorError(message) {
-  error.value = message || "Editor error.";
-}
-
-async function enterWorkbench() {
-  activeNav.value = "agent";
-  try {
-    const data = await getProjects();
-    projects.value = data.projects || [];
-  } catch {
-    projects.value = [];
-  }
-  await refreshTasks();
-  await refreshTaskHistory();
-  connectStream();
-}
-
-// Muat Provider Instance + Model dari konfigurasi LLM tersimpan (SQLite).
-// New Task memakai ini (bukan settings/.env). Default: instance enabled
-// pertama + model enabled pertama (bila belum ada pilihan).
-async function refreshLLMProviders() {
-  try {
-    const data = await getLLMProviders();
-    llmProviders.value = data.providers || [];
-  } catch {
-    llmProviders.value = [];
-  }
-  const enabled = llmProviders.value.filter((p) => p.enabled !== false);
-  const current = enabled.find((p) => p.id === selectedProviderInstanceId.value);
-  if (!current) {
-    const first = enabled[0] || null;
-    selectedProviderInstanceId.value = first ? first.id : "";
-    selectedModelId.value = "";
-  }
-  const inst = enabled.find((p) => p.id === selectedProviderInstanceId.value);
-  const models = inst ? (inst.models || []).filter((m) => m.enabled !== false) : [];
-  if (!models.some((m) => m.id === selectedModelId.value)) {
-    selectedModelId.value = models[0] ? models[0].id : "";
-  }
-}
-
-// --- Lifecycle -------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Lifecycle komponen.
+// ---------------------------------------------------------------------------
 onMounted(async () => {
   try {
     health.value = await getHealth();
   } catch {
     health.value = null;
   }
-  try {
-    config.value = await getConfig();
-    // Normalisasi: 'minimal' (legacy) -> 'fast' (kanonik)
-    const rawMode = config.value.mode || "balanced";
-    selectedMode.value = rawMode === "minimal" ? "fast" : rawMode;
-  } catch {
-    config.value = {};
-  }
-  // Provider Instance + Model untuk New Task dari konfigurasi LLM tersimpan.
-  await refreshLLMProviders();
-  await refreshLauncherProjects();
+  // Konfigurasi AETHER + Provider Instance/Model untuk New Task.
+  await composer.loadConfig();
+  await composer.refreshLLMProviders();
+  await workspace.refreshLauncherProjects();
   // Baca project/session terakhir untuk ditawarkan "buka kembali" di launcher.
   // AETHER TIDAK auto-masuk Workbench: user harus menentukan workspace dulu.
-  try {
-    const data = await getActiveProject();
-    lastProject.value = data.active_project || null;
-  } catch {
-    lastProject.value = null;
-  }
+  await workspace.loadLastProject();
   // Sinkronkan "task running" saat ini dari Global Task Queue (mis. task yang
-  // sudah berjalan sebelum halaman dimuat/di-refresh), sehingga tombol Stop
-  // langsung mengarah ke task yang benar.
-  refreshRunningTask();
+  // sudah berjalan sebelum halaman dimuat/di-refresh).
+  queue.refreshRunningTask();
 });
 
 onBeforeUnmount(() => {
-  if (source) source.close();
-  if (queueSource) queueSource.close();
-  document.removeEventListener('keydown', onStopConfirmKeydown);
   // Bersihkan interval durasi Task Card agar tidak ada timer nyangkut.
-  stopDurationTimer();
+  timing.stopDurationTimer();
+  stream.closeStream();
+  document.removeEventListener('keydown', taskLifecycle.onStopConfirmKeydown);
   // Bersihkan timer feedback tombol Copy Agent Activity.
-  if (activityCopyTimer) clearTimeout(activityCopyTimer);
-  activityCopyTimer = null;
+  activity.clearActivityCopyTimer();
 });
+
+// ---------------------------------------------------------------------------
+// Expose ke template (nama tetap sama agar template tidak berubah).
+// ---------------------------------------------------------------------------
+// Shell / navigation.
+const {
+  activeNav,
+  workspaceNav,
+  settingsItem,
+  navBadge,
+  pageTitle,
+  pageDesc,
+  gatewayAddress,
+  modelLabel,
+  providerLabel,
+  aetherVersion,
+  extensionRefreshKey,
+} = shell;
+
+// Workspace / project.
+const {
+  activeProject,
+  projects,
+  launcherProjects,
+  launcherBusy,
+  lastProject,
+  projectToDelete,
+  policyProject,
+  closeProjectConfirm,
+  openProject,
+  createNewProject,
+  removeProject,
+  askProjectDelete,
+  cancelProjectDelete,
+  confirmProjectDelete,
+  openProjectPolicy,
+  closeProjectPolicy,
+  askCloseProject,
+  cancelCloseProject,
+  confirmCloseProject,
+  openExplorer,
+} = workspace;
+
+// Task data + history.
+const { tasks, taskHistory, groupedTaskHistory, historyCopyFeedback, copyHistoryPrompt } = taskData;
+
+// Changes per task.
+const { changes, aggregateChanges } = changesState;
+
+// Agent Activity + event state.
+const {
+  activityEvents,
+  showReasoning,
+  activityCopied,
+  copyAgentActivity,
+  validation,
+  activityPhase,
+  explorerRefresh,
+  liveFsChange,
+} = activity;
+
+// Global Task Queue.
+const {
+  runningTaskId,
+  queueCount,
+  terminalTaskId,
+  isRunning,
+  stopQueueTask,
+  viewQueueTask,
+} = queue;
+
+// Lifecycle / status.
+const { agentStatus, agentDotClass, taskTag, lifecycleSteps, lifecyclePct, taskExecutionLabel } =
+  lifecycle;
+
+// Timing.
+const { taskDurationLabel, taskTimerLive } = timing;
+
+// Telemetry.
+const {
+  showTaskMeta,
+  taskProvider,
+  taskModel,
+  taskRoundLabel,
+  showTaskTelemetry,
+  taskLlmRounds,
+  taskToolCalls,
+  taskTokensLabel,
+  taskTokensTooltip,
+} = telemetry;
+
+// Task lifecycle actions.
+const {
+  submitting,
+  currentReport,
+  reportOpen,
+  reportTaskId,
+  reportStatus,
+  stopConfirmOpen,
+  stopInProgress,
+  requestStop,
+  cancelStopConfirm,
+  confirmStop,
+  openHistoryTask,
+  openReport,
+} = taskLifecycle;
+
+// Composer + konfigurasi LLM.
+const {
+  composerOpen,
+  config,
+  selectedMode,
+  llmProviders,
+  selectedProviderInstanceId,
+  selectedModelId,
+  selectedExecutionMode,
+  openComposer,
+  closeComposer,
+  onComposerSubmit,
+} = composer;
+
+// Consultant.
+const {
+  consultantOpen,
+  activeConsultantSessionId,
+  submittedTaskId,
+  openConsultant,
+  closeConsultant,
+  onConsultantSessionChange,
+  runConsultantTask,
+} = consultant;
+
+// Approval (ASK).
+const { approvals, approvalBusy, approvalError, decideApproval } = approvalsState;
+
+// SSE connection status (indikator Online/Offline + "live").
+const { connected } = stream;
+
+// Code editor.
+const { editorOpen, editorFile, openFileInEditor, closeCodeEditor, onEditorError } = codeEditor;
 </script>
 
 <template>

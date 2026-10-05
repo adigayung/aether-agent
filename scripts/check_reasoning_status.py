@@ -100,7 +100,10 @@ def _ssr_render_states() -> tuple[str, str]:
 def main() -> int:
     print("=== Verifikasi Live Agent Reasoning Status ===")
 
-    app_src = _read(SRC_FRONTEND / "App.vue")
+    # App.vue = composition root; logic reasoning/event ada di ./composables/*.
+    app_src = _read(SRC_FRONTEND / "App.vue") + "\n" + "\n".join(
+        _read(p) for p in sorted((SRC_FRONTEND / "composables").glob("*.js"))
+    )
     activity_src = _read(COMPONENTS / "AgentActivity.vue")
     css_src = _read(SRC_FRONTEND / "styles.css")
     api_src = _read(SRC_FRONTEND / "api.js")

@@ -56,6 +56,20 @@ def _all_frontend_sources() -> dict:
     return files
 
 
+def _app_source(sources: dict) -> str:
+    """Sumber 'App' = App.vue (composition root) + modul ./composables/*.
+
+    Setelah refactor App.vue menjadi composition layer, logic event/agent/task
+    berada di `web/frontend/src/composables/*.js`. Verifier ini memeriksa
+    KAPABILITAS frontend (menangani event, memakai SSE, dst.), bukan lokasi file
+    yang spesifik — jadi sumbernya digabung.
+    """
+    parts = [_read(SRC_FRONTEND / "App.vue")]
+    for p in sorted((SRC_FRONTEND / "composables").glob("*.js")):
+        parts.append(_read(p))
+    return "\n".join(parts)
+
+
 def main() -> int:
     print("=== Verifikasi Engineering Workbench UI (#52) ===")
     return _run()
@@ -63,6 +77,8 @@ def main() -> int:
 
 def _run() -> int:
     sources = _all_frontend_sources()
+    # Sumber gabungan App.vue + composables untuk assertion kapabilitas.
+    app_src = _app_source(sources)
 
     # 1) Vue/Vite project load.
     pkg_path = FRONTEND_DIR / "package.json"
@@ -141,11 +157,10 @@ def _run() -> int:
     assert "/events" in api_src, "api.js harus memakai /api/events"
     assert "EventSource" in api_src, "harus memakai EventSource (SSE)"
     assert "openEventStream" in api_src, "harus ada openEventStream"
-    assert "openEventStream" in sources.get("src/App.vue", ""), "App harus memakai SSE"
+    assert "openEventStream" in app_src, "Frontend harus memakai SSE"
     print("[5] SSE #51 digunakan OK -> /api/events via EventSource")
 
     # 6) event activity dapat diproses (handler event #51).
-    app_src = sources.get("src/App.vue", "")
     required_events = [
         "task_started",
         "phase_changed",

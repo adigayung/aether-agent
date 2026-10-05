@@ -116,8 +116,13 @@ def _run() -> int:
     # -------------------------------------------------------------------
     # 5) App.vue: memakai helper + menampilkan Tokens di Task Card.
     # -------------------------------------------------------------------
-    app_src = (FRONTEND_SRC / "App.vue").read_text(encoding="utf-8")
-    assert 'from "./tokenFormat.js"' in app_src, "App.vue harus mengimpor tokenFormat.js"
+    # App.vue = composition root; formatter token dipakai di ./composables/*.
+    app_src = (FRONTEND_SRC / "App.vue").read_text(encoding="utf-8") + "\n" + "\n".join(
+        p.read_text(encoding="utf-8") for p in sorted((FRONTEND_SRC / "composables").glob("*.js"))
+    )
+    assert ('from "./tokenFormat.js"' in app_src or 'from "../tokenFormat.js"' in app_src), (
+        "frontend harus mengimpor helper tokenFormat.js"
+    )
     assert "<span class=\"tm-key\">Tokens</span>" in app_src, "Task Card harus menampilkan Tokens"
     assert "taskTokensLabel" in app_src and "taskTokensTooltip" in app_src, (
         "Task Card harus memakai taskTokensLabel + tooltip angka penuh"

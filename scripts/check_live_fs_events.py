@@ -443,7 +443,10 @@ def run_live_task_sequence() -> int:
 
 def run_frontend_static() -> int:
     frontend = PROJECT_ROOT / "web" / "frontend" / "src"
-    app = (frontend / "App.vue").read_text(encoding="utf-8")
+    # App.vue = composition root; upsert/live-change ada di ./composables/*.
+    app = (frontend / "App.vue").read_text(encoding="utf-8") + "\n" + "\n".join(
+        p.read_text(encoding="utf-8") for p in sorted((frontend / "composables").glob("*.js"))
+    )
     explorer = (frontend / "components" / "FileExplorer.vue").read_text(encoding="utf-8")
     changes_panel = (frontend / "components" / "ChangesPanel.vue").read_text(encoding="utf-8")
 

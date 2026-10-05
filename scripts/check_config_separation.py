@@ -310,7 +310,10 @@ def _run() -> int:
         "Project Policy TIDAK boleh di-mount di Settings (global)"
     )
     # GlobalSettingsPanel tidak di-mount di page Projects.
-    app_vue = (FRONTEND_DIR / "App.vue").read_text(encoding="utf-8")
+    # App.vue = composition root; handler policy ada di ./composables/*.
+    app_vue = (FRONTEND_DIR / "App.vue").read_text(encoding="utf-8") + "\n" + "\n".join(
+        p.read_text(encoding="utf-8") for p in sorted((FRONTEND_DIR / "composables").glob("*.js"))
+    )
     assert "ProjectPolicyPanel" in app_vue, "App.vue harus memuat ProjectPolicyPanel"
     assert "openProjectPolicy" in app_vue, "App.vue harus membuka Project Settings/Policy"
     assert "GlobalSettingsPanel" not in app_vue, (

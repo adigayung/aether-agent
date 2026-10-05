@@ -116,7 +116,10 @@ def _wait_for_terminal(service, task_id: str, timeout: float = 5.0) -> dict:
 def _check_frontend_sources() -> None:
     """[3][4] Frontend New Task memakai Provider Instance + Model dari DB."""
     composer = (FRONTEND_SRC / "components" / "TaskComposer.vue").read_text(encoding="utf-8")
-    app = (FRONTEND_SRC / "App.vue").read_text(encoding="utf-8")
+    # App.vue = composition root; submitTask/provider state ada di ./composables/*.
+    app = (FRONTEND_SRC / "App.vue").read_text(encoding="utf-8") + "\n" + "\n".join(
+        p.read_text(encoding="utf-8") for p in sorted((FRONTEND_SRC / "composables").glob("*.js"))
+    )
     api = (FRONTEND_SRC / "api.js").read_text(encoding="utf-8")
 
     # api.js memanggil endpoint provider instance (bukan hanya /config).

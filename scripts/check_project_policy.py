@@ -344,7 +344,10 @@ def _run() -> int:
     for bad in ("AgentRuntime", "AgentLoop", "orchestrator", "Replanner"):
         assert bad not in panel, f"ProjectPolicyPanel tidak boleh memuat '{bad}'"
 
-    app_vue = (frontend_dir / "App.vue").read_text(encoding="utf-8")
+    # App.vue = composition root; handler policy ada di ./composables/*.
+    app_vue = (frontend_dir / "App.vue").read_text(encoding="utf-8") + "\n" + "\n".join(
+        p.read_text(encoding="utf-8") for p in sorted((frontend_dir / "composables").glob("*.js"))
+    )
     assert "ProjectPolicyPanel" in app_vue, "App.vue harus memuat ProjectPolicyPanel"
     assert "openProjectPolicy" in app_vue, "App.vue harus membuka Project Settings/Policy"
     print("[12] boundary frontend OK -> Sidebar->Projects->Policy via gateway")

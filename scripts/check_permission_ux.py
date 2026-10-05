@@ -289,7 +289,10 @@ def _run() -> int:
     assert "modal-backdrop" in panel, "policy harus berupa MODAL, bukan panel inline"
     for bad in ("AgentRuntime", "AgentLoop", "orchestrator", "Replanner"):
         assert bad not in panel, f"ProjectPolicyPanel tidak boleh memuat '{bad}'"
-    app_vue = (FRONTEND_DIR / "App.vue").read_text(encoding="utf-8")
+    # App.vue = composition root; handler policy/approval ada di ./composables/*.
+    app_vue = (FRONTEND_DIR / "App.vue").read_text(encoding="utf-8") + "\n" + "\n".join(
+        p.read_text(encoding="utf-8") for p in sorted((FRONTEND_DIR / "composables").glob("*.js"))
+    )
     assert "ProjectPolicyPanel" in app_vue and "openProjectPolicy" in app_vue
     assert "decideApproval" in app_vue and "approvals" in app_vue, (
         "App.vue harus menangani approval (Allow/Deny)"
