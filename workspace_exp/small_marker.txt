@@ -1,5 +1,0 @@
-This is a small file for the reread experiment.
-Unique marker: SMALL_MARKER_A5F3X9
-Line 3.
-Line 4.
-Line 5 - end of small file.

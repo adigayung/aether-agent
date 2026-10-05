@@ -14,4 +14,12 @@ requests>=2.28
 # Vision / preprocessing gambar (src/agent_ai/vision)
 Pillow>=9.0
 
+# Playwright browser automation (Extension/playwright)
 playwright==1.63.0
+
+# Fallback importlib.metadata (src/agent_ai/extensions/discovery.py).
+# Hanya dipakai pada Python < 3.8; pada Python >= 3.10 memakai stdlib.
+importlib-metadata>=8.2.0
+
+# Development / testing dependencies (tests/)
+pytest>=7.0
