@@ -13,6 +13,39 @@ export function isAetherMetadata(path) {
   );
 }
 
+// Parser event perubahan CANONICAL (satu format, dipakai producer & consumer).
+// Backend memakai SATU `payload` baik untuk SSE live maupun Task Log; Activity
+// API mengembalikan record log dengan kunci `event`/`data`. Kedua bentuk harus
+// dinormalisasi di SATU tempat agar tidak ada bentuk yang diterima diam-diam,
+// dan agar path yang tidak valid TIDAK pernah masuk ke bucket Changes.
+//
+// Mengembalikan `{ task_id, change }` atau `null` bila event bukan
+// `change_detected` yang valid (path wajib ada & non-kosong).
+export function parseChangeEvent(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const type = raw.event_type || raw.event;
+  if (type !== "change_detected") return null;
+  const p = raw.payload || raw.data;
+  if (!p || typeof p !== "object") return null;
+  const path = typeof p.path === "string" ? p.path.trim() : "";
+  // Path WAJIB valid: entry dengan path kosong/undefined membuat baris tak
+  // terlihat dan tidak pernah dihitung -> jangan pernah di-upsert.
+  if (!path) return null;
+  const oldPath = typeof p.old_path === "string" ? p.old_path.trim() : "";
+  return {
+    task_id: raw.task_id || "",
+    change: {
+      kind: p.kind || "change",
+      path,
+      old_path: oldPath || undefined,
+      detail: p.detail,
+      additions: p.additions,
+      deletions: p.deletions,
+      diff: p.diff,
+    },
+  };
+}
+
 // Changes PER-TASK (key = task_id). Task baru tidak menimpa changes milik task
 // lain. Modul ini HANYA mengelola bucket per-task + upsert + agregasi; sumber
 // datanya tetap event SSE (#51) live atau Activity API (persistent log).
@@ -44,6 +77,7 @@ export function useChanges({ task, isViewingRunningTask, getActiveTaskIds }) {
   // berkali-kali memperbarui barisnya (bukan menumpuk duplikat). Move/rename
   // memindahkan baris lama ke path baru. Bucket task_id dibuat otomatis.
   function upsertChange(entry, taskId) {
+    if (!entry || !entry.path) return; // path invalid -> tidak ada baris "hantu"
     const bucketId = taskId || task.id || "";
     const list = changesByTask.value[bucketId] || (changesByTask.value[bucketId] = []);
     const idx = list.findIndex((c) => c.path === entry.path);
@@ -65,29 +99,15 @@ export function useChanges({ task, isViewingRunningTask, getActiveTaskIds }) {
   // Rekonstruksi changes per task dari event history (persistent log).
   // Sumber persisten = Activity API (.aether/log/<task_id>.log) yang menulis
   // record dengan kunci `event`/`data`; SSE live memakai `event_type`/`payload`.
-  // Kedua bentuk harus dibaca agar daftar Changes tetap utuh saat task selesai
-  // atau dibuka kembali (lihat juga lifecycle.js/useTaskTelemetry.js).
+  // Keduanya dinormalisasi oleh parseChangeEvent() sehingga satu format
+  // canonical dipakai konsisten.
   function loadChangesFromEvents(events, taskId) {
     changesByTask.value[taskId] = [];
     for (const raw of events || []) {
-      const type = raw && (raw.event_type || raw.event);
-      if (type === "change_detected") {
-        const p = (raw && (raw.payload || raw.data)) || {};
-        if (!isAetherMetadata(p.path)) {
-          upsertChange(
-            {
-              kind: p.kind || "change",
-              path: p.path,
-              old_path: p.old_path,
-              detail: p.detail,
-              additions: p.additions,
-              deletions: p.deletions,
-              diff: p.diff,
-            },
-            taskId
-          );
-        }
-      }
+      const parsed = parseChangeEvent(raw);
+      if (!parsed) continue;
+      if (isAetherMetadata(parsed.change.path)) continue;
+      upsertChange(parsed.change, taskId);
     }
   }
 
@@ -97,6 +117,11 @@ export function useChanges({ task, isViewingRunningTask, getActiveTaskIds }) {
     changesByTask.value = {};
   }
 
+  // Kontrak DI (dipakai useAgentActivity): SEMUA helper yang di-destructure
+  // konsumen HARUS ada di objek ini. Sebelumnya `isAetherMetadata` hanya
+  // di-export sebagai named export, sehingga `const { isAetherMetadata } =
+  // changes` bernilai undefined dan `case "change_detected"` melempar
+  // TypeError -> event perubahan dibuang, panel Changes tetap 0 files.
   return {
     changesByTask,
     changes,
@@ -104,5 +129,7 @@ export function useChanges({ task, isViewingRunningTask, getActiveTaskIds }) {
     upsertChange,
     loadChangesFromEvents,
     resetAllChanges,
+    isAetherMetadata,
+    parseChangeEvent,
   };
 }

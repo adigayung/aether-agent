@@ -41,7 +41,21 @@ export function useAgentActivity({
   getCopyMeta,
 }) {
   const { taskStartedAt, taskEndedAt } = timing;
-  const { upsertChange, isAetherMetadata } = changes;
+  // Kontrak DI dengan useChanges(): SEMUA helper di bawah WAJIB ada di objek
+  // `changes`. Pelanggaran kontrak ini pernah membuat `case "change_detected"`
+  // melempar TypeError (`isAetherMetadata is not a function`) sehingga event
+  // perubahan dibuang dan panel Changes tetap 0 files. Kontrak dikunci oleh
+  // regression test (changesPanelFlow.test.mjs).
+  const { upsertChange, isAetherMetadata, parseChangeEvent } = changes;
+  let changeHelpersWarned = false;
+  function markChangeHelpersBroken() {
+    if (changeHelpersWarned) return;
+    changeHelpersWarned = true;
+    // Best-effort, tanpa data sensitif (hanya nama modul) & tanpa menghentikan
+    // handler: event lain tetap diproses.
+    // eslint-disable-next-line no-console
+    console.error("[aether] useChanges() tidak menyediakan helper perubahan lengkap.");
+  }
   const {
     runningTaskId,
     releaseRunningTask,
@@ -305,30 +319,43 @@ export function useAgentActivity({
       case "recovery_completed":
         runtime.activity = "Recovery completed";
         break;
-      case "change_detected":
+      case "change_detected": {
+        // Normalisasi bentuk event lewat SATU parser canonical (SSE live
+        // memakai `payload`, Task Log/Activity API memakai `data`). Path yang
+        // kosong/tidak valid -> parseChangeEvent mengembalikan null sehingga
+        // TIDAK pernah ada baris "hantu" di Changes.
+        if (
+          typeof parseChangeEvent !== "function" ||
+          typeof upsertChange !== "function" ||
+          typeof isAetherMetadata !== "function"
+        ) {
+          // Kontrak DI rusak: jangan diam-diam membuang perubahan, tapi juga
+          // jangan crash-loop. Diberi sinyal sekali (tanpa data sensitif).
+          markChangeHelpersBroken();
+          break;
+        }
+        const parsed = parseChangeEvent(evt);
         // Sembunyikan `.aether/**` di daftar Changes (metadata internal AETHER).
-        if (!isAetherMetadata(p.path)) {
-          // Upsert (bukan push buta): satu file = satu baris, file yang diedit
-          // berkali-kali memperbarui barisnya. Changes panel ikut update live.
-          upsertChange({
-            kind: p.kind || "change",
-            path: p.path,
-            old_path: p.old_path,
-            detail: p.detail,
-            additions: p.additions,
-            deletions: p.deletions,
-            diff: p.diff,
-          }, evt.task_id || task.id);
+        if (parsed && !isAetherMetadata(parsed.change.path)) {
+          // Bucket = task_id pada EVENT (isolasi antar-task). Fallback ke task
+          // yang sedang dilihat HANYA bila event tidak membawa task_id.
+          const bucketId = parsed.task_id || task.id || "";
+          if (bucketId) {
+            // Upsert (bukan push buta): satu file = satu baris, file yang diedit
+            // berkali-kali memperbarui barisnya. Changes panel ikut update live.
+            upsertChange(parsed.change, bucketId);
+          }
           // Update File Explorer secara INCREMENTAL (refresh direktori terdampak
           // saja; expanded/selected dipertahankan), TANPA menunggu task selesai.
           liveFsChange.value = {
             seq: ++liveFsChangeSeq,
-            path: p.path,
-            kind: p.kind || "change",
-            old_path: p.old_path || "",
+            path: parsed.change.path,
+            kind: parsed.change.kind,
+            old_path: parsed.change.old_path || "",
           };
         }
         break;
+      }
       case "task_completed":
         task.status = "completed";
         // Task selesai -> reasoning status harus benar-benar berhenti.
