@@ -421,8 +421,39 @@ class TaskExecutor:
         # file yang sama (satu operasi sukses = satu logical change event).
         live_changed: set = set()
 
+        # Task Log project-local untuk PERSISTENSI event `change_detected`.
+        # Event perubahan tidak cukup hanya di-emit ke SessionStore in-memory
+        # (untuk SSE live) — bila tidak ikut ditulis ke `.aether/log/<task_id>.log`
+        # (sumber Activity API), daftar Changes akan HILANG begitu task selesai /
+        # dibuka kembali (Activity API hanya membaca Task Log, bukan SessionStore).
+        # Best-effort: kegagalan logging TIDAK boleh menggagalkan task.
+        change_log = None
+        if workspace_root:
+            try:
+                from agent_ai.projects.aether_store import TaskLog
+
+                change_log = TaskLog(workspace_root, task_id=task_id)
+            except Exception:  # noqa: BLE001 - logging tidak boleh crash task
+                change_log = None
+
+        def _persist_change(payload: Dict[str, Any]) -> None:
+            """Tulis satu event perubahan ke Task Log project-local (best-effort)."""
+            log = change_log
+            if log is None:
+                return
+            try:
+                log.append(EventType.CHANGE_DETECTED.value, dict(payload))
+            except Exception:  # noqa: BLE001 - logging tidak boleh crash task
+                return
+
         def _change_sink(payload: Dict[str, Any]) -> None:
-            """Emit change_detected SEGERA (sink dari tool filesystem)."""
+            """Catat & emit change_detected SEGERA (sink dari tool filesystem).
+
+            Urutan PERSIST -> EMIT penting: Task Log ditulis lebih dulu sehingga
+            saat event SSE tiba di UI, sumber rekonstruksi (Activity API) sudah
+            memuat perubahan yang sama. Ini mencegah daftar Changes sesaat
+            "mundur" saat task sedang berjalan dibuka ulang.
+            """
             try:
                 rel = _normalize_change_path(payload.get("path"))
                 if rel:
@@ -432,6 +463,7 @@ class TaskExecutor:
                     # Move: tandai source juga agar tracker akhir tidak
                     # mengemit 'deleted' untuk file yang hanya dipindah.
                     live_changed.add(old)
+                _persist_change(payload)
                 self._emit(
                     session_id,
                     EventType.CHANGE_DETECTED,
@@ -511,16 +543,19 @@ class TaskExecutor:
                     rel = _normalize_change_path(rec.path)
                     if rel in live_changed:
                         continue
+                    payload = {
+                        "path": rel,
+                        "kind": rec.change_type.value,
+                        "before_size": rec.before_size,
+                        "after_size": rec.after_size,
+                    }
+                    # Persist lebih dulu (sumber Activity API) lalu emit live.
+                    _persist_change(payload)
                     self._emit(
                         session_id,
                         EventType.CHANGE_DETECTED,
                         task_id=task_id,
-                        payload={
-                            "path": rel,
-                            "kind": rec.change_type.value,
-                            "before_size": rec.before_size,
-                            "after_size": rec.after_size,
-                        },
+                        payload=payload,
                     )
             except Exception:  # noqa: BLE001 - deteksi tidak boleh crash task
                 pass

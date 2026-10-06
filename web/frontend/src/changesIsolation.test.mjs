@@ -98,6 +98,35 @@ import { groupTaskHistory, statusTagClass, taskTimeGroup } from "./taskHistory.j
   console.log("PASS: loadChangesFromEvents merekonstruksi + memfilter .aether/**");
 }
 
+// ---- 3b) loadChangesFromEvents: bentuk PERSISTENT LOG (`event`/`data`) ------
+// Activity API (.aether/log/<task_id>.log) menulis record dengan kunci
+// `event`/`data`, BUKAN `event_type`/`payload` (bentuk SSE live). Kedua bentuk
+// harus direkonstruksi agar daftar Changes tetap tersedia setelah task selesai
+// / dibuka kembali (regression: file diedit tidak muncul di Changes).
+{
+  const task = reactive({ id: "" });
+  const changes = useChanges({
+    task,
+    isViewingRunningTask: () => false,
+    getActiveTaskIds: () => [],
+  });
+
+  changes.loadChangesFromEvents(
+    [
+      { event: "task_requested", data: { prompt: "ubah app.py" } },
+      { event: "tool_completed", data: { tool: "edit_file", success: true } },
+      { event: "change_detected", data: { path: "app.py", kind: "modified", additions: 2, deletions: 1 } },
+      { event: "change_detected", data: { path: ".aether/log/task.log", kind: "added" } },
+      { event: "task_completed", data: { result: "selesai" } },
+    ],
+    "task-P"
+  );
+  assert.equal(changes.changesByTask.value["task-P"].length, 1, "bentuk log `event`/`data` harus dikenali");
+  assert.equal(changes.changesByTask.value["task-P"][0].path, "app.py");
+  assert.equal(changes.changesByTask.value["task-P"][0].additions, 2);
+  console.log("PASS: loadChangesFromEvents membaca bentuk persistent log (event/data)");
+}
+
 // ---- 4) executionMode: normalisasi + label ---------------------------------
 {
   assert.equal(normalizeExecutionMode("parallel"), "parallel");

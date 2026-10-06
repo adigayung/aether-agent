@@ -63,11 +63,16 @@ export function useChanges({ task, isViewingRunningTask, getActiveTaskIds }) {
   }
 
   // Rekonstruksi changes per task dari event history (persistent log).
+  // Sumber persisten = Activity API (.aether/log/<task_id>.log) yang menulis
+  // record dengan kunci `event`/`data`; SSE live memakai `event_type`/`payload`.
+  // Kedua bentuk harus dibaca agar daftar Changes tetap utuh saat task selesai
+  // atau dibuka kembali (lihat juga lifecycle.js/useTaskTelemetry.js).
   function loadChangesFromEvents(events, taskId) {
     changesByTask.value[taskId] = [];
     for (const raw of events || []) {
-      if (raw.event_type === "change_detected") {
-        const p = raw.payload || {};
+      const type = raw && (raw.event_type || raw.event);
+      if (type === "change_detected") {
+        const p = (raw && (raw.payload || raw.data)) || {};
         if (!isAetherMetadata(p.path)) {
           upsertChange(
             {
