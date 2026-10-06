@@ -66,6 +66,13 @@ from agent_ai.runtime.working_state import (
     PlanEntryStatus,
 )
 
+_FILE_OPERATION_TYPES = {
+    "edit_file": "edit",
+    "write_file": "write",
+    "delete_file": "delete",
+    "move_file": "move",
+}
+
 if TYPE_CHECKING:  # pragma: no cover - hanya untuk type hint, hindari import cycle
     from agent_ai.changes.tracker import ChangeTracker
     from agent_ai.fallback.manager import FallbackManager
@@ -1066,6 +1073,30 @@ class AgentRuntime:
             observation = step.get("observation") if isinstance(step, dict) else None
             if isinstance(observation, dict) and observation.get("success") and observation.get("content"):
                 observations.append(f"Tool result: {observation['content']}")
+        # Catat metadata perubahan file yang berhasil (compact, bounded).
+        # Hanya mencatat tool_name + path, bukan old_text/new_text/content.
+        for step in (result.steps or [])[:20]:
+            observation = step.get("observation") if isinstance(step, dict) else None
+            if not isinstance(observation, dict) or not observation.get("success"):
+                continue
+            action = step.get("action") if isinstance(step, dict) else None
+            if not isinstance(action, dict):
+                continue
+            tool_name = action.get("name")
+            if not tool_name:
+                continue
+            args = action.get("arguments") if isinstance(action.get("arguments"), dict) else {}
+            operation = _FILE_OPERATION_TYPES.get(tool_name)
+            if not operation:
+                continue
+            if tool_name == "move_file":
+                source = args.get("source")
+                destination = args.get("destination")
+                path = f"{source} -> {destination}" if source and destination else None
+            else:
+                path = args.get("path")
+            if path:
+                observations.append(f"File change: operation={operation} tool={tool_name} path={path} status=success")
         return observations
 
     def _emit_event(self, event_type: str, payload: Dict[str, Any]) -> None:
