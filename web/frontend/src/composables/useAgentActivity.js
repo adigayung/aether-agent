@@ -209,7 +209,10 @@ export function useAgentActivity({
           adoptRunningTask(evtTaskId, dText, dMode);
         }
         // lanjut: proses event task_started untuk task yang baru diadopsi.
-      } else {
+      } else if (evt.event_type !== "change_detected") {
+        // Change events are task-scoped data even when their task is not viewed;
+        // let them reach the handler below so useChanges can update that task's
+        // bucket and the filesystem explorer can react incrementally.
         return;
       }
     }
