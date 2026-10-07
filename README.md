@@ -1,5 +1,3 @@
-# UNIQUE_MARKER_LARGE_22222
-# UNIQUE_MARKER_LARGE_22222
 # AETHER
 
 ### Autonomous AI Coding Agent
