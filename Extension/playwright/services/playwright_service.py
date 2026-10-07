@@ -45,6 +45,14 @@ Design rules:
 * **Temporary references.** Refs are scoped to one page + one snapshot and are
   invalidated by navigation; stale refs raise a clear error so the caller can
   take a fresh snapshot.
+* **Thread-affine runtime (one runtime per worker thread).** Playwright's
+  synchronous API is a *greenlet fibre* created by ``sync_playwright().start()``
+  and it may only be driven — even ``stop()`` — from the very thread that
+  created it. A runtime therefore belongs to the thread that started it
+  ("generation"): the service reuses it only for that same thread, releases it
+  (driver process included) when its thread is gone, and starts a brand new
+  runtime on the calling thread. That lets several sequential AETHER tasks —
+  each running on its own worker thread — share one service instance.
 """
 
 from __future__ import annotations
@@ -54,6 +62,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import threading
 import time
 import uuid
@@ -488,6 +497,55 @@ class PageHandle:
     page: Any
 
 
+# ---------------------------------------------------------------------------
+# Runtime helpers — releasing a synchronous Playwright runtime that can no
+# longer be driven through the API (its owning worker thread has ended).
+# ---------------------------------------------------------------------------
+def _runtime_driver_process(runtime: Any) -> Optional[Any]:
+    """Return the Playwright *driver* subprocess behind a sync runtime.
+
+    ``sync_playwright().start()`` returns the ``Playwright`` facade, whose
+    pipeline is ``._impl_obj -> ._connection -> ._transport -> ._proc``. The
+    lookup is deliberately defensive: a runtime injected through
+    ``runtime_factory`` (test double) has no driver and simply yields ``None``.
+    """
+    if runtime is None:
+        return None
+    impl = getattr(runtime, "_impl_obj", None) or runtime
+    connection = getattr(impl, "_connection", None)
+    transport = getattr(connection, "_transport", None)
+    return getattr(transport, "_proc", None)
+
+
+def _terminate_runtime_driver(runtime: Any) -> bool:
+    """Best-effort release of an abandoned runtime's driver process.
+
+    Used only when the runtime's owning thread is gone, where ``stop()`` is
+    impossible (greenlets cannot be switched across threads) and would leak the
+    driver/browser processes for the rest of the AETHER process lifetime.
+    """
+    process = _runtime_driver_process(runtime)
+    if process is None:
+        return False
+    for action in ("kill", "terminate"):
+        callback = getattr(process, action, None)
+        if not callable(callback):
+            continue
+        try:
+            callback()
+            return True
+        except Exception:
+            continue
+    pid = getattr(process, "pid", None)
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), signal.SIGTERM)
+        return True
+    except Exception:
+        return False
+
+
 class _PlaywrightServiceCore:
     """Owns the Playwright browser / session / page lifecycle (Task 02).
 
@@ -563,8 +621,15 @@ class _PlaywrightServiceCore:
                 self._browser_state_store = None
 
         # Runtime is created lazily; nothing Playwright-related happens here.
+        # ``(runtime, owner thread)`` is one *generation*: Playwright's sync API
+        # is a greenlet fibre bound to the thread that started it, so a runtime
+        # may only be reused by that very thread (see ``_ensure_runtime``).
         self._runtime: Optional[Any] = None
         self._runtime_thread: Optional[int] = None
+        self._runtime_owner: Optional[threading.Thread] = None
+        self._runtime_generation: int = 0
+        #: Bounded history of runtime releases (observability for diagnostics).
+        self._runtime_releases: List[Dict[str, Any]] = []
         self._runtime_factory = runtime_factory
         # Optional injection point for ``playwright.sync_api.expect`` (used by
         # the condition-based wait, and by the test doubles).
@@ -651,32 +716,151 @@ class _PlaywrightServiceCore:
     # -----------------------------------------------------------------
     # Runtime
     # -----------------------------------------------------------------
-    def _ensure_runtime(self) -> Any:
-        """Return the Playwright runtime, starting it on first use.
+    def _runtime_owner_is_current_thread(self) -> bool:
+        """True when the live runtime may be driven by the calling thread."""
+        return (
+            self._runtime is not None
+            and self._runtime_owner is threading.current_thread()
+        )
 
-        This is the *only* place where the Playwright engine is imported and
-        started. It is intentionally lazy so that importing the Extension has
-        no side effects.
+    def _thread_conflict_message(self, action: str) -> str:
+        """Explain a cross-thread use of the thread-bound Playwright runtime."""
+        owner = self._runtime_owner
+        owner_name = owner.name if owner is not None else "<unknown>"
+        current = threading.current_thread()
+        return (
+            "Playwright runtime is bound to thread "
+            f"{self._runtime_thread} ({owner_name}) but used from thread "
+            f"{threading.get_ident()} ({current.name}) while handling "
+            f"'{action}'. The synchronous Playwright API must be used from a "
+            "single thread: keep every Playwright call of one task on the same "
+            "worker thread, or close the browser so the runtime is released."
+        )
+
+    def _ensure_runtime_thread(self, action: str) -> None:
+        """Make sure the *current* thread may drive the live runtime.
+
+        A runtime whose owning worker thread has ended can neither be used nor
+        stopped through the synchronous API (its greenlet fibre died with the
+        thread), so it is released together with everything it created. The
+        caller then sees an empty service and can start a fresh runtime on its
+        own thread. While the owning thread is still alive the call is refused
+        with a clear error, because the runtime is genuinely in use elsewhere.
         """
         with self._lock:
-            thread_id = threading.get_ident()
-            if self._runtime is None:
-                if self._runtime_factory is not None:
-                    runtime = self._runtime_factory()
-                else:
-                    # Local import: never executed unless a browser is used.
-                    from playwright.sync_api import sync_playwright
+            if self._runtime is None or self._runtime_owner is threading.current_thread():
+                return
+            owner = self._runtime_owner
+            if owner is not None and owner.is_alive():
+                raise PlaywrightServiceError(self._thread_conflict_message(action))
+            self._detach_runtime(reason=f"abandoned_runtime_thread:{action}")
 
-                    runtime = sync_playwright().start()
-                self._runtime = runtime
-                self._runtime_thread = thread_id
-            elif self._runtime_thread != thread_id:
-                raise PlaywrightServiceError(
-                    "Playwright runtime is bound to thread "
-                    f"{self._runtime_thread} but used from thread {thread_id}. "
-                    "The synchronous Playwright API must be used from a single thread."
+    def _ensure_runtime(self) -> Any:
+        """Return a Playwright runtime **usable by the calling thread**.
+
+        The runtime is created lazily on first use and is strictly bound to the
+        AETHER worker thread that created it. When the next task runs on a new
+        worker thread, the leftover runtime of the finished one is released
+        (driver process included) and a fresh runtime is started here — so one
+        service instance survives many sequential tasks without leaking the
+        previous Playwright driver.
+        """
+        with self._lock:
+            if self._runtime_owner_is_current_thread():
+                return self._runtime
+            if self._runtime is not None:
+                owner = self._runtime_owner
+                if owner is not None and owner.is_alive():
+                    raise PlaywrightServiceError(self._thread_conflict_message("runtime"))
+                # The previous task's worker thread is gone: its runtime cannot
+                # be reused (nor stopped) from here — release it and start a new
+                # one on this thread.
+                self._detach_runtime(reason="previous_task_thread_ended")
+            return self._start_runtime()
+
+    def _start_runtime(self) -> Any:
+        """Start a fresh runtime on the calling thread and record its owner."""
+        if self._runtime_factory is not None:
+            runtime = self._runtime_factory()
+        else:
+            # Local import: never executed unless a browser is used.
+            from playwright.sync_api import sync_playwright
+
+            runtime = sync_playwright().start()
+        self._runtime = runtime
+        self._runtime_thread = threading.get_ident()
+        self._runtime_owner = threading.current_thread()
+        self._runtime_generation += 1
+        return runtime
+
+    def _detach_runtime(self, *, reason: str) -> Dict[str, Any]:
+        """Drop the current runtime generation and release what it owns.
+
+        Everything created by that runtime (browsers, sessions, pages and the
+        derived caches) is forgotten, so no stale Playwright object is ever
+        reused. The runtime itself is stopped from its owning thread; when that
+        thread is gone the driver subprocess is terminated instead, because the
+        synchronous API cannot be driven from a foreign thread.
+        """
+        with self._lock:
+            runtime = self._runtime
+            owner = self._runtime_owner
+            generation = self._runtime_generation
+            self._runtime = None
+            self._runtime_thread = None
+            self._runtime_owner = None
+            self._reset_runtime_resources()
+            outcome: Dict[str, Any] = {"reason": reason, "released": False, "mode": "none"}
+            if runtime is None:
+                return outcome
+            if owner is None or owner is threading.current_thread():
+                try:
+                    runtime.stop()
+                except Exception:  # noqa: BLE001 - release is best effort
+                    outcome["mode"] = "stop_failed"
+                else:
+                    outcome["released"] = True
+                    outcome["mode"] = "stopped"
+            else:
+                outcome["released"] = _terminate_runtime_driver(runtime)
+                outcome["mode"] = (
+                    "driver_terminated" if outcome["released"] else "release_failed"
                 )
-            return self._runtime
+            self._record_runtime_release(outcome, generation, owner)
+            return outcome
+
+    def _record_runtime_release(
+        self, outcome: Dict[str, Any], generation: int, owner: Optional[threading.Thread]
+    ) -> None:
+        """Keep a short, bounded history of runtime releases (observability)."""
+        record = {
+            "generation": generation,
+            "reason": outcome["reason"],
+            "released": outcome["released"],
+            "mode": outcome["mode"],
+            "owner_thread": owner.name if owner is not None else None,
+            "owner_thread_id": getattr(owner, "ident", None),
+        }
+        self._runtime_releases.append(record)
+        del self._runtime_releases[:-20]
+
+    def _reset_runtime_resources(self) -> None:
+        """Forget every browser/session/page and all derived caches."""
+        self._browsers.clear()
+        self._contexts.clear()
+        self._pages.clear()
+        self._browser = None
+        self._default_browser_id = None
+        self._default_session_id = None
+        self._refs.clear()
+        self._dialog_policies.clear()
+        self._dialog_handlers.clear()
+        self._dialogs.clear()
+        self._console.clear()
+        self._network.clear()
+        self._network_pending.clear()
+        self._debug_listeners.clear()
+        self._traces.clear()
 
     def start_runtime(self) -> Any:
         """Explicitly start the runtime (still lazy-friendly)."""
@@ -733,13 +917,26 @@ class _PlaywrightServiceCore:
             return browser_id
 
     def close_browser(self, browser_id: Optional[str] = None) -> Dict[str, Any]:
-        """Close one browser (all of them when ``browser_id`` is omitted)."""
+        """Close one browser (all of them when ``browser_id`` is omitted).
+
+        Closing the **last** browser also releases the Playwright runtime
+        (driver process included), so a finished task leaves no Playwright
+        state behind; the next Playwright call starts a fresh runtime on its
+        own thread.
+        """
         with self._lock:
+            self._ensure_runtime_thread("browser_close")
             if browser_id is None:
                 ids = list(self._browsers)
                 results = [self._close_browser(bid) for bid in ids]
-                return {"closed_browsers": ids, "results": results}
-            return self._close_browser(browser_id)
+                payload: Dict[str, Any] = {"closed_browsers": ids, "results": results}
+            else:
+                payload = self._close_browser(browser_id)
+            if not self._browsers:
+                release = self._detach_runtime(reason="no_browsers_left")
+                payload["runtime_released"] = release["released"]
+                payload["runtime_release_mode"] = release["mode"]
+            return payload
 
     def _close_browser(self, browser_id: str) -> Dict[str, Any]:
         handle = self._browsers.pop(browser_id, None)
@@ -770,6 +967,7 @@ class _PlaywrightServiceCore:
     def list_browsers(self) -> List[Dict[str, Any]]:
         """Return metadata for every launched browser."""
         with self._lock:
+            self._ensure_runtime_thread("browser_list")
             result = []
             for bid, handle in self._browsers.items():
                 info = handle.to_dict()
@@ -781,6 +979,7 @@ class _PlaywrightServiceCore:
 
     def browser_info(self, browser_id: str) -> Dict[str, Any]:
         with self._lock:
+            self._ensure_runtime_thread("browser_info")
             handle = self._browsers.get(browser_id)
             if handle is None:
                 raise BrowserNotFoundError(f"Browser '{browser_id}' not found")
@@ -793,6 +992,7 @@ class _PlaywrightServiceCore:
     def browser_object(self, browser_id: Optional[str] = None) -> Any:
         """Return the raw Browser (internal use only — never for the LLM)."""
         with self._lock:
+            self._ensure_runtime_thread("browser_object")
             bid = self._resolve_browser_id(browser_id)
             return self._browsers[bid].browser
 
@@ -806,6 +1006,7 @@ class _PlaywrightServiceCore:
     ) -> str:
         """Create an isolated BrowserContext and return its ``session_id``."""
         with self._lock:
+            self._ensure_runtime_thread("session_create")
             bid = self._resolve_browser_id(browser_id)
             handle = self._browsers[bid]
             try:
@@ -832,6 +1033,7 @@ class _PlaywrightServiceCore:
     def close_session(self, session_id: str) -> Dict[str, Any]:
         """Close a session (BrowserContext) and all of its pages."""
         with self._lock:
+            self._ensure_runtime_thread("session_close")
             handle = self._contexts.pop(session_id, None)
             if handle is None:
                 raise SessionNotFoundError(f"Session '{session_id}' not found")
@@ -880,6 +1082,7 @@ class _PlaywrightServiceCore:
     def context_object(self, session_id: Optional[str] = None) -> Any:
         """Return the raw BrowserContext (internal use only)."""
         with self._lock:
+            self._ensure_runtime_thread("context_object")
             sid = self._resolve_session_id(session_id)
             return self._contexts[sid].context
 
@@ -896,6 +1099,7 @@ class _PlaywrightServiceCore:
     ) -> str:
         """Create a page/tab inside a session and return its ``page_id``."""
         with self._lock:
+            self._ensure_runtime_thread("page_new")
             sid = self._resolve_session_id(session_id)
             handle = self._contexts[sid]
             try:
@@ -925,6 +1129,7 @@ class _PlaywrightServiceCore:
     def close_page(self, page_id: str) -> Dict[str, Any]:
         """Close a single page and drop it from the registry."""
         with self._lock:
+            self._ensure_runtime_thread("page_close")
             handle = self._pages.pop(page_id, None)
             if handle is None:
                 raise PageNotFoundError(f"Page '{page_id}' not found")
@@ -945,8 +1150,9 @@ class _PlaywrightServiceCore:
         When ``session_id`` is omitted, pages of *all* sessions are returned.
         """
         with self._lock:
+            self._ensure_runtime_thread("page_list")
             result = []
-            for pid, handle in self._pages.items():
+            for pid, handle in list(self._pages.items()):
                 if session_id is not None and handle.session_id != session_id:
                     continue
                 result.append(self._page_state(pid))
@@ -1059,39 +1265,25 @@ class _PlaywrightServiceCore:
     # Whole-service lifecycle
     # -----------------------------------------------------------------
     def shutdown(self) -> Dict[str, Any]:
-        """Close everything and stop the Playwright runtime."""
+        """Close everything and release the Playwright runtime.
+
+        Safe to call from any thread, including a thread that does not own the
+        current runtime (e.g. an Extension disable coming from the UI while a
+        task thread created it): the runtime is stopped when possible, and its
+        driver process is terminated when the owning thread is already gone.
+        """
         with self._lock:
             for bid in list(self._browsers):
                 try:
                     self._close_browser(bid)
                 except Exception:
                     pass
-            self._browsers.clear()
-            self._contexts.clear()
-            self._pages.clear()
-            self._browser = None
-            self._default_browser_id = None
-            self._default_session_id = None
-            self._refs.clear()
-            self._dialog_policies.clear()
-            self._dialog_handlers.clear()
-            self._dialogs.clear()
-            self._console.clear()
-            self._network.clear()
-            self._network_pending.clear()
-            self._debug_listeners.clear()
-            self._traces.clear()
-            runtime = self._runtime
-            self._runtime = None
-            self._runtime_thread = None
-            stopped = False
-            if runtime is not None:
-                try:
-                    runtime.stop()
-                    stopped = True
-                except Exception:
-                    stopped = False
-            return {"stopped": stopped}
+            outcome = self._detach_runtime(reason="shutdown")
+            return {
+                "stopped": outcome["released"],
+                "runtime_released": outcome["released"],
+                "runtime_release_mode": outcome["mode"],
+            }
 
     # Friendly aliases for cleanup.
     def close(self) -> Dict[str, Any]:
@@ -1105,6 +1297,12 @@ class _PlaywrightServiceCore:
         with self._lock:
             return {
                 "runtime_started": self._runtime is not None,
+                "runtime_generation": self._runtime_generation,
+                "runtime_thread": self._runtime_thread,
+                "runtime_owner": (
+                    self._runtime_owner.name if self._runtime_owner is not None else None
+                ),
+                "runtime_releases": [dict(item) for item in self._runtime_releases],
                 "browser_count": len(self._browsers),
                 "session_count": len(self._contexts),
                 "page_count": len(self._pages),
@@ -1144,12 +1342,14 @@ class _PlaywrightServiceCore:
         return self.create_session()
 
     def _require_page(self, page_id: str) -> Any:
+        self._ensure_runtime_thread("page_use")
         handle = self._pages.get(page_id)
         if handle is None:
             raise PageNotFoundError(f"Page '{page_id}' not found")
         return handle.page
 
     def _page_state(self, page_id: str, response: Optional[Any] = None) -> Dict[str, Any]:
+        self._ensure_runtime_thread("page_state")
         handle = self._pages.get(page_id)
         if handle is None:
             raise PageNotFoundError(f"Page '{page_id}' not found")
@@ -2769,6 +2969,7 @@ class _DebugMixin:
     ) -> Dict[str, Any]:
         """Start Playwright tracing on a session (BrowserContext)."""
         with self._lock:
+            self._ensure_runtime_thread("trace_start")
             sid = self._resolve_session_id(session_id)
             if self._traces.get(sid, {}).get("active"):
                 raise TraceAlreadyActiveError(
@@ -2826,6 +3027,7 @@ class _DebugMixin:
     ) -> Dict[str, Any]:
         """Stop tracing and save the trace as a re-openable artifact (zip)."""
         with self._lock:
+            self._ensure_runtime_thread("trace_stop")
             sid = self._resolve_session_id(session_id)
             state = self._traces.get(sid)
             if not state or not state.get("active"):
@@ -3358,6 +3560,7 @@ class _PersistenceMixin:
     def save_state(self, session_id: Optional[str] = None, *, name: Optional[str] = None, project: Optional[str] = None) -> Dict[str, Any]:
         """Save a session's browser storage state (cookies + localStorage)."""
         with self._lock:
+            self._ensure_runtime_thread("state_save")
             sid = self._resolve_session_id(session_id)
             context = self._contexts[sid].context
             state = self._read_storage_state(context)
@@ -3407,6 +3610,7 @@ class _PersistenceMixin:
         ``add_cookies`` and localStorage via an init script.
         """
         with self._lock:
+            self._ensure_runtime_thread("state_restore")
             state = self.load_state(name, project=project)
             cookies = list(state.get("cookies") or [])
             origins = list(state.get("origins") or [])

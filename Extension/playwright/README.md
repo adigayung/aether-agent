@@ -97,6 +97,11 @@ Built on the official Playwright Python API (`BrowserType.launch()`,
 
 - **Lazy runtime** – `sync_playwright()` starts only when a browser is actually
   launched; the runtime is bound to one thread (the sync API is not thread-safe).
+  A runtime is strictly reused by the thread that created it; when the next
+  AETHER task runs on a new worker thread, the previous runtime is released
+  (driver process included) and a fresh one is started on the calling thread.
+  Closing the last browser releases the runtime too, so sequential tasks never
+  leak Playwright state (`service.status()["runtime_releases"]` reports it).
 - **Browsers** – `launch_browser()` / `close_browser()` / `list_browsers()`.
 - **Sessions** (`BrowserContext`) – `create_session()` / `close_session()` /
   `list_sessions()`.
