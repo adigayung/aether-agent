@@ -597,3 +597,49 @@ class LLMConfigService:
         Bentuk siap konsumsi modul lain / UI (tanpa nilai secret).
         """
         return [self.get_provider_config(inst.id) for inst in self.store.list_provider_instances()]
+
+    def ensure_default_providers(self) -> None:
+        """Pastikan provider bawaan (seperti OpenCode Zen) terintegrasi otomatis di workbench.
+
+        Menghindari daftar provider workbench hanya mengandalkan hardcode statis di SQLite:
+        - Mendaftarkan atau menyinkronkan OpenCode Zen sebagai provider instance aktif
+          dengan status enabled agar langsung muncul pada dropdown TaskComposer dan ConsultantChat.
+        - Model diisi secara dinamis / manual oleh user (tidak di-hardcode).
+        - Idempotent: aman dipanggil berulang tanpa membuat duplikasi instance.
+        """
+        existing_instances = self.store.list_provider_instances()
+        opencode_inst = next(
+            (inst for inst in existing_instances if inst.provider_type == "opencode"),
+            None,
+        )
+
+        if opencode_inst is None:
+            name = "OpenCode Zen"
+            if self.store.find_provider_instance_by_name(name) is not None:
+                name = "OpenCode Zen Official"
+            try:
+                self.store.create_provider_instance(
+                    name=name,
+                    provider_type="opencode",
+                    api_url="https://opencode.ai/zen/v1",
+                    api_key_env="OPENCODE_API_KEY",
+                    enabled=True,
+                )
+            except Exception:
+                pass
+        else:
+            if not opencode_inst.enabled or opencode_inst.name == "Opencode":
+                try:
+                    new_name = (
+                        "OpenCode Zen"
+                        if opencode_inst.name == "Opencode"
+                        and self.store.find_provider_instance_by_name("OpenCode Zen") is None
+                        else opencode_inst.name
+                    )
+                    self.update_provider_instance(
+                        opencode_inst.id,
+                        enabled=True,
+                        name=new_name,
+                    )
+                except Exception:
+                    pass

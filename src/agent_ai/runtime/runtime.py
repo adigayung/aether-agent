@@ -997,11 +997,23 @@ class AgentRuntime:
             from agent_ai.config.settings import agent_system_prompt
 
             system_prompt = agent_system_prompt()
+
+        options = self.options
+        if options is None:
+            from agent_ai.providers.base import GenerateOptions
+
+            options = GenerateOptions(extra={})
+            self.options = options
+        elif getattr(options, "extra", None) is None:
+            options.extra = {}
+
+        if self.project_root and isinstance(getattr(options, "extra", None), dict):
+            options.extra["workspace_root"] = str(self.project_root)
         return AgentOrchestrator(
             provider=provider,
             executor=self.executor,
             max_iterations=self.max_iterations,
-            options=self.options,
+            options=options,
             system_prompt=system_prompt,
             event_sink=self._event_sink,
             brain=self._brain,

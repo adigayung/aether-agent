@@ -1703,10 +1703,22 @@ class AgentOrchestrator:
         tersedia) dicatat LEBIH DULU, lalu exception diteruskan apa adanya ke
         penanganan loop yang sudah ada.
         """
+        call_options = options
+        if self.event_sink is not None:
+            if call_options is None:
+                call_options = GenerateOptions(extra={"event_sink": self.event_sink})
+            elif "event_sink" not in (call_options.extra or {}):
+                call_options = GenerateOptions(
+                    temperature=call_options.temperature,
+                    max_tokens=call_options.max_tokens,
+                    model=call_options.model,
+                    extra={**(call_options.extra or {}), "event_sink": self.event_sink},
+                )
+
         if getattr(self, "response_log", None) is None:
             gen_result = self.provider.generate(
                 messages=messages,
-                options=options,
+                options=call_options,
                 tools=tools or None,
                 tool_choice=self.tool_choice,
             )
@@ -1715,7 +1727,7 @@ class AgentOrchestrator:
         try:
             gen_result = self.provider.generate(
                 messages=messages,
-                options=options,
+                options=call_options,
                 tools=tools or None,
                 tool_choice=self.tool_choice,
             )

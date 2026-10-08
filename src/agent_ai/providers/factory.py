@@ -26,7 +26,7 @@ from typing import Any, Dict, Optional
 from agent_ai.providers.base import BaseProvider, ProviderNotConfiguredError
 
 #: Provider type yang memetakan ke implementasi OpenAI-compatible.
-_OPENAI_COMPATIBLE_TYPES = ("openrouter", "openai", "deepseek", "9router", "custom")
+_OPENAI_COMPATIBLE_TYPES = ("openrouter", "openai", "deepseek", "9router", "custom", "opencode")
 
 
 def _clean(value: Any) -> str:
@@ -90,6 +90,10 @@ def _build_openai_compatible_config(
         # "auto-test". Jangan set model kosong di kwargs agar tidak menimpa
         # perilaku tersebut.
         model = ""
+    elif provider_type == "opencode":
+        from agent_ai.config.settings import OpenCodeConfig
+
+        config_cls = OpenCodeConfig
     else:  # pragma: no cover - dijaga caller
         raise ProviderNotConfiguredError(
             f"Provider type '{provider_type}' tidak dikenal."
@@ -213,6 +217,10 @@ def build_provider_from_config(config: Dict[str, Any]) -> BaseProvider:
             from agent_ai.providers.nine_router import NineRouterProvider
 
             provider = NineRouterProvider(config=provider_config)
+        elif provider_type == "opencode":
+            from agent_ai.providers.opencode import OpenCodeProvider
+
+            provider = OpenCodeProvider(config=provider_config)
         else:
             from agent_ai.providers.openai_compatible import OpenAICompatibleProvider
 
@@ -225,7 +233,7 @@ def build_provider_from_config(config: Dict[str, Any]) -> BaseProvider:
 
     raise ProviderNotConfiguredError(
         f"Provider type '{provider_type or '(kosong)'}' tidak dikenal. "
-        f"Gunakan salah satu dari: ollama, openrouter, openai, deepseek, 9router, custom."
+        f"Gunakan salah satu dari: ollama, openrouter, openai, deepseek, 9router, custom, opencode."
     )
 
 
