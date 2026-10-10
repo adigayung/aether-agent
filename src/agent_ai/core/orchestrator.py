@@ -161,6 +161,10 @@ class OrchestratorResult:
     # True bila kegagalan berasal dari provider (bukan tool/command).
     # Dipakai oleh Provider Fallback (#45) untuk memutuskan perpindahan provider.
     provider_error: bool = False
+    # Evidence-Based Self-Verification (continuous loop): ringkasan evidence
+    # terstruktur (fakta langkah, BUKAN keputusan). None di jalur legacy/tanpa
+    # evidence. Additive: tidak mengubah teks `result` maupun kontrak `status`.
+    evidence: Optional[Dict[str, Any]] = None
 
     @property
     def success(self) -> bool:
@@ -1382,6 +1386,102 @@ class AgentOrchestrator:
         content = observation.content
         return isinstance(content, dict) and content.get("exit_code") is not None
 
+    @staticmethod
+    def _verification_evidence(loop: AgentLoop) -> Dict[str, Any]:
+        """Ringkasan evidence terstruktur dari step loop (deterministik).
+
+        Reuse helper evidence yang SUDAH ADA (`_is_change_observation`,
+        `_is_validation_observation`, `_is_failure_observation`) — tidak membuat
+        deteksi baru. TIDAK menentukan completion dan TIDAK mengubah teks final
+        LLM; hanya deskripsi fakta yang tersedia untuk consumer hasil runtime.
+
+        Requirement "task meminta verifikasi" dinilai dari `verification_task`
+        bila caller menyediakannya (mis. AgentRuntime menyerahkan task ASLI user,
+        bukan teks yang sudah diberi plan/advisory); default: task loop.
+
+        Returns:
+            Dict dengan `task_requires_validation`, `change_applied`,
+            `validation_after_change`, `last_observation_failed`,
+            `validation_succeeded`, dan `nudge_sent`.
+        """
+        change_applied = False
+        validation_after_change = False
+        validation_succeeded = False
+        last: Optional[AgentObservation] = None
+        for step in loop.state.steps:
+            observation = step.observation
+            if observation is None:
+                continue
+            last = observation
+            if AgentOrchestrator._is_change_observation(observation):
+                change_applied = True
+                # Bukti validation harus terjadi SETELAH perubahan terakhir.
+                validation_after_change = False
+            elif AgentOrchestrator._is_validation_observation(observation):
+                validation_after_change = True
+                validation_succeeded = True
+        task = getattr(loop, "verification_task", None) or loop.state.task or ""
+        return {
+            "task_requires_validation": AgentOrchestrator._task_requires_validation(
+                task
+            ),
+            "change_applied": bool(change_applied),
+            "validation_after_change": bool(validation_after_change),
+            "validation_succeeded": bool(validation_succeeded),
+            "last_observation_failed": AgentOrchestrator._is_failure_observation(
+                last
+            ),
+            "nudge_sent": bool(getattr(loop, "verification_nudge_sent", False)),
+        }
+
+    @classmethod
+    def _needs_verification_nudge(cls, loop: AgentLoop) -> bool:
+        """True bila verification nudge continuous loop perlu dikirim.
+
+        HANYA True bila SEMUA terpenuhi:
+            - task meminta verifikasi (`_task_requires_validation`),
+            - ada perubahan relevan yang diterapkan (`_is_change_observation`),
+            - belum ada bukti validasi sukses SETELAH perubahan terakhir,
+            - tidak ada kegagalan aktif pada observasi terakhir,
+            - nudge belum pernah dikirim pada task ini (maks 1x per task).
+
+        Ini BUKAN penentu completion: keputusan selesai tetap murni response
+        LLM. Nudge hanya memberi LLM kesempatan menghasilkan bukti yang kurang.
+        """
+        if getattr(loop, "verification_nudge_sent", False):
+            return False
+        evidence = cls._verification_evidence(loop)
+        if not evidence["task_requires_validation"]:
+            return False
+        if not evidence["change_applied"]:
+            return False
+        if evidence["validation_after_change"]:
+            return False
+        if evidence["last_observation_failed"]:
+            return False
+        return True
+
+    @staticmethod
+    def _verification_nudge_message() -> Message:
+        """Pesan nudge: minta LLM memeriksa/menghasilkan bukti yang kurang.
+
+        TIDAK menyatakan task gagal, TIDAK menyimpulkan hasil, dan TIDAK
+        menghentikan loop: hanya memberi tahu LLM bahwa bukti validasi setelah
+        perubahan terakhir belum terlihat, dan memintanya memutuskan langkah
+        berikutnya (jalankan verifikasi atau beri jawaban final).
+        """
+        return Message(
+            role="user",
+            content=(
+                "[verification] Task ini meminta verifikasi, dan sebuah "
+                "perubahan sudah diterapkan. Belum ada bukti eksekusi "
+                "verifikasi/test yang berhasil SETELAH perubahan terakhir. "
+                "Periksa kembali dan, bila memang perlu, jalankan verifikasi "
+                "yang relevan sehingga dampak perubahan terbukti. Bila kamu "
+                "yakin bukti sudah cukup, berikan jawaban final."
+            ),
+        )
+
     def _completion_signal(self, response: LLMResponse) -> Optional[str]:
         """Teks final bila response membawa sinyal penyelesaian task.
 
@@ -1983,6 +2083,7 @@ class AgentOrchestrator:
         task: str,
         *,
         user_parts: Optional[List[Dict[str, Any]]] = None,
+        verification_task: Optional[str] = None,
     ) -> OrchestratorResult:
         """Jalankan iterative agent loop untuk sebuah task.
 
@@ -1996,12 +2097,19 @@ class AgentOrchestrator:
             user_parts: content blocks opsional untuk pesan user awal (mis.
                 image, format internal AETHER provider-agnostic). Kosong
                 (default) = perilaku text-only tidak berubah.
+            verification_task: task ASLI user untuk menilai kebutuhan verifikasi
+                (HANYA dipakai verification nudge di continuous loop). Default
+                None = pakai `task`.
 
         Returns:
             OrchestratorResult (status DONE/FAILED, result, steps).
         """
         if self.use_continuous_loop:
-            return self.run_continuous_loop(task, user_parts=user_parts)
+            return self.run_continuous_loop(
+                task,
+                user_parts=user_parts,
+                verification_task=verification_task,
+            )
 
         loop = AgentLoop(task=task, max_iterations=self.max_iterations)
         loop.start()
@@ -2280,6 +2388,7 @@ class AgentOrchestrator:
         max_steps: int = _CONTINUOUS_SAFETY_MAX_STEPS,
         options: Optional[GenerateOptions] = None,
         user_parts: Optional[List[Dict[str, Any]]] = None,
+        verification_task: Optional[str] = None,
     ) -> OrchestratorResult:
         """Jalankan SATU percakapan kontinu sampai LLM memberi jawaban final.
 
@@ -2309,6 +2418,11 @@ class AgentOrchestrator:
             user_parts: content blocks opsional untuk pesan user awal (mis.
                 image, format internal AETHER provider-agnostic). Kosong
                 (default) = perilaku text-only tidak berubah.
+            verification_task: task ASLI user untuk menilai apakah verifikasi
+                diminta (dipakai HANYA oleh verification nudge). Default None =
+                pakai `task`. Caller (mis. AgentRuntime) mengisinya dengan task
+                asli agar plan/advisory tidak ikut menentukan kebutuhan
+                verifikasi.
 
         Returns:
             OrchestratorResult (status DONE/FAILED, result, steps).
@@ -2318,6 +2432,11 @@ class AgentOrchestrator:
 
         loop = AgentLoop(task=task, max_iterations=max(1, int(max_steps)))
         loop.start()
+        # Requirement verifikasi dinilai dari task ASLI user bila caller
+        # menyediakannya (mis. AgentRuntime: `prepared.task`), bukan dari teks
+        # yang sudah disisipi plan/advisory. Ini menjaga plan (advisory,
+        # non-binding) TIDAK ikut menentukan kebutuhan verifikasi.
+        loop.verification_task = verification_task if verification_task else task
 
         # Satu percakapan kontinu untuk seluruh task.
         history = ConversationHistory()
@@ -2339,6 +2458,11 @@ class AgentOrchestrator:
         # provider yang TERPOTONG boleh dicoba ulang. Bukan keputusan "task
         # selesai"; hanya proteksi runaway saat provider terus memotong output.
         truncation_recoveries = 0
+        # Verification nudge (continuous loop): penanda "sudah dikirim" dibatasi
+        # MAKSIMAL SATU KALI per task. Hanya memicu LLM memeriksa/menghasilkan
+        # bukti validasi yang masih kurang; BUKAN keputusan completion dan tidak
+        # pernah menyatakan task gagal.
+        loop.verification_nudge_sent = False
         # Observability-only: hitung berapa kali retrieval terhadap RESOURCE YANG
         # SAMA diminta ulang dalam task ini (mis. read_file dengan path+range+mode
         # identik). Nilai ini TIDAK dipakai untuk mengubah eksekusi, dedup, cache,
@@ -2468,6 +2592,27 @@ class AgentOrchestrator:
                     # agent terus diberi kesempatan melanjutkan sampai LLM
                     # menghasilkan jawaban final (bukan FAILED karena cap).
                     history.append_user_message(self._truncation_message().content)
+                    continue
+                # Verification nudge (continuous loop, MAKS 1x per task):
+                # bila task meminta verifikasi, ada perubahan relevan, dan belum
+                # ada bukti validasi setelah perubahan terakhir, beri LLM SATU
+                # kesempatan tambahan untuk memeriksa/menghasilkan bukti yang
+                # kurang. Ini TIDAK menyatakan gagal, TIDAK menentukan completion
+                # dari keyword/metadata, dan TIDAK memicu pada cancellation atau
+                # kegagalan provider (keduanya keluar via `break` di atas).
+                if self._needs_verification_nudge(loop):
+                    loop.verification_nudge_sent = True
+                    history.append_user_message(
+                        self._verification_nudge_message().content
+                    )
+                    emit_event(
+                        self.event_sink,
+                        "verification_nudge",
+                        {
+                            "reason": "missing_validation_after_change",
+                            "iteration": loop.iteration,
+                        },
+                    )
                     continue
                 history.append_assistant_message(content=response.text or "")
                 loop.finish(result=response.text or "")
@@ -2661,6 +2806,10 @@ class AgentOrchestrator:
                 break
 
         learning = self._learn_from_run(task, loop)
+        # Evidence-Based Self-Verification: lampirkan ringkasan evidence
+        # TERSTRUKTUR (fakta langkah). TIDAK mengubah teks final LLM (`result`)
+        # maupun kontrak `status`; additive untuk consumer hasil runtime.
+        evidence = self._verification_evidence(loop)
         return OrchestratorResult(
             status=loop.status,
             result=loop.state.result,
@@ -2669,6 +2818,7 @@ class AgentOrchestrator:
             steps=loop.to_dict()["steps"],
             learning=learning,
             provider_error=provider_error,
+            evidence=evidence,
         )
 
     def _record_tool_result(
@@ -2739,18 +2889,40 @@ class AgentOrchestrator:
         HANYA dipakai untuk mencatat step (observability). Tidak menentukan
         completion dan TIDAK pernah dikirim ke LLM: histori LLM memakai pesan
         role "tool" lewat ConversationHistory.
+
+        Metadata meneruskan HANYA field yang MEMANG tersedia pada payload
+        (output dict), termasuk `exit_code`, `outcome`, `success`, dan indikator
+        kegagalan command (`command_failure`/`timeout`/`spawn_error`/`cancelled`).
+        Nilai TIDAK dikarang: key hanya disertakan bila benar-benar ada.
         """
+        output = payload.output
+        metadata: Dict[str, Any] = {"tool": payload.tool_name}
+        if isinstance(output, dict):
+            for key in ("exit_code", "outcome", "success", "timed_out"):
+                if key in output:
+                    metadata[key] = output[key]
+        if not payload.is_success:
+            metadata["tool_error"] = True
+        # Indikator kegagalan command HANYA bila payload benar-benar
+        # menyatakannya (exit_code != 0 / outcome gagal / success=False).
+        outcome = output.get("outcome") if isinstance(output, dict) else None
+        if outcome in ("command_failure", "timeout", "spawn_error"):
+            metadata["command_failure"] = True
+        elif isinstance(output, dict):
+            if output.get("success") is False and output.get("exit_code") is not None:
+                metadata["command_failure"] = True
+
         if payload.is_success:
             return AgentObservation(
-                content=payload.output,
+                content=output,
                 success=True,
-                metadata={"tool": payload.tool_name},
+                metadata=metadata,
             )
         return AgentObservation(
             content=None,
             success=False,
             error=payload.to_content(),
-            metadata={"tool": payload.tool_name, "tool_error": True},
+            metadata=metadata,
         )
 
     def run_coding_task(self, task: str) -> CodingTask:

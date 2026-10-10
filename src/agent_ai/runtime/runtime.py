@@ -1645,7 +1645,13 @@ class AgentRuntime:
         progress.current_step = prepared.task
         task_text = self._build_continuous_task(prepared)
         orchestrator = self._make_orchestrator(self.provider)
-        result = orchestrator.run(task_text, user_parts=user_parts)
+        # `verification_task` = task ASLI user (bukan teks + plan/advisory) agar
+        # kebutuhan verifikasi dinilai dari permintaan user, bukan saran plan.
+        result = orchestrator.run(
+            task_text,
+            user_parts=user_parts,
+            verification_task=prepared.task,
+        )
         progress.iteration += max(1, getattr(result, "iterations", 0))
 
         # Cancellation (cooperative): loop berhenti di safe boundary -> task
@@ -1671,6 +1677,7 @@ class AgentRuntime:
                 progress=progress,
                 steps=[],
                 iterations=progress.iteration,
+                evidence=getattr(result, "evidence", None),
             )
 
         progress.failed_step = prepared.task
@@ -1682,6 +1689,7 @@ class AgentRuntime:
             progress=progress,
             steps=[],
             iterations=progress.iteration,
+            evidence=getattr(result, "evidence", None),
         )
 
     def _run_single(

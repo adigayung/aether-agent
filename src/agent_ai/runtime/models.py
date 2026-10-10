@@ -87,6 +87,10 @@ class RuntimeResult:
     # effective_mode, reason, escalations). None bila policy tidak di-resolve
     # (mis. runtime/fake lama) -> backward compatible.
     policy: Optional[Dict[str, Any]] = None
+    # Evidence-Based Self-Verification (continuous loop) — ringkasan evidence
+    # TERSTRUKTUR dari langkah agent (fakta, BUKAN keputusan). Additive; None di
+    # jalur legacy/tanpa evidence. Tidak mengubah `result`/`status`.
+    evidence: Optional[Dict[str, Any]] = None
 
     @property
     def success(self) -> bool:
@@ -103,4 +107,5 @@ class RuntimeResult:
             "validation": self.validation,
             "validation_cycles": self.validation_cycles,
             "policy": self.policy,
+            "evidence": self.evidence,
         }

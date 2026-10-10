@@ -197,10 +197,20 @@ def scenario_tool_error_then_continue(executor: ToolExecutor) -> None:
 
 
 def scenario_task_keywords_ignored(executor: ToolExecutor) -> None:
-    """Keyword task ('test'/'validasi') + nama file tidak memaksa step/keputusan."""
+    """Keyword task ('test'/'validasi') + nama file tidak memaksa step/keputusan.
+
+    Catatan: sejak Evidence-Based Self-Verification, task yang meminta
+    verifikasi + punya perubahan relevan dapat menerima SATU verification nudge
+    (pesan user tambahan yang meminta LLM memeriksa/menghasilkan bukti). Nudge
+    ini BUKAN heuristic completion: ia hanya memberi LLM turn tambahan, dan
+    loop tetap selesai karena keputusan final LLM. Yang diuji di sini adalah
+    tidak adanya *pemutusan* loop akibat keyword (tidak ada result heuristic,
+    tidak ada paksa gagal).
+    """
     provider = ScriptedProvider(
         [
             _tool_turn("Tulis.", [_tool_call("c1", "write_file", {"path": "hello.txt", "content": "z"})]),
+            _final_turn("done"),
             _final_turn("done"),
         ]
     )
@@ -210,13 +220,16 @@ def scenario_task_keywords_ignored(executor: ToolExecutor) -> None:
     assert result.status == AgentStatus.DONE, result.error
     # Heuristic loop lama akan MENOLAK completion (butuh run_command test) dan
     # tidak akan memakai result ini; continuous loop abaikan keyword tersebut.
-    assert provider.calls == 2, provider.calls
+    assert provider.calls == 3, provider.calls
     assert result.result == "done", result.result
     assert HEURISTIC_RESULT_MARKER not in (result.result or "")
-    # Tidak ada nudge/sintesis pesan user tambahan (hanya task asli).
+    # Pesan user tambahan yang diizinkan HANYA verification nudge (maks 1x);
+    # setelah itu loop selesai karena keputusan LLM, bukan heuristic.
     second = provider.requests[1]
     user_msgs = [m for m in second if m.get("role") == "user"]
-    assert len(user_msgs) == 1, user_msgs
+    nudges = [m for m in user_msgs if str(m.get("content") or "").startswith("[verification]")]
+    assert len(nudges) <= 1, nudges
+    assert len(user_msgs) - len(nudges) == 1, user_msgs
     print("OK: keyword/nama file task tidak memaksa step tambahan & tidak memutus loop")
 
 
