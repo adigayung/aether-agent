@@ -1019,6 +1019,11 @@ class AgentRuntime:
             # Working State (internal): provider teks per round agar LLM
             # mendapat pemahaman kerja terbaru pada setiap putaran.
             working_state_provider=lambda: self.working_state_text,
+            # Provider Fallback pada jalur AKTIF (continuous loop): resolver
+            # disuntikkan agar orchestrator dapat meminta provider alternatif
+            # saat provider utama gagal (setelah retry habis). Orchestrator
+            # tetap provider-agnostic (tidak mengimpor subsistem fallback).
+            provider_fallback_resolver=self._provider_fallback_resolver,
         )
 
     def _session_environment_context(self) -> Optional[str]:
@@ -1506,6 +1511,72 @@ class AgentRuntime:
         if self.options is not None and getattr(self.options, "model", None):
             return self.options.model
         return ""
+
+    def _provider_fallback_resolver(self, error: BaseException) -> Optional[BaseProvider]:
+        """Resolver fallback untuk JALUR AKTIF (continuous loop).
+
+        Dipanggil AgentOrchestrator (via callback yang disuntikkan) HANYA
+        setelah seluruh retry provider AKTIF habis pada satu pemanggilan LLM.
+        Mengembalikan provider alternatif BILA:
+
+            1. fallback aktif (`self.fallback_manager` ada & enabled),
+            2. `FallbackManager` memutuskan FALLBACK (kegagalan provider, ada
+               kandidat eligible, kuota fallback belum habis),
+            3. provider alternatif berhasil dibangun (`self.provider_factory`).
+
+        Provider alternatif juga di-persist ke `self.provider` agar request
+        berikutnya pada task ini memakai provider yang sama (task state tetap
+        dilanjutkan, riwayat percakapan TIDAK direset).
+
+        Catatan boundary: runtime TIDAK membuat runtime/executor kedua; ia hanya
+        mengorkestrasi (keputusan tetap milik FallbackManager). Bila tidak ada
+        fallback, mengembalikan None (orchestrator menutup lifecycle sebagai
+        FAILED seperti perilaku lama).
+        """
+        fm = self.fallback_manager
+        if fm is None or not fm.enabled:
+            return None
+        if self.provider_factory is None:
+            return None
+
+        from agent_ai.fallback.models import FallbackAction, FallbackRequest
+
+        reason = fm.classify_error(error)
+        request = FallbackRequest(
+            current_provider=getattr(self.provider, "name", ""),
+            current_model=self._current_model_name(),
+            reason=reason,
+            required_capabilities=self._required_capabilities(),
+            context_tokens=self._context_token_requirement(),
+            transient=fm.policy.is_transient(reason),
+            attempts=fm.attempts,
+            metadata={"task_id": getattr(self, "_current_task_id", None)},
+        )
+        try:
+            decision = fm.fallback(request)
+        except Exception:  # noqa: BLE001 - keputusan gagal -> tidak fallback
+            return None
+
+        self._emit_event(
+            "phase_changed",
+            {
+                "phase": "provider_fallback",
+                "action": decision.action.value,
+                "reason": decision.reason.value,
+            },
+        )
+        if decision.action != FallbackAction.FALLBACK or decision.selected is None:
+            return None
+        try:
+            new_provider = self.provider_factory(decision.selected.provider)
+        except Exception:  # noqa: BLE001 - gagal membangun provider -> tidak fallback
+            return None
+        if new_provider is None:
+            return None
+        # Persist agar request berikutnya pada task ini memakai provider yang
+        # sama; task state (riwayat/loop) tetap dilanjutkan, bukan direset.
+        self.provider = new_provider
+        return new_provider
 
     def _required_capabilities(self) -> Any:
         """Capability wajib untuk fallback (dari prepared.metadata bila ada)."""

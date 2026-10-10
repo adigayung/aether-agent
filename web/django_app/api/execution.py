@@ -262,6 +262,25 @@ class TaskExecutor:
 
             options = GenerateOptions(model=model_name)
 
+        # Provider Fallback pada JALUR AKTIF (continuous loop): rakit
+        # (fallback_manager, provider_factory) dari konfigurasi LLM tersimpan
+        # (Provider Instance + Model) memakai subsistem fallback EXISTING.
+        # Ini yang membuat AgentRuntime (jalur produksi) dapat berpindah
+        # provider saat provider utama gagal. Bila konfigurasi tidak punya
+        # kandidat, fallback tidak dipasang (perilaku lama dipertahankan).
+        fallback_manager = None
+        fallback_provider_factory = None
+        if self._provider_factory is None:
+            try:
+                from agent_ai.runtime.provider_fallback import build_runtime_fallback
+
+                wiring = build_runtime_fallback(self.llm_config_service)
+            except Exception:  # noqa: BLE001 - wiring gagal -> tanpa fallback
+                wiring = None
+            if wiring:
+                fallback_manager = wiring.get("fallback_manager")
+                fallback_provider_factory = wiring.get("provider_factory")
+
         if self._runtime_factory is not None:
             # Backward compatible: hanya teruskan `options` bila diisi, agar
             # runtime_factory lama (tanpa parameter options) tetap bekerja.
@@ -283,6 +302,8 @@ class TaskExecutor:
             session_store=self.sessions,
             session_id=session_id,
             options=options,
+            fallback_manager=fallback_manager,
+            provider_factory=fallback_provider_factory,
             # Project-local storage (Task 5): root project target -> Task Log
             # (`.aether/log/<task_id>.log`) + AI Project Bible
             # (`.aether/bible`). Bila None, storage project-local dilewati.

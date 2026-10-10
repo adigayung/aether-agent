@@ -216,6 +216,7 @@ class AgentOrchestrator:
         execution_policy: Optional[Dict[str, Any]] = None,
         policy_escalator: Optional[Callable[[str, str | None], Any]] = None,
         working_state_provider: Optional[Callable[[], str]] = None,
+        provider_fallback_resolver: Optional[Callable[[BaseException], Any]] = None,
     ) -> None:
         self.provider = provider
         self.executor = executor or ToolExecutor()
@@ -282,6 +283,19 @@ class AgentOrchestrator:
         # disediakan pemanggil (runtime). Bila None, orchestrator tidak dapat
         # memicu escalation (mekanisme tetap ada di runtime/gateway).
         self.policy_escalator = policy_escalator
+        # Provider fallback resolver opsional (disuntikkan runtime).
+        # Callable `(error) -> Optional[BaseProvider]`. Dipanggil di
+        # `_generate_with_retry` HANYA setelah seluruh retry provider aktif
+        # habis. Bila mengembalikan provider alternatif, orchestrator berpindah
+        # provider dan mengulang PEMANGGILAN YANG SAMA (riwayat percakapan, tool
+        # calling, dan state loop tetap utuh). Bila None (default), perilaku
+        # persis seperti sebelumnya: seluruh attempt gagal -> loop FAILED.
+        #
+        # IMPORTANT (boundary): Agent Core TIDAK mengimpor subsistem fallback
+        # provider. Keputusan/kandidat provider tetap MILIK runtime lewat
+        # callback ini; orchestrator hanya memakainya secara generik
+        # (provider-agnostic), sesuai prinsip Core yang provider-agnostic.
+        self.provider_fallback_resolver = provider_fallback_resolver
 
     # ------------------------------------------------------------------ #
     # Tool definitions
@@ -1788,13 +1802,22 @@ class AgentOrchestrator:
             - Bila salah satu attempt berhasil, response dikembalikan dan loop
               lanjut normal dari state eksekusi saat itu. Completion tetap murni
               keputusan LLM; helper ini TIDAK menyelesaikan task.
-            - Bila SELURUH attempt gagal, `loop` di-`fail()` (lifecycle ditutup
-              sebagai FAILED) dan `None` dikembalikan.
+            - Bila SELURUH attempt provider AKTIF gagal, orchestrator MEMINTA
+              provider alternatif lewat `provider_fallback_resolver` (callback
+              yang disuntikkan runtime; Agent Core TIDAK mengimpor subsistem
+              fallback). Bila resolver mengembalikan provider alternatif,
+              orchestrator BERPINDAH provider dan mengulang PEMANGGILAN YANG
+              SAMA (pesan/tools/riwayat TIDAK berubah) — native tool calling,
+              cancellation, dan lifecycle tetap utuh. Perpindahan provider
+              di-bounded oleh resolver (FallbackManager.max_attempts); bila
+              resolver tidak tersedia/tidak mengembalikan provider, `loop`
+              di-`fail()` sebagai FAILED (perilaku lama).
             - Cancellation user BERPRIORITAS: bila pembatalan terdeteksi saat
               retry, retry dihentikan, `loop` di-`cancel()` (lifecycle ditutup
               sebagai CANCELLED), dan `None` dikembalikan.
             - Telemetry retry diemit per attempt (provider/model/attempt +
               pesan error yang SUDAH disanitasi; TANPA credential/secret).
+              Perpindahan provider diemit sebagai event `provider_fallback`.
 
         Retry ini murni resilience layer: mekanisme provider/model yang ada
         (mis. infrastructure retry 429/5xx di layer provider dan Provider
@@ -1805,8 +1828,6 @@ class AgentOrchestrator:
             `LLMResponse` bila ada attempt yang berhasil; `None` bila seluruh
             attempt gagal atau dibatalkan (loop sudah difinalkan oleh method ini).
         """
-        provider_name = getattr(self.provider, "name", "")
-        model_name = self._model_name()
         # Retry request API LLM: jumlah pengulangan & jeda dibaca dari
         # konfigurasi (`data/settings.json` -> `api_retry`). Counter retry
         # dimulai dari 1 untuk SETIAP pemanggilan provider (per request), jadi
@@ -1815,92 +1836,141 @@ class AgentOrchestrator:
         failed_count, failed_sleep = self._api_retry_policy()
         # Total attempt = 1 attempt awal + `failed_count` pengulangan.
         max_attempts = failed_count + 1
-        last_error: Optional[BaseException] = None
         # Nomor round untuk log response API: satu round = satu percobaan
         # logis LLM (attempt pertama + retry berada pada round yang sama).
         round_index = self._next_llm_round()
 
-        for attempt in range(1, max_attempts + 1):
-            try:
-                response = self._call_provider(
-                    messages=messages,
-                    options=options,
-                    tools=tools,
-                    round_index=round_index,
-                    attempt=attempt,
-                )
-            except Exception as exc:  # noqa: BLE001 - provider error -> retry lifecycle
-                last_error = exc
-                emit_event(
-                    self.event_sink,
-                    "provider_response",
-                    {
-                        "provider": provider_name,
-                        "model": model_name,
-                        "error": _redact_credentials(f"{type(exc).__name__}: {exc}"),
-                        "attempt": attempt,
-                        "max_attempts": max_attempts,
-                    },
-                )
-                # Cancellation user punya prioritas tertinggi: hentikan retry.
-                if self._cancel_requested():
-                    loop.cancel(self._cancel_reason())
-                    return None
-                # Kuota attempt habis -> lifecycle ditutup sebagai FAILED.
-                if attempt >= max_attempts:
-                    break
-                # Telemetry: attempt gagal, akan dicoba lagi (no credential).
-                emit_event(
-                    self.event_sink,
-                    "provider_retry",
-                    {
-                        "provider": provider_name,
-                        "model": model_name,
-                        "attempt": attempt,
-                        "next_attempt": attempt + 1,
-                        "max_attempts": max_attempts,
-                        "error_type": type(exc).__name__,
-                        "error": _redact_credentials(str(exc)),
-                    },
-                )
-                # Jeda konfigurabel SEBELUM pengulangan berikutnya
-                # (`api_retry.failed_sleep`). 0.0 = tanpa jeda (behavior lama).
-                if failed_sleep > 0:
-                    time.sleep(failed_sleep)
-                continue
+        # Outer loop: satu "siklus" per provider AKTIF. Siklus pertama memakai
+        # provider awal; siklus berikutnya hanya terjadi bila resolver fallback
+        # menyediakan provider alternatif (perpindahan di-bounded resolver).
+        fallback_used = False
+        while True:
+            provider_name = getattr(self.provider, "name", "")
+            model_name = self._model_name()
+            last_error: Optional[BaseException] = None
 
-            # Sukses (attempt awal atau salah satu retry).
-            if attempt > 1:
-                emit_event(
-                    self.event_sink,
-                    "provider_retry_succeeded",
-                    {
-                        "provider": provider_name,
-                        "model": model_name,
-                        "attempt": attempt,
-                        "max_attempts": max_attempts,
-                    },
-                )
-            return response
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    response = self._call_provider(
+                        messages=messages,
+                        options=options,
+                        tools=tools,
+                        round_index=round_index,
+                        attempt=attempt,
+                    )
+                except Exception as exc:  # noqa: BLE001 - provider error -> retry lifecycle
+                    last_error = exc
+                    emit_event(
+                        self.event_sink,
+                        "provider_response",
+                        {
+                            "provider": provider_name,
+                            "model": model_name,
+                            "error": _redact_credentials(f"{type(exc).__name__}: {exc}"),
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                        },
+                    )
+                    # Cancellation user punya prioritas tertinggi: hentikan retry
+                    # (dan JANGAN pindah provider — pembatalan bukan kegagalan
+                    # provider).
+                    if self._cancel_requested():
+                        loop.cancel(self._cancel_reason())
+                        return None
+                    # Kuota attempt provider AKTIF habis -> keluar dari loop
+                    # retry; keputusan fallback diambil di luar.
+                    if attempt >= max_attempts:
+                        break
+                    # Telemetry: attempt gagal, akan dicoba lagi (no credential).
+                    emit_event(
+                        self.event_sink,
+                        "provider_retry",
+                        {
+                            "provider": provider_name,
+                            "model": model_name,
+                            "attempt": attempt,
+                            "next_attempt": attempt + 1,
+                            "max_attempts": max_attempts,
+                            "error_type": type(exc).__name__,
+                            "error": _redact_credentials(str(exc)),
+                        },
+                    )
+                    # Jeda konfigurabel SEBELUM pengulangan berikutnya
+                    # (`api_retry.failed_sleep`). 0.0 = tanpa jeda (behavior lama).
+                    if failed_sleep > 0:
+                        time.sleep(failed_sleep)
+                    continue
 
-        # SELURUH attempt gagal -> lifecycle FAILED (ditutup setelah retry habis).
+                # Sukses (attempt awal atau salah satu retry).
+                if attempt > 1:
+                    emit_event(
+                        self.event_sink,
+                        "provider_retry_succeeded",
+                        {
+                            "provider": provider_name,
+                            "model": model_name,
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                        },
+                    )
+                return response
+
+            # Provider AKTIF kehabisan attempt. Telemetry exhausted per provider.
+            error_type = (
+                type(last_error).__name__ if last_error is not None else "Error"
+            )
+            emit_event(
+                self.event_sink,
+                "provider_retry_exhausted",
+                {
+                    "provider": provider_name,
+                    "model": model_name,
+                    "attempts": max_attempts,
+                    "error_type": error_type,
+                },
+            )
+
+            # Resolver fallback (disuntikkan runtime). Bila tidak ada, perilaku
+            # lama dipertahankan: provider error -> loop FAILED.
+            new_provider = None
+            if self.provider_fallback_resolver is not None and last_error is not None:
+                try:
+                    new_provider = self.provider_fallback_resolver(last_error)
+                except Exception:  # noqa: BLE001 - resolver error -> tidak fallback
+                    new_provider = None
+
+            if new_provider is None:
+                break
+
+            # Berpindah provider & ulangi PEMANGGILAN YANG SAMA. Riwayat
+            # percakapan (messages), definisi tool, opsi, dan state loop TIDAK
+            # berubah: hanya endpoint provider yang berbeda. `fallback_used`
+            # hanya untuk penanda; batas perpindahan ditegakkan resolver.
+            self.provider = new_provider
+            fallback_used = True
+            emit_event(
+                self.event_sink,
+                "provider_fallback",
+                {
+                    "from_provider": provider_name,
+                    "from_model": model_name,
+                    "to_provider": getattr(new_provider, "name", ""),
+                    "to_model": self._model_name(),
+                    "reason": error_type,
+                },
+            )
+
+        # Tidak ada provider alternatif (atau resolver tidak tersedia) ->
+        # lifecycle FAILED (ditutup setelah retry habis).
         error_type = type(last_error).__name__ if last_error is not None else "Error"
         error_text = _redact_credentials(
             str(last_error) if last_error is not None else ""
         )
-        emit_event(
-            self.event_sink,
-            "provider_retry_exhausted",
-            {
-                "provider": provider_name,
-                "model": model_name,
-                "attempts": max_attempts,
-                "error_type": error_type,
-            },
-        )
+        active_provider = getattr(self.provider, "name", "")
+        suffix = " (fallback provider juga gagal)" if fallback_used else ""
         loop.fail(
-            f"Provider '{provider_name}' gagal setelah {max_attempts} attempt "
-            f"(1 attempt awal + {max_attempts - 1} retry): "
+            f"Provider '{active_provider}' gagal setelah {max_attempts} attempt "
+            f"(1 attempt awal + {max_attempts - 1} retry){suffix}: "
             f"{error_type}: {error_text}"
         )
         return None
