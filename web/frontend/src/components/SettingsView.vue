@@ -84,12 +84,6 @@ const providerTypeLabel = computed(() => {
   for (const t of providerTypes.value) map[t.key] = t.label;
   return map;
 });
-const credentialByName = computed(() => {
-  const map = {};
-  for (const c of credentials.value) map[c.name] = c;
-  return map;
-});
-
 const activeInstance = computed(() => {
   const id = props.config.provider_instance_id;
   if (!id) return null;
@@ -468,16 +462,23 @@ watch(activeTab, (tab) => {
             class="sv-input"
             placeholder="Base URL (mis. http://gerry.com/v1)"
           />
-          <input
+          <select
             v-if="showApiKeyEnv"
             v-model="providerForm.api_key_env"
             class="sv-input"
-            :placeholder="
+            :aria-label="
               apiKeyEnvOptional
-                ? 'API key env (opsional, mis. GERRY_API_KEY)'
-                : 'Nama variabel .env API key (mis. OPENROUTER_API_KEY)'
+                ? 'API key env (opsional)'
+                : 'Nama variabel .env API key'
             "
-          />
+          >
+            <option value="" disabled>
+              {{ apiKeyEnvOptional ? "— pilih API key (opsional) —" : "— pilih API key —" }}
+            </option>
+            <option v-for="c in credentials" :key="c.name" :value="c.name">
+              {{ c.name }}
+            </option>
+          </select>
         </div>
         <div class="sv-form-actions">
           <button
