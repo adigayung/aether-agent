@@ -537,6 +537,7 @@ class ConsultantService:
         max_steps: Optional[int] = None,
         mode: Optional[str] = None,
         images: Optional[List[Dict[str, Any]]] = None,
+        event_emit: Optional[Any] = None,
     ) -> ConsultantResult:
         """Jalankan satu giliran konsultasi dan kembalikan hasilnya.
 
@@ -561,6 +562,12 @@ class ConsultantService:
                 (ImagePreprocessor) menjadi payload provider-agnostic, lalu
                 dilampirkan pada pesan user (content parts). Kosong/None =
                 perilaku text-only tidak berubah.
+            event_emit: callable opsional ``(session_id, event_type, payload)``
+                yang dipanggil untuk memancarkan event runtime Consultant
+                (tool_called/tool_completed) ke event system AETHER yang SUDAH
+                ADA (SessionStore, lewat Gateway). Observability saja: TIDAK
+                mengubah reasoning/loop, tidak ada transport/store kedua.
+                Bila None, perilaku TIDAK berubah (hanya mengisi tool_events).
 
         Returns:
             ConsultantResult.
@@ -624,6 +631,25 @@ class ConsultantService:
                         "error": payload.get("error"),
                     }
                 )
+            # Observability LIVE: teruskan event runtime yang SAMA ke event
+            # system AETHER existing (SessionStore via Gateway) agar UI dapat
+            # menampilkan status nyata selama konsultasi. Ini TIDAK mengubah
+            # reasoning/loop; hanya emit tambahan. Kegagalan emit tidak boleh
+            # menggagalkan konsultasi.
+            if event_emit is not None and event_type in ("tool_called", "tool_completed"):
+                try:
+                    event_emit(
+                        session.session_id,
+                        event_type,
+                        {
+                            "tool": payload.get("tool", ""),
+                            "target": payload.get("target", ""),
+                            "success": payload.get("success"),
+                            "error": payload.get("error"),
+                        },
+                    )
+                except Exception:  # noqa: BLE001 - observability tidak boleh crash
+                    pass
 
         # Provider dibungkus proxy Consultant: begitu bound retrieval tercapai,
         # tool map (atlas_query/rig_query) dilepas dari penawaran ke LLM

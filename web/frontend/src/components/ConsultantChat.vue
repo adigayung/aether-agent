@@ -10,6 +10,7 @@
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import {
   consult,
+  openEventStream,
   listConsultantSessions,
   getConsultantSession,
   createConsultantSession,
@@ -71,6 +72,14 @@ const scroller = ref(null);
 const composer = ref(null);
 const fileInput = ref(null);
 
+// Live status indikator (.consultant-thinking) di-update dari event runtime
+// NYATA Consultant (tool_called/tool_completed) yang dikirim lewat SSE
+// /api/events (sumber: SessionStore AETHER). BUKAN timer / rotasi teks.
+const liveStatus = ref("");
+// Handle EventSource aktif (dibuka bersamaan dengan send(), ditutup di
+// finally / catch / reset sesi). TIDAK pernah tertinggal terbuka.
+let liveStream = null;
+
 // Session list for the Sessions tab (persisted on backend).
 const sessionsLoading = ref(false);
 const sessions = ref([]);
@@ -106,6 +115,8 @@ watch(
 );
 
 function _resetForProjectChange() {
+  closeLiveStream();
+  liveStatus.value = "";
   sessionId.value = "";
   messages.value = [];
   error.value = "";
@@ -129,6 +140,8 @@ async function loadSessions() {
 async function switchSession(id) {
   if (switchingSession.value || id === sessionId.value) return;
   switchingSession.value = true;
+  closeLiveStream();
+  liveStatus.value = "";
   error.value = "";
   try {
     const sess = await getConsultantSession(id, props.projectId || null);
@@ -188,6 +201,8 @@ async function resumeSessionFromId(id) {
 async function createNewSession() {
   if (sending.value) return;
   error.value = "";
+  closeLiveStream();
+  liveStatus.value = "";
   try {
     const sess = await createConsultantSession({
       projectId: props.projectId || null,
@@ -497,6 +512,73 @@ function removeAttachment(index) {
   attachments.value.splice(index, 1);
 }
 
+// --- Live status dari event runtime NYATA ----------------------------------
+// Fungsi MURNI: petakan satu event runtime Consultant menjadi SATU baris teks
+// status. Mengganti teks sebelumnya (bukan menambah riwayat/list). Nama event
+// yang dipakai sudah ada di api.js KNOW_EVENTS (tool_called/tool_completed).
+function statusTextForEvent(payload) {
+  if (!payload || typeof payload !== "object") return "";
+  const type = payload.event_type || "";
+  const body = payload.payload || {};
+  const tool = body.tool || "";
+  if (type === "tool_called") {
+    switch (tool) {
+      case "read_file":
+        return "Reading source code…";
+      case "search_code":
+        return "Searching source code…";
+      case "list_files":
+        return "Inspecting project files…";
+      case "atlas_query":
+      case "rig_query":
+      case "project_map_status":
+        return "Checking project map…";
+      case "consultant_bible":
+      case "bible_retrieval":
+        return "Reading Project Bible…";
+      case "run_command":
+        return "Running command…";
+      case "update_project_bible":
+        return "Updating Project Bible…";
+      default:
+        return tool ? "Working…" : "";
+    }
+  }
+  if (type === "tool_completed") {
+    return "Analyzing results…";
+  }
+  return "";
+}
+
+// Tutup EventSource live (idempotent). Dipanggil di akhir send(), saat gagal,
+// saat project berubah, dan saat sesi berpindah/dibuat ulang.
+function closeLiveStream() {
+  if (liveStream) {
+    try {
+      liveStream.close();
+    } catch (e) {
+      /* close best-effort */
+    }
+    liveStream = null;
+  }
+}
+
+// Buka stream event untuk session_id TERTENTU dan update liveStatus dari event
+// runtime NYATA. Hanya mengganti teks (tidak ada list/log/panel/timer).
+function openLiveStream(sid) {
+  closeLiveStream();
+  if (!sid) return;
+  liveStream = openEventStream({
+    sessionId: sid,
+    onEvent: (payload) => {
+      // Hanya tanggapi event milik sesi ini (defensif; server sudah filter).
+      if (payload && payload.session_id && payload.session_id !== sid) return;
+      const next = statusTextForEvent(payload);
+      if (next) liveStatus.value = next;
+    },
+  });
+}
+
 async function send() {
   const text = input.value.trim();
   const pending = attachments.value.slice();
@@ -511,7 +593,26 @@ async function send() {
   attachments.value = [];
   resetComposer();
   sending.value = true;
+  liveStatus.value = "";
   scrollToBottom();
+  // Pastikan ada session_id SEBELUM mengirim agar stream event bisa dibuka
+  // untuk sesi ini (server memakai session_id yang sama). Memakai endpoint
+  // session existing; kontrak /consultant/consult TIDAK berubah.
+  if (!sessionId.value) {
+    try {
+      const sess = await createConsultantSession({
+        projectId: props.projectId || null,
+        title: null,
+      });
+      sessionId.value = sess.session_id;
+      emit("update:activeSessionId", sessionId.value);
+    } catch (e) {
+      // Bila pembuatan sesi gagal, lanjut tanpa stream (perilaku lama).
+      sessionId.value = "";
+    }
+  }
+  // Buka stream event live (hanya update satu baris status).
+  openLiveStream(sessionId.value);
   try {
     const data = await consult(text, {
       sessionId: sessionId.value || null,
@@ -550,6 +651,8 @@ async function send() {
       failed: true,
     });
   } finally {
+    closeLiveStream();
+    liveStatus.value = "";
     sending.value = false;
     scrollToBottom();
   }
@@ -653,6 +756,8 @@ function runTask(proposal, index = -1) {
 }
 
 function startNewSession() {
+  closeLiveStream();
+  liveStatus.value = "";
   sessionId.value = "";
   messages.value = [];
   attachments.value = [];
@@ -896,7 +1001,7 @@ onMounted(() => {
           </div>
         </div>
 
-        <div v-if="sending" class="consultant-thinking">Consultant is investigating…</div>
+        <div v-if="sending" class="consultant-thinking">{{ liveStatus || "Consultant is investigating…" }}</div>
       </div>
 
       <div v-if="error" class="wb-error">{{ error }}</div>

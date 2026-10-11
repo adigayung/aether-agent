@@ -2901,6 +2901,15 @@ class GatewayService:
         if provider is None:
             provider = self._build_consultant_provider(provider_instance_id, model_id)
 
+        # Emit live: teruskan event runtime Consultant ke event system AETHER
+        # existing (SessionStore) memakai mekanisme emit_event yang sudah ada,
+        # sehingga UI dapat menampilkan status nyata selama konsultasi lewat
+        # SSE /api/events. Tidak membuat transport/store kedua.
+        def _consult_event_emit(
+            emit_session_id: str, event_type: str, payload: Dict[str, Any]
+        ) -> None:
+            self.emit_event(emit_session_id, event_type, payload=payload)
+
         try:
             result = self.consultant_service.consult(
                 str(message).strip(),
@@ -2910,6 +2919,7 @@ class GatewayService:
                 project_id=project_id,
                 mode=mode,
                 images=normalized_images,
+                event_emit=_consult_event_emit,
             )
         except ValidationError:
             raise
