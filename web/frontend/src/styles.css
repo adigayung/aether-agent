@@ -1237,6 +1237,20 @@ button {
   color: var(--text-faint);
 }
 
+/* INDIKATOR (bukan gate) saat Agent sedang RUNNING. Klik card TETAP membuka
+   Consultant dan TIDAK ada elemen yang di-disable — ini hanya menandai bahwa
+   task baru akan masuk ANTRIAN (scheduler serial, concurrency=1). */
+.consultant-card.running {
+  border-color: var(--accent);
+}
+.consultant-card .ci-state {
+  font-size: 10.5px;
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* ---- Consultant modal ---- */
 .modal.consultant-m {
   max-width: 1120px;

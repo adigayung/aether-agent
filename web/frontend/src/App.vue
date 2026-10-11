@@ -535,12 +535,17 @@ const { editorOpen, editorFile, openFileInEditor, closeCodeEditor, onEditorError
         </div>
       </div>
 
-      <!-- AETHER Consultant card -->
-      <div class="consultant-card" @click="openConsultant">
+      <!-- AETHER Consultant card.
+           .running di-bind ke isRunning (SUMBER TUNGGAL = Global Task Queue di
+           App.vue) HANYA sebagai INDIKATOR VISUAL bahwa Agent sedang sibuk.
+           TIDAK memblokir apa pun: klik selalu membuka Consultant dan sesi
+           tetap dapat dilanjutkan / task baru tetap dapat diantrikan. -->
+      <div class="consultant-card" :class="{ running: isRunning }" @click="openConsultant">
         <svg class="ci" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a4 4 0 0 1 4 4c0 1.95-1.4 3.58-3.25 3.93L12 22l-.75-12.07A4.001 4.001 0 0 1 12 2z"/><circle cx="12" cy="6" r="1.5" fill="currentColor" stroke="none"/><path d="M9 14l-3 3 3 3M15 14l3 3-3 3"/></svg>
         <div class="ci-body">
           <div class="ci-title">AETHER Consultant</div>
           <div class="ci-sub">Chat with the AI assistant</div>
+          <div v-if="isRunning" class="ci-state">Agent running — new tasks are queued</div>
         </div>
       </div>
 
