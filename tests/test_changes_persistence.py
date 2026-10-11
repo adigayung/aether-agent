@@ -47,8 +47,18 @@ from agent_ai.task.models import PreparedTask
 from api.execution import TaskExecutor
 
 
-def _make_provider(tool_name: str, tool_args: Dict[str, Any], fail_first: bool = False):
-    """Provider deterministik: 1 tool call lalu final (tanpa network)."""
+def _make_provider(
+    tool_name: str,
+    tool_args: Dict[str, Any],
+    fail_first: bool = False,
+    validation_command: str = "",
+):
+    """Provider deterministik: 1 tool call lalu final (tanpa network).
+
+    Bila `validation_command` diisi, provider menjalankan validasi sukses
+    SETELAH mutasi sebelum final — diperlukan agar perubahan source memenuhi
+    completion gate BUG-4 pada test yang memang mengedit file source.
+    """
 
     class FakeProvider(BaseProvider):
         name = "fake"
@@ -72,6 +82,20 @@ def _make_provider(tool_name: str, tool_args: Dict[str, Any], fail_first: bool =
                     provider="fake",
                     model="fake-1",
                 )
+            if validation_command and self.calls == 2:
+                return LLMResponse(
+                    text="",
+                    actions=[
+                        LLMAction(
+                            name="run_command",
+                            arguments={"command": validation_command},
+                            type=ActionType.TOOL_CALL,
+                        )
+                    ],
+                    finish_reason=FinishReason.TOOL_CALLS,
+                    provider="fake",
+                    model="fake-1",
+                )
             return LLMResponse(
                 text="selesai",
                 actions=[],
@@ -83,14 +107,23 @@ def _make_provider(tool_name: str, tool_args: Dict[str, Any], fail_first: bool =
     return FakeProvider()
 
 
-def _run_task(workspace: Path, tool_name: str, tool_args: Dict[str, Any], task_id: str, fail_first: bool = False):
+def _run_task(
+    workspace: Path,
+    tool_name: str,
+    tool_args: Dict[str, Any],
+    task_id: str,
+    fail_first: bool = False,
+    validation_command: str = "",
+):
     store = InMemorySessionStore()
     session = store.create_session()
     session_id = session.session_id
     pm = PermissionManager(policy=PermissionPolicy(PermissionConfig(workspace_write=PolicyMode.ALLOW)))
     executor = TaskExecutor(
         store,
-        provider_factory=lambda: _make_provider(tool_name, tool_args, fail_first),
+        provider_factory=lambda: _make_provider(
+            tool_name, tool_args, fail_first, validation_command
+        ),
         permission_manager=pm,
     )
     prepared = PreparedTask(task="task perubahan file", task_id=task_id)
@@ -109,7 +142,11 @@ def test_successful_edit_is_persisted_to_task_log(tmp_path: Path) -> None:
     (workspace / "app.py").write_text("value = 1\n", encoding="utf-8")
 
     result, session_changes, log_changes = _run_task(
-        workspace, "edit_file", {"path": "app.py", "old_text": "value = 1", "new_text": "value = 2"}, "task-edit"
+        workspace,
+        "edit_file",
+        {"path": "app.py", "old_text": "value = 1", "new_text": "value = 2"},
+        "task-edit",
+        validation_command="python -c \"print('ok')\"",
     )
 
     assert result["status"] == "completed", result

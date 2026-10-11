@@ -533,6 +533,19 @@ def test_h_multiple_rounds_growing_results(monkeypatch=None) -> None:
             _tool_turn(f"round {i}", [_tool_call_dict(f"c{i}", order[i % 4], {"path": "src/r.py", "query": "q"})])
             for i in range(rounds)
         ]
+        # Perubahan source (edit_file src/r.py) memerlukan bukti validasi
+        # (completion gate BUG-4): tambahkan satu round validasi sukses.
+        script.append(
+            _tool_turn(
+                "validasi",
+                [
+                    _tool_call_dict(
+                        "cv", "run_command",
+                        {"command": "python -m pytest tests/ -q", "path": "src/r.py", "query": "q"},
+                    )
+                ],
+            )
+        )
         script.append(_final_turn("Selesai setelah banyak round."))
 
         provider = ScriptedProvider(script)
@@ -555,8 +568,9 @@ def test_h_multiple_rounds_growing_results(monkeypatch=None) -> None:
         assert result.status == AgentStatus.DONE, result.error
         assert result.result == "Selesai setelah banyak round."
         # Semua tool call tetap dieksekusi (loop tidak rusak karena compaction).
-        assert sum(t.calls for t in tools.values()) == rounds
-        assert provider.calls == rounds + 1
+        # +1 untuk round validasi tambahan (gate BUG-4).
+        assert sum(t.calls for t in tools.values()) == rounds + 1
+        assert provider.calls == rounds + 2
 
         reqs = [e for e in events if e["type"] == "provider_request"]
         assert reqs

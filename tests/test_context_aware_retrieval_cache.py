@@ -396,6 +396,7 @@ def test_sync_forgets_search_when_not_visible(tmp_path: Path) -> None:
 # F. Alur normal (baca -> edit) tetap berjalan.
 # --------------------------------------------------------------------------- #
 def test_normal_read_then_edit_flow_still_works(tmp_path: Path) -> None:
+    from agent_ai.tools.terminal import RunCommandTool
     from agent_ai.tools.workspace import EditFileTool
 
     (tmp_path / "m.py").write_text("value = 1\nother = 2\n", encoding="utf-8")
@@ -404,6 +405,8 @@ def test_normal_read_then_edit_flow_still_works(tmp_path: Path) -> None:
     registry.read_cache = cache
     registry.register(ReadFileTool(root=tmp_path, read_cache=cache))
     registry.register(EditFileTool(root=tmp_path, read_cache=cache))
+    # Perubahan source (.py) memerlukan bukti validasi (completion gate BUG-4).
+    registry.register(RunCommandTool(root=tmp_path))
     provider = ScriptedProvider(
         [
             _tool_turn(
@@ -413,6 +416,10 @@ def test_normal_read_then_edit_flow_still_works(tmp_path: Path) -> None:
             _tool_turn(
                 "edit",
                 [_tool_call("e1", "edit_file", {"path": "m.py", "old_text": "value = 1", "new_text": "value = 42"})],
+            ),
+            _tool_turn(
+                "validasi",
+                [_tool_call("v1", "run_command", {"command": "python -c \"print('ok')\""})],
             ),
             _final_turn("selesai"),
         ]

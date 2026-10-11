@@ -115,6 +115,16 @@ _DEFAULT_MAX_PROVIDER_ATTEMPTS = 4
 #: cukup kecil agar biaya maksimum saat provider rusak tetap terbatas.
 _MAX_TRUNCATION_RECOVERIES = 4
 
+#: BOUNDED verification recovery untuk `run_continuous_loop` (BUG-4): jumlah
+#: MAKSIMUM verification nudge yang boleh dikirim dalam SATU task ketika
+#: completion gate menahan DONE karena bukti validasi belum ada/gagal. Nudge
+#: TIDAK mengeksekusi tool apa pun (hanya memberi LLM kesempatan menjalankan
+#: validasi pada round berikutnya) sehingga tidak menambah eksekusi di luar
+#: `max_steps`; ia hanya menjaga loop tetap berakhir (tidak infinite). Setelah
+#: batas ini tercapai tanpa bukti validasi sukses, task dihentikan sebagai
+#: NON-SUKSES (FAILED) — bukan DONE palsu.
+_MAX_VERIFICATION_RECOVERIES = 3
+
 #: Pola credential yang disamarkan dari teks error provider sebelum dikirim ke
 #: telemetry/activity (jaring pengaman agar secret tidak bocor ke log/UI).
 _CREDENTIAL_PATTERNS = re.compile(
@@ -1310,12 +1320,20 @@ class AgentOrchestrator:
     # Dipakai HANYA untuk memutuskan apakah bukti verifikasi diwajibkan dan
     # artifact mana yang harus terpenuhi. BUKAN semantic evaluator / planner.
     # ------------------------------------------------------------------ #
+    # Kata kunci validasi dicocokkan sebagai KATA UTUH (bukan substring):
+    # penyebutan "test" di dalam nama file (mis. "latest.py", "test_bug4.py")
+    # atau di dalam kata lain TIDAK otomatis berarti user meminta test
+    # dijalankan. Lihat `_contains_word` + `_strip_file_tokens`.
     _VALIDATION_KEYWORDS = (
-        "test", "tests", "testing", "debug", "validate", "validation",
-        "validasi", "verifikasi", "verify", "lulus", "pytest", "unit test",
-        "uji", "spec",
+        "test", "tests", "testing", "tes", "debug", "debugging", "validate",
+        "validation", "validasi", "verifikasi", "verify", "lulus", "pytest",
+        "unit test", "uji", "menguji", "diuji", "pengujian", "spec",
     )
     # Frasa yang MENIADAKAN kebutuhan validation (user eksplisit: jangan test).
+    # DIPERTAHANKAN untuk kompatibilitas/rujukan; pencocokan runtime memakai
+    # `_NO_VALIDATION_RE` (regex) yang mencakup seluruh variasi frasa eksplisit
+    # seperti "tanpa menjalankan test", "jangan jalankan test",
+    # "tidak perlu menjalankan test", "tanpa eksekusi test", "no run tests".
     _NO_VALIDATION_PHRASES = (
         "jangan test", "jangan debug", "jangan uji", "jangan validasi",
         "tanpa test", "tanpa debug", "tanpa uji", "tanpa verifikasi",
@@ -1324,12 +1342,71 @@ class AgentOrchestrator:
         "skip test", "skip tests", "don't test", "dont test",
         "without test", "without tests",
     )
-    # Token file/path eksplisit pada teks task (artifact yang diminta task).
-    _TARGET_FILE_RE = re.compile(
-        r"[A-Za-z0-9_\-./\\]+\.(?:py|js|jsx|ts|tsx|html|htm|css|scss|json|md|"
-        r"txt|yml|yaml|toml|ini|cfg|sh|bat|ps1|java|c|h|cpp|hpp|go|rb|php|"
-        r"vue|sql|xml|csv|env)"
+    # Instruksi eksplisit untuk TIDAK menjalankan test/validasi.
+    # Struktur: <cue negasi> + (kata kerja opsional) + <kata kunci validasi>.
+    # Menjangkau varian: "tanpa (menjalankan|jalankan|mengeksekusi|eksekusi|
+    # melakukan|run) test", "jangan jalankan test", "tidak perlu menjalankan
+    # test", "no run tests", "don't run tests", "without running tests", dst.
+    #
+    # CATATAN: kata "validasi/validation/validate" SENGAJA tidak ada di sini
+    # (frasa "tanpa validasi" ambigu — bisa berarti "belum divalidasi"). Waiver
+    # untuk validasi tetap dikenali lewat frasa eksplisit lama di
+    # `_NO_VALIDATION_PHRASES` (mis. "jangan validasi", "tanpa verifikasi").
+    _NO_VALIDATION_RE = re.compile(
+        r"(?:(?:jangan|tanpa|tidak\s+perlu|tidak\s+usah|tak\s+perlu|"
+        r"no|dont|don't|do\s+not|without|skip)\b)"
+        r"(?:\s+(?:menjalankan|jalankan|mengeksekusi|eksekusi|melakukan|"
+        r"lakukan|menjalankannya|run|running|eksekusikan))?"
+        r"(?:\s+(?:semua|seluruh|the|all|any))?"
+        r"\s+(?:test|tests|testing|tes|uji|pengujian|menguji|debug|debugging|"
+        r"verifikasi|verify|pytest|spec)\b"
     )
+    # Kata kerja "jalankan/eksekusi" (eksplisit meminta eksekusi sekarang).
+    _RUN_VERBS = (
+        "jalankan", "jalankanlah", "run", "execute", "eksekusi", "lakukan",
+        "kerjakan", "menjalankan", "mengeksekusi",
+    )
+    # Konteks dokumentasi/penulisan: kata kunci validasi yang muncul di sini
+    # adalah OBJEK BAHASAN dokumentasi, bukan instruksi menjalankan test.
+    _DOC_CONTEXT_WORDS = (
+        "dokumentasi", "documentation", "dokumentasikan", "readme", "docs",
+        "panduan", "guide", "tutorial", "penjelasan", "catatan", "laporan",
+        "artikel", "ringkasan", "deskripsi",
+    )
+    # Ekstensi script: PEMBUATAN script TIDAK otomatis berarti permintaan
+    # menjalankan/memvalidasi perilakunya (audit BUG-4). Karena itu script
+    # BUKAN pemicu kewajiban validasi (lihat `_SCRIPT_EXTS`).
+    _SCRIPT_EXTS = (".bat", ".cmd", ".ps1", ".sh")
+    # Nama tool yang MENGUBAH workspace (mutasi). Dipakai untuk membedakan
+    # kegagalan operasi UTAMA (pembuatan/perubahan artifact yang diminta) dari
+    # kegagalan sampingan (mis. read_file gagal pada task yang tetap berhasil).
+    # Sejalan dengan `_MUTATION_MARKERS` (tools/workspace.py).
+    _MUTATING_TOOL_NAMES = ("write_file", "edit_file", "delete_file", "move_file")
+    # Token file/path eksplisit pada teks task (artifact yang diminta task).
+    # Token wajib dibatasi (tidak didahului/diikuti karakter kata) supaya tidak
+    # menyerap bagian lain. Ekstraksi diklasifikasi confident vs ambigu oleh
+    # `_task_target_files_detailed` agar frasa biasa seperti
+    # "berita acara serah terima.md" TIDAK menghasilkan target palsu "terima.md".
+    _TARGET_FILE_RE = re.compile(
+        r"(?<![A-Za-z0-9_\-./\\])"
+        r"[A-Za-z0-9_\-./\\]+\."
+        r"(?:py|js|jsx|ts|tsx|html|htm|css|scss|json|md|txt|yml|yaml|toml|ini|"
+        r"cfg|sh|bat|cmd|ps1|java|c|h|cpp|hpp|go|rb|php|vue|sql|xml|csv|env)"
+        r"(?![A-Za-z0-9_\-])"
+    )
+    # Kata yang MEMPERKENALKAN nama file ("buat file x.txt", "tulis readme.md").
+    # Target dianggap AMBIGU hanya bila tidak ada satu pun indikator ini dan
+    # token-nya berupa kata alfabetik polos.
+    _FILE_INTRO_WORDS = (
+        "file", "berkas", "nama", "named", "path", "buat", "buatkan",
+        "create", "write", "tulis", "tuliskan", "generate", "simpan",
+        "rewrite", "ubah", "edit", "perbarui", "update", "rename",
+        "pindahkan", "hapus", "delete", "remove", "modify", "append",
+        "tambahkan", "tambah", "berjudul", "dengan nama", "script", "skrip",
+    )
+    # Konjungsi yang menandakan token berikutnya bagian dari DAFTAR nama file
+    # ("buat a.html dan b.js").
+    _FILE_LIST_CONJUNCTIONS = ("dan", "and", "atau", "or", "serta", "juga")
     # Fitur/aksi yang SECARA JELAS dinyatakan task kompleks (mis. "menggunakan
     # cookie/session", "redirect", "validasi credential"). Deterministik dan
     # HANYA dipakai bila kata tersebut benar-benar tertulis di task. BUKAN
@@ -1341,6 +1418,25 @@ class AgentOrchestrator:
         "redirect": ("redirect", "alihkan", "arahkan"),
         "credential": ("credential", "credentials", "password", "kata sandi"),
     }
+    # Ekstensi ARTIFACT source/konfigurasi yang (bila berubah) menuntut bukti
+    # validasi SETELAH perubahan terakhir. Ini BUKAN classifier semantik: hanya
+    # pemetaan ekstensi file yang benar-benar dilaporkan tool mutasi (metadata
+    # `_is_change_observation` + argumen path step). Audit BUG-4 membuktikan
+    # keyword task saja tidak cukup — perubahan coding tanpa kata "test/validasi"
+    # tetap harus divalidasi.
+    #
+    # CATATAN (audit lanjutan BUG-4): ekstensi SCRIPT (.sh/.bat/.ps1/.cmd)
+    # DENGAN SENGAJA tidak di sini. Membuat script BUKAN permintaan menjalankan
+    # atau memvalidasi perilakunya, jadi pembuatannya tidak boleh memicu
+    # kewajiban validasi. Lihat `_SCRIPT_EXTS`.
+    _SOURCE_CONFIG_EXTS = (
+        ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".vue",
+        ".php", ".rb", ".go", ".java", ".kt", ".kts", ".rs", ".c", ".h",
+        ".cc", ".cpp", ".hpp", ".cs", ".swift", ".scala",
+        ".sql", ".html", ".htm", ".css", ".scss", ".sass", ".less",
+        ".json", ".yml", ".yaml", ".toml", ".ini", ".cfg", ".conf", ".env",
+        ".xml", ".gradle", ".dockerfile",
+    )
     # Operasi CRUD hanya menjadi requirement bila task memang CRUD (kata "crud"
     # atau menyebut >= 2 operasi), agar kata seperti "tambah/ubah" pada task
     # biasa tidak salah dianggap requirement.
@@ -1353,32 +1449,159 @@ class AgentOrchestrator:
     }
 
     @classmethod
+    def _normalized_task_text(cls, task: str) -> str:
+        """Teks task lowercase + token file/path DIHAPUS (untuk pencocokan).
+
+        Tujuan: penyebutan kata kunci validasi di dalam NAMA FILE
+        (mis. "jalankan tests/test_bug4.py") tidak menjadi sinyal validasi,
+        sementara instruksi di luar token file tetap terbaca. Deterministik.
+        """
+        text = (task or "").lower()
+        return cls._TARGET_FILE_RE.sub(" ", text)
+
+    @classmethod
+    def _task_waives_validation(cls, task: str) -> bool:
+        """True bila user EKSPLISIT meniadakan test/validasi.
+
+        Dipakai completion gate (BUG-4): waiver eksplisit user
+        ("tanpa menjalankan test", "jangan jalankan test", "tidak perlu
+        menjalankan test", "tanpa eksekusi test", "no run tests", ...)
+        menonaktifkan kebutuhan validasi yang diturunkan dari perubahan source,
+        sehingga agent TIDAK dipaksa menjalankan validasi yang oleh user
+        dinyatakan tidak diperlukan. Deterministik (regex frasa eksplisit).
+        """
+        text = cls._normalized_task_text(task)
+        if cls._NO_VALIDATION_RE.search(text) is not None:
+            return True
+        # Frasa eksplisit lama (mis. "jangan validasi", "tanpa verifikasi",
+        # "tidak usah debug") tetap dihormati.
+        return any(phrase in text for phrase in cls._NO_VALIDATION_PHRASES)
+
+    @classmethod
+    def _has_validation_keyword(cls, text: str) -> bool:
+        """True bila ada kata kunci validasi sebagai KATA UTUH pada `text`."""
+        return any(cls._contains_word(text, kw) for kw in cls._VALIDATION_KEYWORDS)
+
+    @classmethod
+    def _is_documentation_context(cls, text: str) -> bool:
+        """True bila task berpusat pada dokumentasi/penulisan (bukan eksekusi).
+
+        Pada konteks ini penyebutan "test" umumnya adalah OBJEK BAHASAN
+        dokumentasi ("tulis dokumentasi yang membahas test"), bukan permintaan
+        menjalankan test — kecuali ada kata kerja eksekusi eksplisit
+        ("jalankan/run/execute/eksekusi/lakukan/kerjakan").
+        """
+        if not any(cls._contains_word(text, word) for word in cls._DOC_CONTEXT_WORDS):
+            return False
+        return not any(cls._contains_word(text, verb) for verb in cls._RUN_VERBS)
+
+    @classmethod
     def _task_requires_validation(cls, task: str) -> bool:
         """True bila task eksplisit menuntut test/validasi/debug.
 
-        Bila user meniadakannya (mis. "jangan test/debug", "tidak perlu test"),
-        kembalikan False agar test/debug tidak dipaksa. Deterministik dari teks
-        task yang sudah tersedia; BUKAN semantic evaluator.
+        Aturan (deterministik, kata utuh + konteks):
+            1. User meniadakannya secara eksplisit ("tanpa menjalankan test",
+               "no run tests", ...) -> False.
+            2. Tidak ada kata kunci validasi (sebagai kata utuh) -> False.
+            3. Task berpusat pada DOKUMENTASI/penulisan (tanpa kata kerja
+               eksekusi) -> False: penyebutan "test" di sana adalah objek
+               bahasan, bukan permintaan menjalankan test.
+            4. Ada kata kunci validasi sebagai kata utuh (baik sebagai instruksi
+               eksplisit "jalankan test"/"pastikan test lulus" maupun bukan)
+               -> True.
+
+        Token nama file DIHAPUS lebih dulu (`_normalized_task_text`), sehingga
+        "test" pada "tests/test_x.py", "latest.md", atau "test.bat" TIDAK
+        otomatis berarti user meminta test dijalankan. BUKAN semantic evaluator.
         """
-        text = (task or "").lower()
-        if any(phrase in text for phrase in cls._NO_VALIDATION_PHRASES):
+        text = cls._normalized_task_text(task)
+        if cls._task_waives_validation(task):
             return False
-        return any(keyword in text for keyword in cls._VALIDATION_KEYWORDS)
+        if not cls._has_validation_keyword(text):
+            return False
+        if cls._is_documentation_context(text):
+            return False
+        return True
+
+
+    @classmethod
+    def _task_target_files_detailed(cls, task: str) -> Dict[str, set]:
+        """Ekstraksi target file task, dipisah CONFIDENT vs AMBIGU.
+
+        Audit lanjutan BUG-4: regex lama menghasilkan target PALSU dari frasa
+        biasa ("berita acara serah terima.md" -> "terima.md"), lalu target palsu
+        itu dipakai untuk menolak completion. Sekarang setiap kandidat dinilai:
+
+            - CONFIDENT bila ada indikator eksplisit bahwa itu nama file:
+              ada pemisah path ("/" atau "\\"), diapit quote/backtick, memuat
+              karakter khas nama file (huruf besar, digit, "_", "-"), atau kata
+              pengantar file tepat sebelumnya ("buat readme.md", "tulis x.txt").
+            - AMBIGU bila hanya berupa kata alfabetik polos + ekstensi di dalam
+              prosa (mis. "terima.md" pada "berita acara serah terima.md").
+
+        Target AMBIGU TIDAK dipakai sebagai satu-satunya alasan menolak
+        completion (lihat `_completion_detected`). Deterministik, tanpa NLP.
+        """
+        text = task or ""
+        confident: set = set()
+        ambiguous: set = set()
+        for match in cls._TARGET_FILE_RE.finditer(text):
+            token = match.group(0)
+            normalized = token.replace("\\", "/")
+            base = normalized.split("/")[-1].strip().lower()
+            if not base:
+                continue
+            has_separator = "/" in normalized.strip("/")
+            quoted = cls._is_quoted_token(text, match.start())
+            has_name_chars = any(ch.isdigit() for ch in base) or any(
+                ch in base for ch in ("_", "-")
+            ) or any(ch.isupper() for ch in token)
+            preceded_by_intro = cls._preceded_by_file_intro(text, match.start())
+            if has_separator or quoted or has_name_chars or preceded_by_intro:
+                confident.add(base)
+            else:
+                ambiguous.add(base)
+        # Bila token yang sama juga muncul confident, ia bukan ambigu lagi.
+        ambiguous -= confident
+        return {"confident": confident, "ambiguous": ambiguous}
+
+    @staticmethod
+    def _is_quoted_token(text: str, start: int) -> bool:
+        """True bila token file tepat didahului quote/backtick."""
+        if start <= 0:
+            return False
+        return text[start - 1] in "\"'`"
+
+    @classmethod
+    def _preceded_by_file_intro(cls, text: str, start: int) -> bool:
+        """True bila tepat sebelum token ada kata pengantar nama file.
+
+        Termasuk konjungsi daftar ("dan", "and", ",") karena itu menandakan
+        token adalah bagian dari enumerasi nama file ("buat a.html dan b.js").
+        """
+        if start <= 0:
+            return False
+        prefix = text[:start].rstrip().lower()
+        if not prefix:
+            return False
+        if prefix[-1] in (",", "&", ";"):
+            return True
+        for word in cls._FILE_INTRO_WORDS + cls._FILE_LIST_CONJUNCTIONS:
+            if prefix.endswith(word):
+                end = prefix[: -len(word)]
+                if not end or not (end[-1].isalnum() or end[-1] == "_"):
+                    return True
+        return False
 
     @classmethod
     def _task_target_files(cls, task: str) -> set:
-        """Nama file/path yang disebut eksplisit pada task.
+        """Nama file/path yang JELAS diminta task (hanya target confident).
 
-        Ini daftar artifact yang benar-benar diminta task (requirement),
-        BUKAN hitungan jumlah file/mutasi. Dipakai agar task multi-artifact
-        tidak dianggap selesai hanya karena satu mutasi terjadi.
+        Ini daftar artifact yang benar-benar diminta task (requirement), BUKAN
+        hitungan jumlah file/mutasi. Target ambigu (hasil ekstraksi dari frasa
+        biasa) TIDAK dimasukkan agar tidak menolak completion secara salah.
         """
-        targets = set()
-        for match in cls._TARGET_FILE_RE.findall(task or ""):
-            base = match.replace("\\", "/").split("/")[-1].strip().lower()
-            if base:
-                targets.add(base)
-        return targets
+        return set(cls._task_target_files_detailed(task)["confident"])
 
     @staticmethod
     def _step_targets(step: Any) -> set:
@@ -1391,6 +1614,70 @@ class AgentOrchestrator:
                 targets.add(str(value).replace("\\", "/").split("/")[-1].strip().lower())
         targets.discard("")
         return targets
+
+    @staticmethod
+    def _step_paths(step: Any) -> set:
+        """Semua path (bukan hanya basename) dari argumen action sebuah step."""
+        arguments = getattr(getattr(step, "action", None), "arguments", None) or {}
+        paths = set()
+        for key in ("path", "file", "filename", "target", "source", "destination"):
+            value = arguments.get(key)
+            if value:
+                normalized = str(value).replace("\\", "/").strip().lower()
+                if normalized:
+                    paths.add(normalized)
+        return paths
+
+    @classmethod
+    def _is_source_or_config_path(cls, path: str) -> bool:
+        """True bila path menunjuk artifact source/konfigurasi (bukan data/docs).
+
+        Deterministik dari ekstensi. Dipakai HANYA untuk menilai apakah perubahan
+        nyata menuntut bukti validasi (BUG-4), BUKAN untuk menyimpulkan isi atau
+        kualitas pekerjaan. Script (.sh/.bat/.ps1/.cmd) DIKECUALIKAN: membuat
+        script bukan permintaan menjalankan/memvalidasi perilakunya.
+        """
+        normalized = str(path or "").replace("\\", "/").strip().lower()
+        if not normalized:
+            return False
+        base = normalized.split("/")[-1]
+        if base in ("dockerfile", "makefile", "cmakelists.txt", "procfile"):
+            return True
+        if normalized.endswith(cls._SCRIPT_EXTS):
+            return False
+        return normalized.endswith(cls._SOURCE_CONFIG_EXTS)
+
+    @classmethod
+    def _change_targets_source(cls, loop: AgentLoop) -> bool:
+        """True bila perubahan nyata menyentuh artifact source/konfigurasi.
+
+        Menilai dari STEP yang benar-benar menghasilkan mutasi sukses
+        (`_is_change_observation`) dan path pada argumen action-nya. Bila tool
+        mutasi tidak menyertakan path (jarang), dianggap perubahan relevan agar
+        task coding tidak lolos gate secara diam-diam.
+        """
+        for step in loop.state.steps:
+            observation = step.observation
+            if observation is None or not cls._is_change_observation(observation):
+                continue
+            paths = cls._step_paths(step)
+            if not paths:
+                # Mutasi nyata tanpa path yang dapat dibaca -> konservatif:
+                # perlakukan sebagai perubahan source/konfigurasi.
+                return True
+            if any(cls._is_source_or_config_path(path) for path in paths):
+                return True
+        return False
+
+    @classmethod
+    def _last_change_paths(cls, loop: AgentLoop) -> List[str]:
+        """Path artifact yang diubah pada mutasi sukses TERAKHIR (bila ada)."""
+        for step in reversed(loop.state.steps):
+            observation = step.observation
+            if observation is None or not cls._is_change_observation(observation):
+                continue
+            return sorted(cls._step_paths(step))
+        return []
 
     @staticmethod
     def _contains_word(text: str, word: str) -> bool:
@@ -1486,26 +1773,106 @@ class AgentOrchestrator:
         return isinstance(content, dict) and content.get("exit_code") is not None
 
     @staticmethod
+    def _step_tool_name(step: Any) -> str:
+        """Nama tool yang menjalankan sebuah step (lowercase, apa adanya)."""
+        action = getattr(step, "action", None)
+        name = getattr(action, "name", None)
+        if name:
+            return str(name).strip().lower()
+        observation = getattr(step, "observation", None)
+        meta = getattr(observation, "metadata", None) or {}
+        return str(meta.get("tool") or "").strip().lower()
+
+    @classmethod
+    def _last_failure_step(cls, loop: AgentLoop) -> Optional[Any]:
+        """Step terakhir yang observation-nya merupakan kegagalan aktif."""
+        for step in reversed(loop.state.steps):
+            observation = step.observation
+            if observation is None:
+                continue
+            if cls._is_failure_observation(observation):
+                return step
+        return None
+
+    @classmethod
+    def _requested_operation_failed(cls, loop: AgentLoop) -> bool:
+        """True bila operasi UTAMA yang diminta user gagal tanpa hasil pengganti.
+
+        Audit lanjutan BUG-4: `_completion_gate` lama membolehkan DONE dengan
+        alasan `no_change_applied` walau observasi terakhir adalah kegagalan,
+        sehingga "gagal membuat artifact" bisa berakhir DONE. Aturan di sini
+        SEMPIT dan melihat jenis tool + payload kegagalan (bukan
+        `last_observation_failed` secara membabi buta):
+
+            - Kegagalan tool MUTASI (write_file/edit_file/delete_file/move_file)
+              -> pembuatan/perubahan artifact yang diminta GAGAL. Bila TIDAK ada
+              perubahan yang benar-benar diterapkan (`change_applied`), hasil
+              yang diminta belum tercapai -> DONE tidak boleh.
+            - Kegagalan command (`run_command`) ketika user EKSPLISIT meminta
+              validasi/verifikasi -> kegagalan itu tidak boleh diabaikan.
+
+        Kegagalan tool non-mutasi (mis. read_file/search) atau kegagalan command
+        yang tidak diminta user TIDAK digagalkan oleh helper ini (kegagalan
+        sampingan yang tidak menghalangi hasil yang diminta).
+        """
+        failure_step = cls._last_failure_step(loop)
+        if failure_step is None:
+            return False
+        tool = cls._step_tool_name(failure_step)
+        evidence = cls._verification_evidence(loop)
+        if tool in cls._MUTATING_TOOL_NAMES:
+            # Sudah ada perubahan nyata yang diterapkan -> kegagalan mutasi lama
+            # tidak menghalangi; kegagalan mutasi TERAKHIR diperiksa lewat
+            # `last_observation_failed` + butuh bukti validasi setelahnya.
+            return not evidence["change_applied"]
+        if tool == "run_command":
+            task = getattr(loop, "verification_task", None) or loop.state.task or ""
+            if cls._task_waives_validation(task):
+                return False
+            # Command eksplisit diminta user (uji/validasi/verifikasi/checker)
+            # DAN tidak ada bukti validasi sukses setelahnya.
+            return bool(
+                cls._task_requires_validation(task)
+                and not evidence["validation_succeeded"]
+            )
+        return False
+
+    @staticmethod
     def _verification_evidence(loop: AgentLoop) -> Dict[str, Any]:
         """Ringkasan evidence terstruktur dari step loop (deterministik).
 
         Reuse helper evidence yang SUDAH ADA (`_is_change_observation`,
-        `_is_validation_observation`, `_is_failure_observation`) — tidak membuat
-        deteksi baru. TIDAK menentukan completion dan TIDAK mengubah teks final
-        LLM; hanya deskripsi fakta yang tersedia untuk consumer hasil runtime.
+        `_is_validation_observation`, `_is_failure_observation`) plus helper
+        perubahan source/konfigurasi (`_change_targets_source`). TIDAK membuat
+        semantic evaluator baru.
+
+        BUG-4: kebutuhan validasi TIDAK lagi hanya dari keyword task. Sebuah
+        task dianggap membutuhkan bukti validasi bila SALAH SATU benar:
+            - task (aslinya, `verification_task`) eksplisit meminta
+              test/validasi (`task_requires_validation`), ATAU
+            - perubahan nyata menyentuh artifact source/konfigurasi
+              (`change_targets_source`).
 
         Requirement "task meminta verifikasi" dinilai dari `verification_task`
         bila caller menyediakannya (mis. AgentRuntime menyerahkan task ASLI user,
         bukan teks yang sudah diberi plan/advisory); default: task loop.
 
         Returns:
-            Dict dengan `task_requires_validation`, `change_applied`,
-            `validation_after_change`, `last_observation_failed`,
-            `validation_succeeded`, dan `nudge_sent`.
+            Dict dengan `task_requires_validation`, `task_waives_validation`,
+            `change_targets_source`, `validation_required`, `change_applied`,
+            `validation_after_change`, `validation_succeeded`, `validation_failed`,
+            `validation_state` (succeeded | failed | not_run | not_required),
+            `last_observation_failed`, dan `nudge_sent`.
+
+        CATATAN (audit lanjutan BUG-4): dict INI sengaja TIDAK memuat hasil
+        `_requested_operation_failed` agar tidak terjadi rekursi (helper itu
+        memakai evidence ini). `_completion_gate` menambahkan field
+        `requested_operation_failed` + `last_failure_tool` pada salinannya.
         """
         change_applied = False
         validation_after_change = False
         validation_succeeded = False
+        validation_failed = False
         last: Optional[AgentObservation] = None
         for step in loop.state.steps:
             observation = step.observation
@@ -1516,17 +1883,50 @@ class AgentOrchestrator:
                 change_applied = True
                 # Bukti validation harus terjadi SETELAH perubahan terakhir.
                 validation_after_change = False
+                # Kegagalan validasi lama juga tidak berlaku untuk perubahan
+                # terbaru; status akan dinilai ulang dari step setelah ini.
+                validation_succeeded = False
+                validation_failed = False
             elif AgentOrchestrator._is_validation_observation(observation):
                 validation_after_change = True
                 validation_succeeded = True
+                validation_failed = False
+            elif (
+                AgentOrchestrator._is_failure_observation(observation)
+                and step.action is not None
+                and step.action.name == "run_command"
+            ):
+                # Command/validasi yang GAGAL (exit code nonzero / error) setelah
+                # perubahan terakhir: dicatat sebagai validasi gagal, BUKAN sukses.
+                validation_after_change = False
+                validation_succeeded = False
+                validation_failed = True
         task = getattr(loop, "verification_task", None) or loop.state.task or ""
+        task_requires_validation = AgentOrchestrator._task_requires_validation(task)
+        task_waives_validation = AgentOrchestrator._task_waives_validation(task)
+        change_targets_source = AgentOrchestrator._change_targets_source(loop)
+        validation_required = bool(
+            task_requires_validation
+            or (change_targets_source and not task_waives_validation)
+        )
+        if validation_succeeded:
+            validation_state = "succeeded"
+        elif validation_failed:
+            validation_state = "failed"
+        elif change_applied:
+            validation_state = "not_run"
+        else:
+            validation_state = "not_required"
         return {
-            "task_requires_validation": AgentOrchestrator._task_requires_validation(
-                task
-            ),
+            "task_requires_validation": bool(task_requires_validation),
+            "task_waives_validation": bool(task_waives_validation),
+            "change_targets_source": bool(change_targets_source),
+            "validation_required": validation_required,
             "change_applied": bool(change_applied),
             "validation_after_change": bool(validation_after_change),
             "validation_succeeded": bool(validation_succeeded),
+            "validation_failed": bool(validation_failed),
+            "validation_state": validation_state,
             "last_observation_failed": AgentOrchestrator._is_failure_observation(
                 last
             ),
@@ -1558,51 +1958,157 @@ class AgentOrchestrator:
 
     @classmethod
     def _needs_verification_nudge(cls, loop: AgentLoop) -> bool:
-        """True bila verification nudge continuous loop perlu dikirim.
+        """True bila verification recovery (nudge) continuous loop perlu dikirim.
 
-        HANYA True bila SEMUA terpenuhi:
-            - task meminta verifikasi (`_task_requires_validation`),
+        BOUNDED recovery (BUG-4): pengingat TIDAK lagi terbatas satu kali. Nudge
+        dikirim selama SEMUA terpenuhi:
+            - kebutuhan validasi terpenuhi (`validation_required`: keyword task
+              ATAU perubahan source/konfigurasi nyata),
             - ada perubahan relevan yang diterapkan (`_is_change_observation`),
             - belum ada bukti validasi sukses SETELAH perubahan terakhir,
-            - tidak ada kegagalan aktif pada observasi terakhir,
-            - nudge belum pernah dikirim pada task ini (maks 1x per task).
+            - jumlah nudge masih di bawah batas `_MAX_VERIFICATION_RECOVERIES`.
 
-        Ini BUKAN penentu completion: keputusan selesai tetap murni response
-        LLM. Nudge hanya memberi LLM kesempatan menghasilkan bukti yang kurang.
+        CATATAN: `last_observation_failed` (mis. validasi terakhir gagal) TIDAK
+        lagi menonaktifkan nudge. Sebaliknya kondisi kegagalan itu justru
+        disampaikan kepada LLM (lihat `_verification_nudge_message`) agar ia
+        mendapat kesempatan memperbaiki. Batas jumlah nudge menjaga loop tetap
+        berakhir (tidak infinite); penambahan jumlah nudge juga tetap dibatasi
+        `max_steps` karena nudge TIDAK mengeksekusi tool apa pun (keputusan dan
+        eksekusi tetap milik LLM pada round berikutnya).
+
+        Ini BUKAN penentu completion: ia hanya memberi LLM kesempatan (bounded)
+        menghasilkan bukti yang kurang sebelum completion gate menilai.
         """
-        if getattr(loop, "verification_nudge_sent", False):
+        sent = int(getattr(loop, "verification_recoveries", 0))
+        if sent >= _MAX_VERIFICATION_RECOVERIES:
             return False
         evidence = cls._verification_evidence(loop)
-        if not evidence["task_requires_validation"]:
+        if not evidence["validation_required"]:
             return False
         if not evidence["change_applied"]:
             return False
-        if evidence["validation_after_change"]:
-            return False
-        if evidence["last_observation_failed"]:
+        if evidence["validation_succeeded"]:
             return False
         return True
 
     @staticmethod
-    def _verification_nudge_message() -> Message:
+    def _verification_nudge_message(state: str = "not_run") -> Message:
         """Pesan nudge: minta LLM memeriksa/menghasilkan bukti yang kurang.
 
         TIDAK menyatakan task gagal, TIDAK menyimpulkan hasil, dan TIDAK
         menghentikan loop: hanya memberi tahu LLM bahwa bukti validasi setelah
-        perubahan terakhir belum terlihat, dan memintanya memutuskan langkah
-        berikutnya (jalankan verifikasi atau beri jawaban final).
+        perubahan terakhir belum terlihat (atau validasi terakhir GAGAL), dan
+        memintanya memutuskan langkah berikutnya.
+
+        Args:
+            state: `validation_state` dari `_verification_evidence`
+                ("not_run" | "failed"). Dipakai untuk menyampaikan kondisi
+                kegagalan validasi secara eksplisit (BUG-4) agar LLM dapat
+                memperbaikinya, bukan hanya "belum ada bukti".
         """
+        if state == "failed":
+            body = (
+                "Validasi terakhir yang dijalankan GAGAL (exit code/error "
+                "nonzero), sehingga perubahan terakhir belum terbukti benar. "
+                "Periksa penyebab kegagalan dan, bila perlu, perbaiki lalu "
+                "jalankan ulang validasi yang relevan."
+            )
+        else:
+            body = (
+                "Belum ada bukti eksekusi verifikasi/test yang berhasil SETELAH "
+                "perubahan terakhir. Periksa kembali dan, bila memang perlu, "
+                "jalankan verifikasi yang relevan (test, compile check, lint, "
+                "atau checker terkait) sehingga dampak perubahan terbukti."
+            )
         return Message(
             role="user",
             content=(
-                "[verification] Task ini meminta verifikasi, dan sebuah "
-                "perubahan sudah diterapkan. Belum ada bukti eksekusi "
-                "verifikasi/test yang berhasil SETELAH perubahan terakhir. "
-                "Periksa kembali dan, bila memang perlu, jalankan verifikasi "
-                "yang relevan sehingga dampak perubahan terbukti. Bila kamu "
-                "yakin bukti sudah cukup, berikan jawaban final."
+                "[verification] Task ini membutuhkan bukti validasi dan sebuah "
+                f"perubahan sudah diterapkan. {body} Bila kamu yakin bukti sudah "
+                "cukup, berikan jawaban final."
             ),
         )
+
+    @classmethod
+    def _completion_gate(cls, loop: AgentLoop) -> Dict[str, Any]:
+        """Evaluasi apakah completion (DONE) BOLEH ditetapkan (BUG-4).
+
+        Gate ini TIDAK menentukan pekerjaan yang harus dilakukan LLM (itu tetap
+        domain LLM); ia hanya memastikan DONE konsisten dengan permintaan user
+        dan bukti yang tersedia, bukan klaim teks.
+
+        Aturan (deterministik dari metadata step + requirement task):
+            1) Bila operasi UTAMA yang diminta GAGAL tanpa hasil pengganti
+               (`_requested_operation_failed`: kegagalan tool mutasi tanpa
+               perubahan yang benar-benar diterapkan, atau kegagalan command
+               validasi yang eksplisit diminta) -> DONE DITOLAK, walau tidak ada
+               perubahan yang terdeteksi. Ini menutup jalur `no_change_applied`
+               yang dulu membolehkan DONE palsu saat pembuatan artifact gagal.
+            2) Bila TIDAK ada perubahan nyata dan tidak ada operasi utama gagal
+               (konsultasi/analisis/read-only) -> DONE diizinkan.
+            3) Bila task tidak membutuhkan validasi -> DONE diizinkan.
+            4) Bila task membutuhkan validasi -> DONE HANYA bila ada bukti
+               validasi SUKSES (`_is_validation_observation`) setelah perubahan
+               terakhir.
+
+        Kegagalan SAMPINGAN (mis. read_file gagal pada task yang hasilnya tetap
+        tercapai) TIDAK otomatis menolak DONE.
+
+        Returns:
+            Dict dengan `allowed` (bool), `reason` (str), `validation_state`, dan
+            `evidence` (ringkasan `_verification_evidence` + fakta kegagalan).
+        """
+        evidence = cls._verification_evidence(loop)
+        requested_operation_failed = cls._requested_operation_failed(loop)
+        failure_step = cls._last_failure_step(loop)
+        evidence = dict(evidence)
+        evidence["requested_operation_failed"] = bool(requested_operation_failed)
+        evidence["last_failure_tool"] = (
+            cls._step_tool_name(failure_step) if failure_step is not None else ""
+        )
+        if requested_operation_failed:
+            # Operasi utama gagal dan hasil yang diminta belum tercapai:
+            # DONE TIDAK boleh, terlepas dari (tidak adanya) perubahan.
+            return {
+                "allowed": False,
+                "reason": "requested_operation_failed",
+                "validation_state": evidence["validation_state"],
+                "evidence": evidence,
+            }
+        if not evidence["change_applied"]:
+            # Tidak ada perubahan nyata pada task ini (konsultasi/analisis/
+            # read-only) -> tidak ada yang perlu divalidasi; DONE diizinkan.
+            return {
+                "allowed": True,
+                "reason": "no_change_applied",
+                "validation_state": evidence["validation_state"],
+                "evidence": evidence,
+            }
+        if not evidence["validation_required"]:
+            return {
+                "allowed": True,
+                "reason": "validation_not_required",
+                "validation_state": evidence["validation_state"],
+                "evidence": evidence,
+            }
+        if evidence["validation_succeeded"]:
+            return {
+                "allowed": True,
+                "reason": "validation_succeeded",
+                "validation_state": evidence["validation_state"],
+                "evidence": evidence,
+            }
+        state = evidence["validation_state"]
+        if state == "failed":
+            reason = "validation_failed"
+        else:
+            reason = "validation_not_run"
+        return {
+            "allowed": False,
+            "reason": reason,
+            "validation_state": state,
+            "evidence": evidence,
+        }
 
     def _completion_signal(self, response: LLMResponse) -> Optional[str]:
         """Teks final bila response membawa sinyal penyelesaian task.
@@ -1665,10 +2171,12 @@ class AgentOrchestrator:
         needs_validation = self._task_requires_validation(task)
         required_targets = self._task_target_files(task)
         required_features = self._task_requirement_features(task)
-
         change_applied = False
         validation_after_change = False
         satisfied_targets: set = set()
+        ambiguous_targets = set(
+            self._task_target_files_detailed(task)["ambiguous"]
+        )
         evidence_parts: List[str] = []
         last: Optional[AgentObservation] = None
 
@@ -1698,8 +2206,12 @@ class AgentOrchestrator:
         #    (test/validation) setelah perubahan terakhir.
         if needs_validation and not validation_after_change:
             return False
-        # 4) Semua artifact yang disebut task harus terpenuhi.
-        if required_targets and not required_targets.issubset(satisfied_targets):
+        # 4) Semua artifact yang JELAS disebut task harus terpenuhi. Target
+        #    AMBIGU (mis. "terima.md" dari frasa "berita acara serah terima.md")
+        #    TIDAK dijadikan satu-satunya alasan menolak completion: token
+        #    tersebut diterima bila artifact dengan nama itu memang dihasilkan.
+        missing_targets = required_targets - satisfied_targets
+        if missing_targets - ambiguous_targets:
             return False
         # 5) Fitur/aksi yang jelas diminta task harus punya evidence pada
         #    argumen action (konten/command). Requirement tanpa evidence ->
@@ -2598,11 +3110,24 @@ class AgentOrchestrator:
         # `provider_response_truncated` + `loop_truncation_abort` konsisten
         # dengan perilaku loop yang sebenarnya.
         truncation_abort = False
-        # Verification nudge (continuous loop): penanda "sudah dikirim" dibatasi
-        # MAKSIMAL SATU KALI per task. Hanya memicu LLM memeriksa/menghasilkan
-        # bukti validasi yang masih kurang; BUKAN keputusan completion dan tidak
-        # pernah menyatakan task gagal.
+        # Verification recovery (continuous loop, BOUNDED — BUG-4): penanda
+        # "sudah dikirim" + jumlah recovery. Completion gate memakai counter
+        # `verification_recoveries` untuk membatasi berapa kali LLM diberi
+        # kesempatan menghasilkan bukti validasi sebelum task dihentikan sebagai
+        # NON-SUKSES. Nudge sendiri TIDAK mengeksekusi tool apa pun.
         loop.verification_nudge_sent = False
+        # BUG-4: jumlah verification recovery yang sudah dikirim pada task ini.
+        # Digunakan untuk MENAKAR batas (bounded) recovery oleh completion gate.
+        loop.verification_recoveries = 0
+        # Apakah loop dihentikan oleh completion gate (validasi belum memadai)?
+        # HANYA untuk observability/evidence hasil; status terminal tetap FAILED
+        # dari `loop.fail()`.
+        completion_gate_abort = False
+        # Alasan gate (observability-only): mis. "validation_not_run",
+        # "validation_failed", atau "requested_operation_failed".
+        completion_gate_reason = ""
+        # Nama tool yang gagal pada kegagalan TERAKHIR (observability-only).
+        completion_gate_failure_tool = ""
         # Observability-only: hitung berapa kali retrieval terhadap RESOURCE YANG
         # SAMA diminta ulang dalam task ini (mis. read_file dengan path+range+mode
         # identik). Nilai ini TIDAK dipakai untuk mengubah eksekusi, dedup, cache,
@@ -2776,25 +3301,45 @@ class AgentOrchestrator:
                     # melanjutkan (minta tulis lebih bertahap).
                     history.append_user_message(self._truncation_message().content)
                     continue
-                # Verification nudge (continuous loop, MAKS 1x per task):
-                # bila task meminta verifikasi, ada perubahan relevan, dan belum
-                # ada bukti validasi setelah perubahan terakhir, beri LLM SATU
-                # kesempatan tambahan untuk memeriksa/menghasilkan bukti yang
-                # kurang. Ini TIDAK menyatakan gagal, TIDAK menentukan completion
-                # dari keyword/metadata, dan TIDAK memicu pada cancellation atau
-                # kegagalan provider (keduanya keluar via `break` di atas).
+                # Verification recovery + COMPLETION GATE (BUG-4):
+                # Permintaan final dari LLM TIDAK otomatis menjadi DONE bila task
+                # membutuhkan validasi dan bukti validasi sukses setelah
+                # perubahan terakhir belum ada. Gate ini TIDAK menentukan
+                # pekerjaan LLM; ia hanya memastikan DONE didukung bukti nyata.
+                #
+                # 1) Selama kesempatan recovery masih ada, kirim nudge (bounded,
+                #    MAKS `_MAX_VERIFICATION_RECOVERIES` kali): minta LLM
+                #    menjalankan validasi atau memperbaiki kegagalan. Bila
+                #    validasi terakhir GAGAL, kondisi kegagalan itu disampaikan
+                #    eksplisit. Nudge TIDAK mengeksekusi tool apa pun, sehingga
+                #    tidak menambah eksekusi di luar `max_steps`.
+                # 2) Bila kesempatan recovery habis dan bukti sukses tetap tidak
+                #    ada -> hentikan sebagai NON-SUKSES (FAILED, kontrak runtime
+                #    yang sudah ada) dengan alasan eksplisit; TIDAK ada DONE palsu.
+                # 3) Bila gate mengizinkan (validasi tidak diperlukan / sudah
+                #    sukses) -> DONE seperti semula (keputusan akhir tetap LLM).
                 # Change evidence (fakta filesystem): hasil perubahan NYATA task
                 # ini (created/modified/deleted) dilampirkan pada event nudge dan
-                # pada ringkasan evidence hasil run. Ini TIDAK menentukan
-                # completion: keputusan selesai tetap murni response LLM.
+                # pada ringkasan evidence hasil run.
                 change_snapshot = self._change_evidence_snapshot()
                 if self._needs_verification_nudge(loop):
+                    loop.verification_recoveries = int(
+                        getattr(loop, "verification_recoveries", 0)
+                    ) + 1
                     loop.verification_nudge_sent = True
+                    nudge_state = self._verification_evidence(loop)["validation_state"]
                     history.append_user_message(
-                        self._verification_nudge_message().content
+                        self._verification_nudge_message(nudge_state).content
                     )
                     nudge_payload: Dict[str, Any] = {
-                        "reason": "missing_validation_after_change",
+                        "reason": (
+                            "validation_failed"
+                            if nudge_state == "failed"
+                            else "missing_validation_after_change"
+                        ),
+                        "validation_state": nudge_state,
+                        "recovery": int(loop.verification_recoveries),
+                        "limit": int(_MAX_VERIFICATION_RECOVERIES),
                         "iteration": loop.iteration,
                     }
                     if change_snapshot is not None:
@@ -2807,6 +3352,57 @@ class AgentOrchestrator:
                         nudge_payload,
                     )
                     continue
+                gate = self._completion_gate(loop)
+                if not gate["allowed"]:
+                    # Task MEMBUTUHKAN validasi, kesempatan recovery habis, dan
+                    # bukti sukses tidak tersedia -> NON-SUKSES eksplisit.
+                    completion_gate_abort = True
+                    gate_reason = gate["reason"]
+                    completion_gate_reason = gate_reason
+                    completion_gate_failure_tool = (gate.get("evidence") or {}).get(
+                        "last_failure_tool", ""
+                    )
+                    gate_state = gate["validation_state"]
+                    if gate_reason == "validation_failed":
+                        detail = (
+                            "validasi yang dijalankan GAGAL (exit code/error "
+                            "nonzero) setelah perubahan terakhir"
+                        )
+                    elif gate_reason == "requested_operation_failed":
+                        failed_tool = (gate.get("evidence") or {}).get(
+                            "last_failure_tool"
+                        )
+                        detail = (
+                            "operasi utama yang diminta GAGAL "
+                            f"(tool '{failed_tool or 'unknown'}') dan hasil yang "
+                            "diminta belum tercapai"
+                        )
+                    else:
+                        detail = (
+                            "belum ada bukti validasi/test yang berhasil setelah "
+                            "perubahan terakhir"
+                        )
+                    loop.fail(
+                        "Completion ditolak oleh verification gate: task "
+                        f"membutuhkan validasi tetapi {detail}. Kesempatan "
+                        f"recovery sudah habis "
+                        f"({_MAX_VERIFICATION_RECOVERIES}x). Loop dihentikan "
+                        "oleh AETHER sebagai NON-SUKSES (bukan DONE); "
+                        "verifikasi/hasil belum memadai untuk dinyatakan selesai."
+                    )
+                    emit_event(
+                        self.event_sink,
+                        "verification_gate_blocked",
+                        {
+                            "reason": gate_reason,
+                            "validation_state": gate_state,
+                            "recoveries": int(
+                                getattr(loop, "verification_recoveries", 0)
+                            ),
+                            "iteration": loop.iteration,
+                        },
+                    )
+                    break
                 # Observability: fakta perubahan saat LLM menyatakan final.
                 if change_snapshot is not None:
                     emit_event(
@@ -2818,6 +3414,15 @@ class AgentOrchestrator:
                             "counts": change_snapshot.get("counts"),
                         },
                     )
+                emit_event(
+                    self.event_sink,
+                    "verification_gate_passed",
+                    {
+                        "reason": gate["reason"],
+                        "validation_state": gate["validation_state"],
+                        "iteration": loop.iteration,
+                    },
+                )
                 history.append_assistant_message(content=response.text or "")
                 loop.finish(result=response.text or "")
                 break
@@ -3139,6 +3744,21 @@ class AgentOrchestrator:
             evidence["max_steps_abort"] = True
             evidence["max_steps"] = int(max_steps)
             evidence["max_steps_dropped_tool_calls"] = int(batch_budget_dropped)
+        if completion_gate_abort:
+            # Fakta BUG-4: loop dihentikan completion gate karena bukti validasi
+            # tidak memadai setelah kesempatan recovery habis. Additive — TIDAK
+            # mengubah `status` (tetap FAILED dari `loop.fail()`).
+            evidence = dict(evidence)
+            evidence["verification_gate_blocked"] = True
+            evidence["verification_gate_reason"] = completion_gate_reason
+            if completion_gate_failure_tool:
+                evidence["last_failure_tool"] = completion_gate_failure_tool
+            evidence["verification_recoveries"] = int(
+                getattr(loop, "verification_recoveries", 0)
+            )
+            evidence["verification_recovery_limit"] = int(
+                _MAX_VERIFICATION_RECOVERIES
+            )
         return OrchestratorResult(
             status=loop.status,
             result=loop.state.result,

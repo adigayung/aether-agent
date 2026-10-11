@@ -41,7 +41,10 @@ if str(SRC_DIR) not in sys.path:
 
 from agent_ai.core.executor import ToolExecutor  # noqa: E402
 from agent_ai.core.models import AgentStatus  # noqa: E402
-from agent_ai.core.orchestrator import AgentOrchestrator  # noqa: E402
+from agent_ai.core.orchestrator import (  # noqa: E402
+    AgentOrchestrator,
+    _MAX_VERIFICATION_RECOVERIES,
+)
 from agent_ai.core.types import ToolResultPayload  # noqa: E402
 from agent_ai.providers.base import GenerateOptions, GenerateResult  # noqa: E402
 from agent_ai.providers.openai_compatible import (  # noqa: E402
@@ -132,15 +135,23 @@ def _make_orch(provider: ScriptedProvider, executor: ToolExecutor) -> AgentOrche
 
 
 def _nudge_messages(provider: ScriptedProvider) -> int:
-    """Jumlah pesan user yang membawa penanda verification nudge."""
-    count = 0
+    """Jumlah nudge yang DIKIRIM (bukan akumulasi lintas-request).
+
+    Pesan konteks bersifat kumulatif antar-request (percakapan tumbuh), sehingga
+    menghitung mentah akan melebih-lebihkan. Nilai yang benar = jumlah pesan
+    `[verification]` pada request TERBANYAK, yaitu total nudge yang dikirim.
+    """
+    best = 0
     for request in provider.requests:
-        for message in request:
-            if message.get("role") == "user" and str(
-                message.get("content") or ""
-            ).startswith("[verification]"):
-                count += 1
-    return count
+        count = sum(
+            1
+            for message in request
+            if isinstance(message, dict)
+            and message.get("role") == "user"
+            and str(message.get("content") or "").startswith("[verification]")
+        )
+        best = max(best, count)
+    return best
 
 
 # --------------------------------------------------------------------------- #
@@ -216,10 +227,15 @@ def scenario_a_metadata_forwarded() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# B) Nudge maksimal 1x + memberi LLM kesempatan tambahan
+# B) Verification recovery BOUNDED + completion gate (BUG-4)
+#
+# Kontrak BARU (menggantikan "nudge 1x lalu tetap DONE"):
+#   - Mutasi tanpa bukti validasi sukses -> completion gate MENAHAN DONE.
+#   - LLM diberi kesempatan recovery TERBATAS (_MAX_VERIFICATION_RECOVERIES).
+#   - Bila tetap tanpa bukti sukses -> status NON-SUKSES (FAILED), bukan DONE.
 # --------------------------------------------------------------------------- #
-def scenario_b_nudge_once_adds_turn() -> None:
-    """Task minta verifikasi: mutasi tanpa validasi -> nudge 1x lalu final."""
+def scenario_b_nudge_adds_turns_then_blocks() -> None:
+    """Task minta verifikasi: mutasi tanpa validasi -> nudge (bounded) lalu FAILED."""
     (FIXTURE / "keep.txt").write_text("x", encoding="utf-8")
     provider = ScriptedProvider(
         [
@@ -230,8 +246,6 @@ def scenario_b_nudge_once_adds_turn() -> None:
             ),
             # Turn 2: LLM langsung final tanpa validasi -> harus kena nudge.
             _final_turn("FINAL-PERTAMA"),
-            # Turn 3 (setelah nudge): jawaban final LLM.
-            _final_turn("FINAL-SETELAH-NUDGE"),
         ]
     )
     orch = _make_orch(provider, _executor())
@@ -240,20 +254,26 @@ def scenario_b_nudge_once_adds_turn() -> None:
         f"B. status={result.status.value} calls={provider.calls} "
         f"nudges={_nudge_messages(provider)}"
     )
-    assert result.status == AgentStatus.DONE, result.error
-    assert provider.calls == 3, f"nudge harus memberi 1 turn tambahan (calls={provider.calls})"
-    assert _nudge_messages(provider) == 1, "nudge harus tepat 1x"
-    # Teks final = jawaban LLM setelah kesempatan tambahan (verbatim).
-    assert result.result == "FINAL-SETELAH-NUDGE", result.result
+    # Completion gate: DONE DITOLAK karena tidak ada bukti validasi sukses.
+    assert result.status == AgentStatus.FAILED, result.error
+    assert result.status != AgentStatus.DONE
+    assert result.error is not None and "verification gate" in result.error, result.error
+    # Kesempatan recovery TERBATAS (bukan berulang tanpa batas).
+    assert _nudge_messages(provider) == _MAX_VERIFICATION_RECOVERIES, (
+        _nudge_messages(provider)
+    )
+    # 1 turn mutasi + N nudge + 1 respons final terakhir.
+    assert provider.calls == _MAX_VERIFICATION_RECOVERIES + 2, provider.calls
     assert result.evidence is not None, "evidence harus tersedia"
-    assert result.evidence["nudge_sent"] is True, result.evidence
-    assert result.evidence["task_requires_validation"] is True, result.evidence
+    assert result.evidence["validation_required"] is True, result.evidence
     assert result.evidence["change_applied"] is True, result.evidence
-    print("B. OK: nudge dikirim 1x dan memberi LLM kesempatan tambahan")
+    assert result.evidence["validation_succeeded"] is False, result.evidence
+    assert result.evidence["verification_gate_blocked"] is True, result.evidence
+    print("B. OK: nudge bounded + completion gate menahan DONE (FAILED jujur)")
 
 
-def scenario_b2_nudge_only_once_even_if_insists() -> None:
-    """LLM tetap final tanpa validasi: nudge TETAP hanya 1x (bukan berulang)."""
+def scenario_b2_recovery_bounded_even_if_insists() -> None:
+    """LLM tetap final tanpa validasi: recovery BOUNDED (tidak infinite loop)."""
     (FIXTURE / "keep2.txt").write_text("x", encoding="utf-8")
     provider = ScriptedProvider(
         [
@@ -264,16 +284,49 @@ def scenario_b2_nudge_only_once_even_if_insists() -> None:
             _final_turn("FINAL-1"),
             _final_turn("FINAL-2"),
             _final_turn("FINAL-3"),
+            _final_turn("FINAL-4"),
         ]
     )
     orch = _make_orch(provider, _executor())
     result = orch.run_continuous_loop("Buat file dan verifikasi.")
     print(f"B2. calls={provider.calls} nudges={_nudge_messages(provider)}")
+    # Tidak boleh infinite: jumlah recovery dibatasi, dan hasil NON-SUKSES.
+    assert result.status == AgentStatus.FAILED, result.error
+    assert _nudge_messages(provider) == _MAX_VERIFICATION_RECOVERIES, (
+        _nudge_messages(provider)
+    )
+    assert provider.calls == _MAX_VERIFICATION_RECOVERIES + 2, provider.calls
+    assert result.evidence["verification_gate_blocked"] is True, result.evidence
+    print("B2. OK: recovery bounded; DONE ditolak saat bukti validasi absen")
+
+
+def scenario_b3_successful_validation_allows_done() -> None:
+    """Mutasi + validasi sukses setelahnya -> DONE normal (gate lulus)."""
+    (FIXTURE / "keep3.txt").write_text("x", encoding="utf-8")
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                "Menulis.",
+                [_tool_call("c1", "write_file", {"path": "out3.txt", "content": "hi"})],
+            ),
+            _tool_turn(
+                "Verifikasi.",
+                [_tool_call("c2", "run_command", {"command": "python --version"})],
+            ),
+            _final_turn("FINAL-SUDAH-VERIFIKASI"),
+        ]
+    )
+    orch = _make_orch(provider, _executor())
+    result = orch.run_continuous_loop("Buat out3.txt lalu jalankan verifikasi.")
+    print(
+        f"B3. status={result.status.value} calls={provider.calls} "
+        f"nudges={_nudge_messages(provider)}"
+    )
     assert result.status == AgentStatus.DONE, result.error
-    assert _nudge_messages(provider) == 1, "nudge maksimal 1x per task"
-    assert provider.calls == 3, f"setelah 1 nudge loop selesai (calls={provider.calls})"
-    assert result.evidence["nudge_sent"] is True, result.evidence
-    print("B2. OK: nudge tidak diulang walau LLM tetap final tanpa validasi")
+    assert result.result == "FINAL-SUDAH-VERIFIKASI", result.result
+    assert _nudge_messages(provider) == 0, "validasi sukses: tanpa nudge"
+    assert result.evidence["validation_succeeded"] is True, result.evidence
+    print("B3. OK: validasi sukses setelah perubahan -> DONE diizinkan")
 
 
 # --------------------------------------------------------------------------- #
@@ -495,8 +548,9 @@ def main() -> int:
     failures: List[str] = []
     scenarios = [
         ("A", scenario_a_metadata_forwarded),
-        ("B", scenario_b_nudge_once_adds_turn),
-        ("B2", scenario_b2_nudge_only_once_even_if_insists),
+        ("B", scenario_b_nudge_adds_turns_then_blocks),
+        ("B2", scenario_b2_recovery_bounded_even_if_insists),
+        ("B3", scenario_b3_successful_validation_allows_done),
         ("C1", scenario_c_no_nudge_read_only),
         ("C2", scenario_c2_no_nudge_without_validation_request),
         ("C3", scenario_c3_no_nudge_when_validation_succeeded),
@@ -528,9 +582,11 @@ def main() -> int:
         return 1
 
     print(
-        "[OK] Evidence-Based Self-Verification: metadata tool diteruskan, nudge "
-        "maks 1x (read-only/tanpa-verifikasi/sudah-validasi tidak di-nudge), "
-        "cancellation & provider error tidak berubah, hasil runtime kompatibel."
+        "[OK] Evidence-Based Self-Verification: metadata tool diteruskan, "
+        "verification recovery BOUNDED + completion gate menahan DONE tanpa "
+        "bukti validasi (read-only/tanpa-verifikasi/sudah-validasi tidak "
+        "di-nudge), cancellation & provider error tidak berubah, hasil runtime "
+        "kompatibel."
     )
     return 0
 

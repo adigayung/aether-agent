@@ -205,8 +205,20 @@ def test_evidence_move_source_is_not_reported_deleted(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # Runtime jalur nyata (TaskExecutor -> AgentRuntime -> continuous loop)
 # --------------------------------------------------------------------------- #
-def _make_provider(tool_name: str, tool_args: Dict[str, Any]):
-    """Provider deterministik: 1 tool call lalu final (tanpa network)."""
+def _make_provider(
+    tool_name: str,
+    tool_args: Dict[str, Any],
+    *,
+    validation_command: Optional[str] = None,
+):
+    """Provider deterministik: 1 tool call lalu final (tanpa network).
+
+    Bila `validation_command` diberikan, provider menjalankan command validasi
+    (yang sukses) SETELAH mutasi dan sebelum final. Ini diperlukan sejak
+    completion gate BUG-4: perubahan source tanpa bukti validasi tidak lagi
+    otomatis DONE. Test ini menguji pelacakan perubahan, jadi ia menyertakan
+    langkah validasi agar jalur completion-nya sah.
+    """
 
     class FakeProvider(BaseProvider):
         name = "fake"
@@ -236,6 +248,20 @@ def _make_provider(tool_name: str, tool_args: Dict[str, Any]):
                     provider="fake",
                     model="fake-1",
                 )
+            if validation_command is not None and self.calls == 2:
+                return LLMResponse(
+                    text="",
+                    actions=[
+                        LLMAction(
+                            name="run_command",
+                            arguments={"command": validation_command},
+                            type=ActionType.TOOL_CALL,
+                        )
+                    ],
+                    finish_reason=FinishReason.TOOL_CALLS,
+                    provider="fake",
+                    model="fake-1",
+                )
             return LLMResponse(
                 text="selesai",
                 actions=[],
@@ -255,11 +281,15 @@ def _run_task(
     *,
     workspace_root: Optional[str] = None,
     cancel_token: Optional[Any] = None,
+    validation_command: Optional[str] = None,
 ):
     """Jalankan satu task lewat TaskExecutor (runtime + orchestrator NYATA).
 
     Tidak ada `runtime_factory` fake: test mengunci wiring runtime asli
     (AgentRuntime + continuous loop), dengan provider fake deterministik.
+
+    `validation_command` (opsional) menjalankan command validasi sukses sebelum
+    jawaban final, sehingga perubahan source memenuhi completion gate BUG-4.
     """
     store = InMemorySessionStore()
     session = store.create_session()
@@ -269,7 +299,9 @@ def _run_task(
     )
     executor = TaskExecutor(
         store,
-        provider_factory=lambda: _make_provider(tool_name, tool_args),
+        provider_factory=lambda: _make_provider(
+            tool_name, tool_args, validation_command=validation_command
+        ),
         permission_manager=pm,
     )
     prepared = PreparedTask(task="task perubahan file", task_id=task_id)
@@ -333,6 +365,8 @@ def test_runtime_edit_reports_change_evidence_metadata(tmp_path: Path) -> None:
         "edit_file",
         {"path": "app.py", "old_text": "value = 1", "new_text": "value = 2"},
         "task-ev-edit",
+        # Perubahan source (.py) memerlukan bukti validasi (BUG-4 gate).
+        validation_command="python -c \"print('ok')\"",
     )
 
     assert result["status"] == "completed", result

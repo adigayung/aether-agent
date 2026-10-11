@@ -197,15 +197,14 @@ def scenario_tool_error_then_continue(executor: ToolExecutor) -> None:
 
 
 def scenario_task_keywords_ignored(executor: ToolExecutor) -> None:
-    """Keyword task ('test'/'validasi') + nama file tidak memaksa step/keputusan.
+    """Keyword task + nama file tidak memaksa step/keputusan heuristic.
 
-    Catatan: sejak Evidence-Based Self-Verification, task yang meminta
-    verifikasi + punya perubahan relevan dapat menerima SATU verification nudge
-    (pesan user tambahan yang meminta LLM memeriksa/menghasilkan bukti). Nudge
-    ini BUKAN heuristic completion: ia hanya memberi LLM turn tambahan, dan
-    loop tetap selesai karena keputusan final LLM. Yang diuji di sini adalah
-    tidak adanya *pemutusan* loop akibat keyword (tidak ada result heuristic,
-    tidak ada paksa gagal).
+    Catatan (BUG-4): task yang secara eksplisit meminta verifikasi ('pastikan test
+    lulus') kini MEMANG membutuhkan bukti validasi lewat completion gate — itu
+    perilaku yang diinginkan, bukan heuristic completion. Karena itu skenario ini
+    memakai task TANPA permintaan verifikasi agar tetap menguji properti
+    utamanya: keyword/nama file tidak memaksa step tambahan dan tidak memutus
+    loop (loop berhenti hanya karena keputusan final LLM).
     """
     provider = ScriptedProvider(
         [
@@ -215,22 +214,42 @@ def scenario_task_keywords_ignored(executor: ToolExecutor) -> None:
         ]
     )
     orch = _make_orch(provider, executor)
-    result = orch.run("Tulis hello.txt dan pastikan test/validasi lulus.")
+    result = orch.run("Tulis hello.txt berisi z.")
     print(f"[D] status={result.status.value} calls={provider.calls} result={result.result!r}")
     assert result.status == AgentStatus.DONE, result.error
-    # Heuristic loop lama akan MENOLAK completion (butuh run_command test) dan
-    # tidak akan memakai result ini; continuous loop abaikan keyword tersebut.
-    assert provider.calls == 3, provider.calls
+    assert provider.calls == 2, provider.calls
     assert result.result == "done", result.result
     assert HEURISTIC_RESULT_MARKER not in (result.result or "")
-    # Pesan user tambahan yang diizinkan HANYA verification nudge (maks 1x);
-    # setelah itu loop selesai karena keputusan LLM, bukan heuristic.
+    # Tidak ada pesan user tambahan buatan AETHER (tanpa nudge).
     second = provider.requests[1]
     user_msgs = [m for m in second if m.get("role") == "user"]
-    nudges = [m for m in user_msgs if str(m.get("content") or "").startswith("[verification]")]
-    assert len(nudges) <= 1, nudges
-    assert len(user_msgs) - len(nudges) == 1, user_msgs
+    assert len(user_msgs) == 1, user_msgs
     print("OK: keyword/nama file task tidak memaksa step tambahan & tidak memutus loop")
+
+
+def scenario_validation_request_requires_evidence(executor: ToolExecutor) -> None:
+    """BUG-4: task minta verifikasi + perubahan -> DONE ditolak tanpa bukti test.
+
+    Sebelumnya keyword 'test'/'validasi' HANYA memicu nudge advisory 1x lalu
+    tetap DONE. Kini completion gate menahan DONE sampai ada bukti validasi
+    sukses setelah perubahan (atau recovery habis -> NON-SUKSES).
+    """
+    provider = ScriptedProvider(
+        [
+            _tool_turn("Tulis.", [_tool_call("c1", "write_file", {"path": "hello2.txt", "content": "z"})]),
+            _final_turn("done"),
+            _final_turn("done"),
+        ]
+    )
+    orch = _make_orch(provider, executor)
+    result = orch.run("Tulis hello2.txt dan pastikan test/validasi lulus.")
+    print(f"[F] status={result.status.value} calls={provider.calls}")
+    assert result.status != AgentStatus.DONE, result.result
+    assert result.status == AgentStatus.FAILED
+    assert result.error is not None and "verification gate" in result.error, result.error
+    assert result.evidence["validation_required"] is True, result.evidence
+    assert result.evidence["verification_gate_blocked"] is True, result.evidence
+    print("OK: permintaan verifikasi + tanpa bukti -> DONE ditolak (BUG-4 gate)")
 
 
 def scenario_forced_heuristic_ignored(executor: ToolExecutor) -> None:
@@ -296,6 +315,7 @@ def main() -> int:
         scenario_tool_success_then_tool_call(executor())
         scenario_tool_error_then_continue(executor())
         scenario_task_keywords_ignored(executor())
+        scenario_validation_request_requires_evidence(executor())
         scenario_forced_heuristic_ignored(executor())
         scenario_no_step_cap(executor())
     finally:
