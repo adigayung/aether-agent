@@ -95,12 +95,8 @@ button {
   width: 30px;
   height: 30px;
   border-radius: 8px;
-  display: grid;
-  place-items: center;
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  color: #0b0a12;
-  font-weight: 800;
-  font-size: 15px;
+  display: block;
+  object-fit: cover;
   flex: 0 0 auto;
 }
 .side-brand .name {
@@ -1215,10 +1211,8 @@ button {
   width: 30px;
   height: 30px;
   border-radius: 8px;
-  display: grid;
-  place-items: center;
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  color: #0b0a12;
+  display: block;
+  object-fit: cover;
   flex: 0 0 auto;
 }
 .consultant-card .ci-body {

@@ -45,6 +45,10 @@ import ProjectPolicyPanel from "./components/ProjectPolicyPanel.vue";
 import ConsultantChat from "./components/ConsultantChat.vue";
 import ExtensionManager from "./components/ExtensionManager.vue";
 import { getHealth } from "./api.js";
+// Aset gambar dari <repo-root>/assets/icons/** (Vite membundel import ini,
+// sama seperti pola audioRegistry.js). TIDAK ada publicDir/alias baru.
+import aetherLogoIcon from "../../../assets/icons/icon.jpg";
+import consultantLogoIcon from "../../../assets/icons/konsultan.jpg";
 // Helper murni presentasi (dipakai langsung oleh template).
 import { formatTs, statusTagClass } from "./taskHistory.js";
 import { ACTIVE_TASK_STATES, executionLabel } from "./executionMode.js";
@@ -466,7 +470,7 @@ const { editorOpen, editorFile, openFileInEditor, closeCodeEditor, onEditorError
     <!-- ===================== SIDEBAR ===================== -->
     <aside class="sidebar">
       <div class="side-brand">
-        <span class="logo">A</span>
+        <img class="logo" :src="aetherLogoIcon" alt="AETHER" />
         <div>
           <div class="name">AETHER</div>
           <div class="sub">WORKBENCH</div>
@@ -541,7 +545,7 @@ const { editorOpen, editorFile, openFileInEditor, closeCodeEditor, onEditorError
            TIDAK memblokir apa pun: klik selalu membuka Consultant dan sesi
            tetap dapat dilanjutkan / task baru tetap dapat diantrikan. -->
       <div class="consultant-card" :class="{ running: isRunning }" @click="openConsultant">
-        <svg class="ci" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a4 4 0 0 1 4 4c0 1.95-1.4 3.58-3.25 3.93L12 22l-.75-12.07A4.001 4.001 0 0 1 12 2z"/><circle cx="12" cy="6" r="1.5" fill="currentColor" stroke="none"/><path d="M9 14l-3 3 3 3M15 14l3 3-3 3"/></svg>
+        <img class="ci" :src="consultantLogoIcon" alt="AETHER Consultant" />
         <div class="ci-body">
           <div class="ci-title">AETHER Consultant</div>
           <div class="ci-sub">Chat with the AI assistant</div>
