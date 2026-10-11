@@ -144,11 +144,18 @@ class TaskRecord:
     error: Optional[str] = None
     runtime: Dict[str, Any] = field(default_factory=dict)
     # Status antrian (TAMPILAN/kontrol UI), TERPISAH dari `status` lifecycle.
-    # Nilai: "pending" | "running" | "disabled" | "done".
+    # Nilai: "pending" | "running" | "cancelling" | "disabled" | "done".
     # SENGAJA bukan bagian dari enum TaskStatus core / TERMINAL_STATUSES, agar
     # TaskState/TaskLifecycle/.aether/log/SSE/task history tidak terpengaruh.
-    # Pada tahap ini belum ada scheduler serial: nilai queue_state hanya
-    # merepresentasikan niat user (mis. disable = jangan dieksekusi).
+    #
+    # "cancelling" = pembatalan SUDAH diminta (status lifecycle = cancelled untuk
+    # responsivitas UI) tetapi lifecycle eksekusinya BELUM benar-benar selesai:
+    # thread daemon masih unwind pada safe boundary dan SLOT EKSEKUSI MASIH
+    # TERPAKAI. Selama "cancelling" task tetap terhitung sebagai pemakai slot
+    # (tidak boleh dipromosikan ulang/digeser/dihapus) sampai `_execute_task`
+    # melepas slot di `finally` -> "done". Ini mencegah eksekusi ditandai
+    # "selesai" sebelum lifecycle-nya benar-benar selesai (dan mencegah UI
+    # kehilangan informasi bahwa slot masih terpakai).
     queue_state: str = "pending"
     # Urutan posisi di antrian (FIFO by creation; Move Up/Down mengubah nilai).
     queue_order: int = 0
@@ -1915,7 +1922,8 @@ class GatewayService:
             # Cek apakah ada slot tersedia di parallel pool
             parallel_running = sum(
                 1 for t in self._tasks.values()
-                if t.execution_mode == "parallel" and t.queue_state == "running"
+                if t.execution_mode == "parallel"
+                and t.queue_state in ("running", "cancelling")
             )
             if parallel_running >= self._parallel_concurrency:
                 # Slot penuh - task tetap pending, akan dipromosikan saat slot bebas
@@ -1936,10 +1944,12 @@ class GatewayService:
 
         while True:
             with self._lock:
-                # Hitung task parallel yang sedang running
+                # Hitung task parallel yang sedang running (termasuk yang sedang
+                # dalam proses pembatalan: slot-nya BELUM benar-benar bebas).
                 parallel_running = sum(
                     1 for t in self._tasks.values()
-                    if t.execution_mode == "parallel" and t.queue_state == "running"
+                    if t.execution_mode == "parallel"
+                    and t.queue_state in ("running", "cancelling")
                 )
                 if parallel_running >= self._parallel_concurrency:
                     return  # Pool penuh
@@ -1998,8 +2008,11 @@ class GatewayService:
         with self._lock:
             # [1] Slot serial HANYA ditempati task QUEUE. Parallel tidak
             #     memblokir slot queue dan tidak dibatasi jumlahnya.
+            #     "cancelling" juga menempati slot: pembatalan sudah diminta,
+            #     tetapi lifecycle eksekusi belum benar-benar selesai.
             has_queue_running = any(
-                r.queue_state == "running" and r.execution_mode == "queue"
+                r.queue_state in ("running", "cancelling")
+                and r.execution_mode == "queue"
                 for r in self._tasks.values()
             )
             has_queue_token = any(
@@ -2091,13 +2104,14 @@ class GatewayService:
                 # (hindari menahan base64 di memori).
                 self._task_attachments.pop(task_id, None)
                 rec = self._tasks.get(task_id)
-                # Bila runtime crash tanpa pernah mengirim status terminal,
-                # jangan biarkan slot "nyangkut" running selamanya.
-                if rec is not None and rec.queue_state == "running":
-                    if rec.status in ("completed", "failed", "cancelled"):
-                        rec.queue_state = "done"
-                    else:
-                        rec.queue_state = "done"
+                # Runtime benar-benar berhenti: slot dilepas di sini. Termasuk
+                # task yang sebelumnya "cancelling" (pembatalan diminta selagi
+                # running) — baru SEKARANG eksekusinya boleh ditandai selesai.
+                # Ini juga menjamin slot tidak "nyangkut" running/cancelling
+                # selamanya bila runtime crash tanpa pernah mengirim status
+                # terminal.
+                if rec is not None and rec.queue_state in ("running", "cancelling"):
+                    rec.queue_state = "done"
                 # Simpan execution_mode sebelum keluar lock
                 exec_mode = rec.execution_mode if rec else "queue"
             # Slot bebas -> pump scheduler yang sesuai:
@@ -2331,8 +2345,20 @@ class GatewayService:
         *,
         result: Optional[str] = None,
         error: Optional[str] = None,
+        release_slot: bool = True,
     ) -> None:
-        """Update status/result/error sebuah TaskRecord (thread-safe)."""
+        """Update status/result/error sebuah TaskRecord (thread-safe).
+
+        Args:
+            release_slot: bila False, status terminal (cancelled) TIDAK
+                melepaskan slot antrian (queue_state tetap menandai slot
+                terpakai) — dipakai saat pembatalan diminta untuk task yang
+                MASIH running: status lifecycle boleh langsung cancelled agar
+                UI responsif, tetapi lifecycle eksekusinya belum selesai dan
+                slot BELUM boleh dianggap bebas. Pelepasan slot dilakukan oleh
+                `_execute_task` di `finally` setelah runtime benar-benar
+                berhenti.
+        """
         with self._lock:
             record = self._tasks.get(task_id)
             if record is None:
@@ -2347,7 +2373,12 @@ class GatewayService:
             if status == "running":
                 record.queue_state = "running"
             elif status in ("completed", "failed", "cancelled"):
-                record.queue_state = "done"
+                if release_slot:
+                    record.queue_state = "done"
+                elif record.queue_state == "running":
+                    # Pembatalan diminta selagi eksekusi masih berjalan: slot
+                    # MASIH terpakai sampai `_execute_task` melepasnya.
+                    record.queue_state = "cancelling"
 
     def _emit(
         self,
@@ -2466,7 +2497,7 @@ class GatewayService:
     # proyeksi UI dari TaskRecord (pending/running/disabled/done) + niat user
     # (disable = jangan dieksekusi). TIDAK ada TaskManager/queue subsystem
     # kedua: sumber data tetap self._tasks (satu queue GLOBAL AETHER).
-    _QUEUE_ACTIVE = ("pending", "running", "disabled")
+    _QUEUE_ACTIVE = ("pending", "running", "cancelling", "disabled")
 
     def list_queue(self, project_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Daftar antrian task (aktif saja: pending/running/disabled).
@@ -2523,6 +2554,10 @@ class GatewayService:
                 raise _ValidationError(
                     "Task sedang berjalan; gunakan Stop (cancel) untuk menghentikannya."
                 )
+            if record.queue_state == "cancelling":
+                raise _ValidationError(
+                    "Task sedang dihentikan; tunggu pembatalan selesai."
+                )
             if queue_state not in ("pending", "disabled"):
                 raise _ValidationError("queue_state harus 'pending' atau 'disabled'.")
             record.queue_state = queue_state
@@ -2560,7 +2595,7 @@ class GatewayService:
             record = self._tasks.get(task_id)
             if record is None:
                 raise NotFoundError(f"Task '{task_id}' tidak ditemukan.")
-            if record.queue_state in ("running", "done"):
+            if record.queue_state in ("running", "cancelling", "done"):
                 raise _ValidationError(
                     "Hanya task yang belum berjalan yang dapat digeser di antrian."
                 )
@@ -2586,10 +2621,13 @@ class GatewayService:
 
         Ini BUKAN cancel: cancel memakai CancellationToken existing. Remove
         hanya membuang task yang belum berjalan dari daftar in-memory.
+        Task "cancelling" juga ditolak: pembatalannya sudah diminta dan
+        lifecycle eksekusinya belum benar-benar selesai (remove akan
+        menghilangkan record yang masih dipakai thread eksekusi).
 
         Raises:
             NotFoundError: bila task tidak ditemukan.
-            ValidationError: bila task sedang berjalan.
+            ValidationError: bila task sedang berjalan / sedang dihentikan.
         """
         from api.services import ValidationError as _ValidationError
 
@@ -2602,6 +2640,12 @@ class GatewayService:
                 self._tasks[task_id] = record
                 raise _ValidationError(
                     "Task sedang berjalan; gunakan Stop (cancel), bukan Remove."
+                )
+            if record.queue_state == "cancelling":
+                # Kembalikan: pembatalan belum benar-benar selesai.
+                self._tasks[task_id] = record
+                raise _ValidationError(
+                    "Task sedang dihentikan; tunggu pembatalan selesai."
                 )
             self._prepared.pop(task_id, None)
             self._cancel_tokens.pop(task_id, None)
@@ -2941,8 +2985,12 @@ class GatewayService:
 
         # Hanya task yang belum terminal yang bisa dibatalkan. Task yang sudah
         # COMPLETED/FAILED tetap pada statusnya (tidak diubah menjadi CANCELLED).
+        # Respons menandai bahwa pembatalan TIDAK diterima (task sudah terminal).
         if record.status in ("completed", "failed", "cancelled"):
-            return record.to_dict()
+            out = record.to_dict()
+            out["cancel_accepted"] = False
+            out["cancel_pending"] = False
+            return out
 
         # 1) Sinyal kooperatif: Agent loop berhenti di safe boundary.
         if token is not None:
@@ -2954,16 +3002,26 @@ class GatewayService:
         except Exception:  # noqa: BLE001 - cleanup tidak boleh gagal cancel
             pass
         # 2) Status record gateway langsung CANCELLED (UI/HTTP responsif).
-        #    Ini juga menyetel queue_state="done" (via _update_task_status),
-        #    sehingga task keluar dari antrian aktif.
-        self._update_task_status(task_id, "cancelled")
-        # Bila task yang dibatalkan BELUM running (tidak ada token), slot tidak
+        #    PENTING: untuk task yang MASIH running (token ada), slot TIDAK
+        #    dilepas di sini. Lifecycle eksekusi belum selesai (thread daemon
+        #    masih unwind pada safe boundary), jadi queue_state dipertahankan
+        #    sebagai "cancelling" (slot masih terpakai). Pelepasan slot yang
+        #    sebenarnya dilakukan `_execute_task` di `finally` -> "done".
+        #    Task yang BELUM running (token None) memang tidak pernah memakai
+        #    slot -> langsung "done" dan keluar dari antrian aktif.
+        self._update_task_status(task_id, "cancelled", release_slot=token is None)
+        # Task yang dibatalkan BELUM running (tidak ada token), slot tidak
         # pernah terpakai — tetap pump agar antrian bergerak sesuai urutan.
         # Bila task sedang running, slot dilepas oleh _execute_task (finally)
         # setelah cancellation mencapai terminal state.
         if token is None and self.auto_execute:
             self._scheduler_pump()
-        return self.get_task(task_id)
+        out = self.get_task(task_id)
+        # Respons API mencerminkan apakah pembatalan BENAR-BENAR diterima
+        # (baru/di-request) atau task sudah terminal sebelumnya (no-op).
+        out["cancel_accepted"] = True
+        out["cancel_pending"] = token is not None
+        return out
 
     # ------------------------------------------------------------------ #
     # Consultant (AETHER reasoning layer — read-only terhadap CODE PROJECT)

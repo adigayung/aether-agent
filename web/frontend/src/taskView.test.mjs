@@ -10,6 +10,7 @@
 
 import assert from "node:assert/strict";
 import {
+  isQueueSlotOccupied,
   isViewedTaskRunning,
   shouldAdoptSubmittedTask,
   shouldFollowStartedTask,
@@ -22,6 +23,24 @@ const B = "task-b";
 assert.equal(isViewedTaskRunning(A, A), true);
 assert.equal(isViewedTaskRunning(A, B), false);
 assert.equal(isViewedTaskRunning("", ""), false, "idle bukan running");
+
+// --- isQueueSlotOccupied: slot terpakai mencakup task yang SEDANG dibatalkan --
+// task "running" jelas menempati slot.
+assert.equal(isQueueSlotOccupied("running"), true);
+// task "cancelling": pembatalan sudah diminta tetapi lifecycle eksekusinya BELUM
+// selesai -> slot MASIH terpakai (UI Stop harus tetap menunjuk task ini).
+assert.equal(
+  isQueueSlotOccupied("cancelling"),
+  true,
+  "task cancelling masih menempati slot eksekusi"
+);
+// Task yang tidak menempati slot (di antrian / nonaktif / sudah selesai).
+assert.equal(isQueueSlotOccupied("pending"), false);
+assert.equal(isQueueSlotOccupied("disabled"), false);
+assert.equal(isQueueSlotOccupied("done"), false);
+assert.equal(isQueueSlotOccupied(""), false);
+assert.equal(isQueueSlotOccupied(undefined), false);
+assert.equal(isQueueSlotOccupied("  RUNNING "), true, "normalisasi case/spasi");
 
 // --- shouldAdoptSubmittedTask: skenario bug utama ----------------------------
 // A RUNNING (dipantau) -> submit B pending -> JANGAN adopsi B.

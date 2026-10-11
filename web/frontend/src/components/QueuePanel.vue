@@ -16,6 +16,7 @@ import {
   moveQueueTask,
   removeQueueTask,
 } from "../api.js";
+import { isQueueSlotOccupied } from "../taskView.js";
 
 const props = defineProps({
   // Penanda refresh dari parent (mis. setelah Run Task / event terminal).
@@ -47,17 +48,19 @@ const ctxMenu = ref(null);
 const ctxTask = ref(null);
 
 const runningCount = computed(
-  () => tasks.value.filter((t) => t.queue_state === "running").length
+  () => tasks.value.filter((t) => isQueueSlotOccupied(t.queue_state)).length
 );
 
 function runLabel(t) {
   if (t.queue_state === "running") return "RUNNING";
+  if (t.queue_state === "cancelling") return "STOPPING";
   if (t.queue_state === "disabled") return "DISABLED";
   return "PENDING";
 }
 
 function stateIcon(t) {
   if (t.queue_state === "running") return "●";
+  if (t.queue_state === "cancelling") return "◍";
   if (t.queue_state === "disabled") return "◌";
   return "①";
 }
@@ -222,8 +225,8 @@ function ctxStop() {
 }
 
 // Klik kiri pada item task: HANYA task yang benar-benar RUNNING (queue_state
-// dari queue API) yang dapat dibuka di Latest Task. Task pending/disabled
-// diabaikan — klik kanan tetap tersedia untuk aksi queue management lain.
+// dari queue API) yang dapat dibuka di Latest Task. Task pending/disabled/
+// cancelling diabaikan — klik kanan tetap tersedia untuk aksi queue lain.
 function onTaskClick(t) {
   if (!t || t.queue_state !== "running") return;
   emit("view-task", t);
@@ -325,6 +328,11 @@ watch(
       <div class="ctx-sep"></div>
       <template v-if="ctxTask.queue_state === 'running'">
         <div class="ctx-item" @click="ctxStop()">Stop</div>
+      </template>
+      <template v-else-if="ctxTask.queue_state === 'cancelling'">
+        <!-- Pembatalan sudah diminta; lifecycle eksekusi belum selesai dan slot
+             masih terpakai -> tidak ada aksi lain (bukan disable/remove). -->
+        <div class="ctx-item ctx-disabled">Stopping…</div>
       </template>
       <template v-else>
         <div class="ctx-item" @click="ctxMove('up')">Move Up</div>

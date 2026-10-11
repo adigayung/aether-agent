@@ -20,6 +20,22 @@ export function isViewedTaskRunning(viewedTaskId, runningTaskId) {
 }
 
 /**
+ * Apakah task ini masih MENEMPATI slot eksekusi (belum melepasnya)?
+ *
+ * - `running`    : sedang dieksekusi.
+ * - `cancelling` : pembatalan sudah diminta (status lifecycle = cancelled untuk
+ *                  responsivitas UI) tetapi lifecycle eksekusinya BELUM benar-
+ *                  benar selesai -> SLOT MASIH TERPAKAI.
+ *
+ * Dipakai agar UI tidak kehilangan informasi bahwa slot masih terpakai dan
+ * agar tombol Stop tetap menunjuk task yang benar selama proses pembatalan.
+ */
+export function isQueueSlotOccupied(queueState) {
+  const s = String(queueState || "").trim().toLowerCase();
+  return s === "running" || s === "cancelling";
+}
+
+/**
  * Boleh task yang BARU dibuat langsung menggantikan task yang sedang dipantau?
  *
  * - `queue_state === "running"`: task ini langsung mendapat slot -> YA.

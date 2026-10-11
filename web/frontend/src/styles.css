@@ -1171,6 +1171,15 @@ button {
   background: rgba(255, 255, 255, 0.06);
   color: #fff;
 }
+.ctx-item.ctx-disabled {
+  /* Item non-aksi (mis. "Stopping…"): tidak dapat diklik. */
+  color: var(--text-dim);
+  cursor: default;
+}
+.ctx-item.ctx-disabled:hover {
+  background: transparent;
+  color: var(--text-dim);
+}
 .ctx-sep {
   height: 1px;
   background: var(--border);
@@ -3648,6 +3657,12 @@ tr:hover .q-copy-btn.hist-copy {
   /* Klik kiri pada task RUNNING membuka task di Latest Task. */
   cursor: pointer;
 }
+.q-item.cancelling {
+  /* Pembatalan sudah diminta, tetapi slot eksekusi BELUM dilepas. Tampilkan
+     sebagai "masih berjalan" (bukan pending/free) agar tidak menyesatkan. */
+  border-color: rgba(248, 113, 113, 0.4);
+  background: rgba(248, 113, 113, 0.07);
+}
 .q-item.disabled {
   opacity: 0.5;
 }
@@ -3658,6 +3673,7 @@ tr:hover .q-copy-btn.hist-copy {
   line-height: 1;
 }
 .q-ico.running { color: var(--accent-2); }
+.q-ico.cancelling { color: rgb(248, 113, 113); }
 .q-ico.pending { color: var(--accent); }
 .q-ico.disabled { color: var(--text-faint); }
 
@@ -3701,6 +3717,7 @@ tr:hover .q-copy-btn.hist-copy {
   text-transform: uppercase;
 }
 .q-state-sm.running { color: var(--accent-2); }
+.q-state-sm.cancelling { color: rgb(248, 113, 113); }
 .q-state-sm.pending { color: var(--accent); }
 .q-state-sm.disabled { color: var(--text-dim); }
 .q-pos {

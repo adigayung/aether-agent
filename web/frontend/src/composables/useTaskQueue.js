@@ -1,6 +1,6 @@
 import { computed, ref } from "vue";
 import { cancelTask, listTaskQueue } from "../api.js";
-import { isViewedTaskRunning, shouldFollowStartedTask } from "../taskView.js";
+import { isQueueSlotOccupied, isViewedTaskRunning, shouldFollowStartedTask } from "../taskView.js";
 import { normalizeExecutionMode } from "../executionMode.js";
 
 // Queue & "task yang dipantau" (Global Task Queue AETHER — SATU sumber
@@ -74,8 +74,11 @@ export function useTaskQueue({
       queueItems.value = items;
       // Jangan anggap "running" task yang sudah kita ketahui terminal: respons
       // antrian bisa saja masih memuat status lama tepat setelah task selesai.
+      // Slot juga masih dianggap terpakai selama task "cancelling" (pembatalan
+      // sudah diminta tetapi lifecycle eksekusinya belum selesai) sehingga
+      // tombol Stop tetap menunjuk task yang benar.
       const running = items.find(
-        (t) => t.queue_state === "running" && t.task_id !== terminalTaskId.value
+        (t) => isQueueSlotOccupied(t.queue_state) && t.task_id !== terminalTaskId.value
       );
       // Fallback follow: bila scheduler sudah menjalankan task yang kita antrikan
       // (deferred) sementara kita TIDAK memantau task running mana pun -> ikuti
