@@ -5,11 +5,18 @@
 // Card yang sudah dihitung App.vue. TIDAK ada sumber data baru, TIDAK ada
 // panggilan backend, TIDAK mengubah cara activity dikumpulkan/dikirim.
 //
-// Batas keras: hasil akhir ≤ AGENT_ACTIVITY_COPY_MAX_CHARS (45.000 karakter).
-// Bila activity terlalu besar, baris PALING LAMA dibuang lebih dulu (daftar
-// baris tersusun kronologis, termuda di akhir) dan diberi penanda
-// "[... earlier activity truncated ...]" agar LLM tahu ada bagian yang tidak
-// ikut dicopy. [REPEATED ACTIVITY] selalu berada paling bawah.
+// Struktur: [AGENT] -> [ACTIVITY] -> [FINAL REPORT] -> [REPEATED ACTIVITY].
+//
+// Batas panjang (AGENT_ACTIVITY_COPY_MAX_CHARS = 45.000 karakter) berlaku untuk
+// bagian yang BOLEH dipangkas: baris ACTIVITY. Bila terlalu besar, baris PALING
+// LAMA dibuang lebih dulu (daftar tersusun kronologis, termuda di akhir) dan
+// diberi penanda "[... earlier activity truncated ...]" agar penerima tahu ada
+// bagian yang tidak ikut dicopy.
+//
+// [FINAL REPORT] = laporan akhir Agent yang SAMA dengan yang dirender di box
+// hasil user (dari event `task_completed.payload.result`) dan TIDAK PERNAH
+// dipotong/diringkas; total output boleh melewati batas bila laporannya sendiri
+// lebih panjang dari batas (lebih baik utuh daripada laporan terpotong diam-diam).
 
 export const AGENT_ACTIVITY_COPY_MAX_CHARS = 45000;
 
@@ -204,6 +211,35 @@ function buildRepeatedSection(events) {
   return `[REPEATED ACTIVITY]\n\n${body}`;
 }
 
+// Final Agent Report dari event terminal task yang sedang dicopy.
+// Kontrak backend (SUDAH ADA, tidak diubah di sini): event `task_completed`
+// membawa payload/`data` `result` = teks laporan akhir UTUH sampai ke user
+// (lihat runtime._lifecycle_finalize -> {"result": report_text}, disanitasi
+// sebagai VerbatimText). Diambil HANYA dari event task_completed pada daftar
+// events task ini -> tidak pernah memakai laporan task lain / laporan lama.
+// Return null bila task tidak punya laporan akhir (mis. masih running/gagal)
+// sehingga TIDAK ada laporan palsu yang ditampilkan.
+function extractFinalReport(events) {
+  const list = Array.isArray(events) ? events : [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const e = normalizeEvent(list[i]);
+    if (e.type !== "task_completed") continue;
+    const d = e.data || {};
+    const raw = d.result != null ? d.result : d.report;
+    const text = typeof raw === "string" ? raw : "";
+    if (text.trim()) return text;
+  }
+  return null;
+}
+
+function buildFinalReportSection(events) {
+  const report = extractFinalReport(events);
+  // Teks laporan disalin APA ADANYA (tanpa slice/ellipsis/ringkasan) agar
+  // Markdown, heading, tabel, code block, baris baru, dan bagian paling akhir
+  // (sentinel) tetap utuh.
+  return report == null ? null : ["[FINAL REPORT]", "", report].join("\n");
+}
+
 // Bagian [AGENT]: hanya baris yang nilainya ada (provider/model/duration dll
 // bisa kosong untuk task yang belum sempat menjalankan provider).
 function buildAgentHeader(meta) {
@@ -226,12 +262,21 @@ function buildAgentHeader(meta) {
   return ["AETHER AGENT ACTIVITY", "", "[AGENT]", ...rows].join("\n");
 }
 
-// Snapshot lengkap Agent Activity untuk clipboard, ≤ MAX characters.
-// Aktivitas PALING LAMA dibuang lebih dulu bila melebihi batas.
+// Snapshot lengkap Agent Activity untuk clipboard.
+// Urutan: [AGENT] -> [ACTIVITY] -> [FINAL REPORT] -> [REPEATED ACTIVITY].
+//
+// Kebijakan batas (AGENT_ACTIVITY_COPY_MAX_CHARS):
+//   - Metadata [AGENT] selalu dipertahankan.
+//   - [FINAL REPORT] selalu disalin UTUH (tidak pernah dipotong/diringkas).
+//   - Bila total melebihi batas, yang dikorbankan adalah AKTIVITAS PALING LAMA
+//     (baris teratas) + penanda truncation, bukan laporan akhir.
+//   - Karena laporan akhir dipertahankan utuh, total hasil boleh melebihi batas
+//     ketika laporannya sendiri lebih panjang dari batas.
 export function buildAgentActivityCopy({ events, meta }) {
   const list = Array.isArray(events) ? events : [];
   const headerBlock = buildAgentHeader(meta);
   const repeatedBlock = buildRepeatedSection(list);
+  const finalReportBlock = buildFinalReportSection(list);
   const activityLines = formatActivityLines(list);
 
   let kept = activityLines.slice();
@@ -239,21 +284,23 @@ export function buildAgentActivityCopy({ events, meta }) {
 
   const assemble = () => {
     const body = truncated ? ["[... earlier activity truncated ...]", ...kept] : kept;
-    return [headerBlock, ["[ACTIVITY]", "", ...body].join("\n"), repeatedBlock].join("\n\n");
+    return [
+      headerBlock,
+      ["[ACTIVITY]", "", ...body].join("\n"),
+      finalReportBlock,
+      repeatedBlock,
+    ]
+      .filter((block) => block != null)
+      .join("\n\n");
   };
 
   let text = assemble();
+  // Pangkas aktivitas PALING LAMA (paling atas) sampai muat. `kept` hanya
+  // berisi baris ACTIVITY -> metadata & laporan akhir TIDAK pernah ikut dibuang.
   while (text.length > AGENT_ACTIVITY_COPY_MAX_CHARS && kept.length > 0) {
-    kept.shift(); // buang baris PALING LAMA (paling atas)
+    kept.shift();
     truncated = true;
     text = assemble();
-  }
-
-  // Jaminan absolut: hasil akhir TIDAK PERNAH > MAX (bahkan bila repeated
-  // activity ekstrem sehingga tidak ada satu pun baris activity yang muat).
-  const TAIL_MARKER = "\n[... output truncated for length ...]";
-  if (text.length > AGENT_ACTIVITY_COPY_MAX_CHARS) {
-    text = `${text.slice(0, AGENT_ACTIVITY_COPY_MAX_CHARS - TAIL_MARKER.length)}${TAIL_MARKER}`;
   }
   return text;
 }
