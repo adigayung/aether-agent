@@ -154,12 +154,15 @@ class LLMResponse:
         raw: response mentah provider untuk debugging/audit.
         provider: nama provider asal (opsional).
         model: nama model (opsional).
-        truncated: True bila response provider terpotong (finish_reason=length)
-            sehingga ada tool-call yang argumennya tidak lengkap dan DIBUANG
-            (bukan file parsial). Dipakai caller untuk memperlakukan kondisi ini
-            sebagai recoverable, bukan sebagai jawaban final.
+        truncated: True bila response provider terpotong
+            (finish_reason="length"): output model TIDAK lengkap, entah karena
+            tool-call yang argumennya tidak lengkap DIBUANG (bukan file parsial)
+            maupun karena hanya teks yang terpotong tanpa tool-call yang dibuang.
+            Dipakai caller untuk memperlakukan kondisi ini sebagai recoverable
+            (bounded), bukan sebagai jawaban final.
         incomplete_tool_calls: jumlah tool-call yang dibuang karena argumennya
-            terpotong (JSON tidak lengkap). 0 bila tidak ada.
+            terpotong (JSON tidak lengkap). 0 bila tidak ada. Rincian
+            observability — BUKAN penentu apakah `truncated` bernilai True.
     """
 
     text: str = ""

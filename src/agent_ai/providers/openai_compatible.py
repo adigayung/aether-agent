@@ -498,10 +498,15 @@ class OpenAICompatibleProvider(BaseProvider):
         ProviderResponseError yang jelas (bukan crash tersembunyi) — KECUALI
         bila response memang TERPOTONG oleh batas token (finish_reason=length):
         dalam kasus itu tool-call yang argumennya tidak lengkap DIBUANG (tidak
-        ditebak/diperbaiki) dan ditandai `truncated` agar caller dapat
+        ditebak/diperbaiki) dan response ditandai `truncated` agar caller dapat
         melanjutkan secara recoverable, bukan gagal langsung. Ini mencegah
         "beberapa write_file besar dalam satu response" mematikan task.
         Tool-call yang lengkap tetap dikembalikan apa adanya.
+
+        `finish_reason="length"` SENDIRI selalu menandai response sebagai
+        `truncated` (tidak lengkap), termasuk ketika tidak ada tool-call yang
+        dibuang (mis. hanya teks yang terpotong). Recovery-nya tetap menjadi
+        tanggung jawab caller (orchestrator, bounded).
         Tidak mengeksekusi tool apa pun. API key tidak pernah disertakan.
         """
         import json
@@ -516,7 +521,16 @@ class OpenAICompatibleProvider(BaseProvider):
         raw = result.raw if isinstance(result.raw, dict) else {}
         choices = raw.get("choices") or []
         message = (choices[0].get("message") if choices else {}) or {}
-        raw_reason = choices[0].get("finish_reason") if choices else None
+        # `finish_reason` biasanya di `choices[0]`. Sebagian bentuk/provider
+        # menaruhnya (atau mengulanginya) di level atas respons — ambil sebagai
+        # fallback HANYA bila `choices[0]` tidak menyediakannya, agar deteksi
+        # truncation tidak hilang hanya karena bentuk respons berbeda.
+        if choices:
+            raw_reason = choices[0].get("finish_reason")
+        else:
+            raw_reason = None
+        if raw_reason is None:
+            raw_reason = raw.get("finish_reason")
         # Provider memotong output karena batas token: tool-call terakhir bisa
         # tidak lengkap (JSON argumen terpotong).
         length_truncated = raw_reason == "length"
@@ -585,9 +599,18 @@ class OpenAICompatibleProvider(BaseProvider):
             raw=raw,
             provider=self.name,
             model=result.model or self.config.model,
-            # Ditandai "truncated" hanya bila benar-benar ada tool-call yang
-            # dibuang karena terpotong (length + ada argumen tak lengkap).
-            truncated=length_truncated and dropped > 0,
+            # `finish_reason="length"` SENDIRI sudah menandakan output provider
+            # TIDAK LENGKAP: model berhenti karena batas token, bukan karena
+            # selesai. Karena itu respons ditandai "truncated" MURNI dari
+            # `length_truncated` — TIDAK lagi bergantung pada apakah ada
+            # tool-call yang dibuang (`dropped > 0`). Kasus "hanya teks tanpa
+            # tool call yang dibuang" sebelumnya lolos `truncated=False` dan
+            # berisiko diperlakukan sebagai jawaban FINAL (task DONE padahal
+            # output terpotong); kini ditandai tidak lengkap agar caller
+            # melakukan recovery terbatas, bukan menyelesaikan task.
+            # `incomplete_tool_calls` tetap melaporkan berapa tool-call yang
+            # DIBUANG (rincian observability, bukan penentu status truncated).
+            truncated=length_truncated,
             incomplete_tool_calls=dropped,
         )
 

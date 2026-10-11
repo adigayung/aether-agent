@@ -76,10 +76,11 @@ if TYPE_CHECKING:  # pragma: no cover - hanya untuk type hint, hindari import cy
 
 
 # Dipertahankan untuk KOMPATIBILITAS API (default parameter yang diimpor
-# sebagian verifier). Nilainya BUKAN lagi digunakan sebagai hard stop:
-# continuous loop TIDAK di-FAIL karena jumlah step. Loop berhenti hanya ketika
-# LLM memberi response final TANPA tool call, user cancel, atau fatal error
-# nyata. Agent task dapat berjalan selama diperlukan.
+# sebagian verifier). Nilainya BUKAN limit behavior agent: continuous loop
+# TIDAK di-FAIL karena jumlah step. Loop berhenti ketika LLM memberi response
+# final TANPA tool call, user cancel, batas truncation recovery tercapai
+# (`_MAX_TRUNCATION_RECOVERIES`), atau fatal error nyata. Agent task dapat
+# berjalan selama diperlukan.
 _CONTINUOUS_SAFETY_MAX_STEPS = 1000
 
 #: Estimasi kasar karakter per token, dipakai untuk mengubah anggaran token
@@ -100,6 +101,19 @@ _KNOWLEDGE_CHARS_PER_TOKEN = 4
 #: TIDAK meng-hardcode provider/model/endpoint/backend tertentu. Dipakai Agent
 #: maupun Consultant karena keduanya melewati `run_continuous_loop`.
 _DEFAULT_MAX_PROVIDER_ATTEMPTS = 4
+
+#: BOUNDED truncation recovery untuk `run_continuous_loop`: jumlah MAKSIMUM
+#: response provider yang TERPOTONG (`finish_reason=length`) — baik response
+#: dengan tool-call lengkap yang tetap perlu dilanjutkan maupun response tanpa
+#: tool call — yang boleh dipulihkan/diminta ulang dalam SATU task, BERTURUT-
+#: TURUT tanpa satu pun response valid di antaranya. Ini proteksi runaway
+#: INFRASTRUKTUR (bukan keputusan "task selesai"): bila provider terus memotong
+#: output, loop DIHENTIKAN deterministik sebagai FAILED dengan alasan jelas,
+#: TIDAK dibiarkan berputar tanpa batas. Mengikuti besaran resilience layer
+#: provider (`_DEFAULT_MAX_PROVIDER_ATTEMPTS` = 4) agar kebijakan "seberapa
+#: sering kita mengulang hal yang sama" konsisten di seluruh orchestrator, dan
+#: cukup kecil agar biaya maksimum saat provider rusak tetap terbatas.
+_MAX_TRUNCATION_RECOVERIES = 4
 
 #: Pola credential yang disamarkan dari teks error provider sebelum dikirim ke
 #: telemetry/activity (jaring pengaman agar secret tidak bocor ke log/UI).
@@ -2562,10 +2576,22 @@ class AgentOrchestrator:
 
         tools = self._tool_definitions()
         provider_error = False
-        # Safety (infrastruktur, bukan completion): batasi berapa kali response
-        # provider yang TERPOTONG boleh dicoba ulang. Bukan keputusan "task
-        # selesai"; hanya proteksi runaway saat provider terus memotong output.
+        # Bounded truncation recovery (infrastruktur, bukan completion):
+        # `truncation_recoveries` menghitung berapa kali BERTURUT-TURUT respons
+        # provider TERPOTONG (`finish_reason=length`) dipulihkan dalam task ini.
+        # Nilainya DIPERIKSA terhadap `_MAX_TRUNCATION_RECOVERIES` di SETIAP
+        # jalur truncation — termasuk jalur response TANPA tool call (yang tidak
+        # pernah memanggil `loop.record_action()`, sehingga `loop.iteration` /
+        # guard `max_steps` TIDAK dapat diandalkan di sana). Bila batas
+        # tercapai, loop dihentikan deterministik sebagai FAILED dengan alasan
+        # jelas (provider berulang kali memotong output); task TIDAK ditandai
+        # DONE. Counter direset setiap kali ada respons valid (tidak truncated).
         truncation_recoveries = 0
+        # Apakah penghentian terakhir berasal dari batas truncation recovery?
+        # Dipakai HANYA untuk observability/hasil (bukan completion) agar event
+        # `provider_response_truncated` + `loop_truncation_abort` konsisten
+        # dengan perilaku loop yang sebenarnya.
+        truncation_abort = False
         # Verification nudge (continuous loop): penanda "sudah dikirim" dibatasi
         # MAKSIMAL SATU KALI per task. Hanya memicu LLM memeriksa/menghasilkan
         # bukti validasi yang masih kurang; BUKAN keputusan completion dan tidak
@@ -2680,10 +2706,12 @@ class AgentOrchestrator:
             # response LLM tanpa tool call.
             if not response.has_tool_calls:
                 if truncated:
-                    # Response terpotong -> BUKAN final. Bounded recovery
-                    # (infrastruktur, bukan completion): beri model kesempatan
-                    # melanjutkan; bila provider terus memotong, berhenti dengan
-                    # error JELAS agar tidak runaway.
+                    # Response terpotong -> BUKAN final. BOUNDED recovery
+                    # (infrastruktur, bukan completion): hitung recovery ini,
+                    # lalu PERIKSA terhadap batas. Recovery yang dihitung WAJIB
+                    # benar-benar diperiksa — jalur ini tidak memanggil
+                    # `loop.record_action()` sehingga `loop.iteration` /
+                    # guard `max_steps` TIDAK ikut bertambah di sini.
                     truncation_recoveries += 1
                     emit_event(
                         self.event_sink,
@@ -2694,11 +2722,39 @@ class AgentOrchestrator:
                             "model": response.model or self._model_name(),
                             "finish_reason": response.finish_reason.value,
                             "recovery": truncation_recoveries,
+                            "limit": _MAX_TRUNCATION_RECOVERIES,
+                            "phase": "final",
                         },
                     )
-                    # Catatan: truncation berulang TIDAK lagi mematikan task;
-                    # agent terus diberi kesempatan melanjutkan sampai LLM
-                    # menghasilkan jawaban final (bukan FAILED karena cap).
+                    if truncation_recoveries >= _MAX_TRUNCATION_RECOVERIES:
+                        # Batas tercapai -> HENTIKAN deterministik (bukan
+                        # `continue`). Status terminal FAILED (kontrak runtime
+                        # yang sudah ada; TIDAK ada status baru) dengan alasan
+                        # jelas: provider berulang kali memotong output. Task
+                        # TIDAK ditandai DONE karena respons final valid belum
+                        # pernah dihasilkan.
+                        truncation_abort = True
+                        loop.fail(
+                            "Provider berulang kali memotong output "
+                            f"(finish_reason=length) tanpa respons final valid: "
+                            f"batas truncation recovery tercapai "
+                            f"({truncation_recoveries}/"
+                            f"{_MAX_TRUNCATION_RECOVERIES}). Loop dihentikan "
+                            "oleh AETHER (infrastructure), bukan keputusan LLM; "
+                            "task TIDAK selesai."
+                        )
+                        emit_event(
+                            self.event_sink,
+                            "loop_truncation_abort",
+                            {
+                                "recoveries": int(truncation_recoveries),
+                                "limit": int(_MAX_TRUNCATION_RECOVERIES),
+                                "iteration": int(loop.iteration),
+                            },
+                        )
+                        break
+                    # Masih di bawah batas: beri model KESEMPATAN TERBATAS
+                    # melanjutkan (minta tulis lebih bertahap).
                     history.append_user_message(self._truncation_message().content)
                     continue
                 # Verification nudge (continuous loop, MAKS 1x per task):
@@ -2934,6 +2990,34 @@ class AgentOrchestrator:
                 loop.cancel(self._cancel_reason())
                 break
 
+            # Response terpotong tetapi memuat tool call: tool call LENGKAP
+            # sudah dieksekusi di atas (progres tidak hilang), jadi ini BUKAN
+            # kasus runaway. Event truncation tetap diemit untuk observability
+            # (payload bentuk lama dipertahankan), tetapi counter recovery dan
+            # batas HANYA berlaku pada jalur response TANPA tool call (lihat
+            # cabang `if not response.has_tool_calls` di atas) — satu-satunya
+            # jalur yang me-`continue` TANPA memanggil `loop.record_action()`,
+            # sehingga `loop.iteration` / guard `max_steps` TIDAK bertambah di
+            # sana dan recovery WAJIB dibatasi eksplisit.
+            if truncated:
+                emit_event(
+                    self.event_sink,
+                    "provider_response_truncated",
+                    {
+                        "provider": response.provider
+                        or getattr(self.provider, "name", ""),
+                        "model": response.model or self._model_name(),
+                        "finish_reason": response.finish_reason.value,
+                        "completed_tool_calls": len(model_tool_calls),
+                        "incomplete_tool_calls": int(
+                            getattr(response, "incomplete_tool_calls", 0)
+                        ),
+                        "recovery": truncation_recoveries,
+                        "limit": _MAX_TRUNCATION_RECOVERIES,
+                        "phase": "tool_calls",
+                    },
+                )
+
         learning = self._learn_from_run(task, loop)
         # Evidence-Based Self-Verification: lampirkan ringkasan evidence
         # TERSTRUKTUR (fakta langkah). TIDAK mengubah teks final LLM (`result`)
@@ -2949,6 +3033,13 @@ class AgentOrchestrator:
             counts = change_snapshot.get("counts")
             if isinstance(counts, dict):
                 evidence["change_counts"] = counts
+        if truncation_abort:
+            # Fakta infrastruktur: loop dihentikan karena batas truncation
+            # recovery tercapai. Additive — TIDAK mengubah `status` (tetap
+            # FAILED dari `loop.fail()`) maupun keputusan completion.
+            evidence = dict(evidence)
+            evidence["truncation_abort"] = True
+            evidence["truncation_recoveries"] = int(truncation_recoveries)
         return OrchestratorResult(
             status=loop.status,
             result=loop.state.result,
