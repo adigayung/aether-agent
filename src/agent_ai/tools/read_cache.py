@@ -18,6 +18,9 @@ BUKAN "second brain" dan BUKAN cache lintas-task:
       berkali-kali (request kedua memakai hasil yang sudah tercatat).
     - Search dedup: `claim_search()` mencegah `search_code(query, scope)` yang
       sama dijalankan fisik berulang.
+    - Listing dedup: `claim_listing()` mencegah `list_files(path, max_entries)`
+      yang sama dijalankan ulang selama isi directory belum berubah (mutasi
+      file membatalkan klaim lewat `invalidate`).
     - Invalidation: `invalidate()` (dipanggil tool mutasi) melupakan rentang
       baca + hasil search untuk path yang berubah; perubahan file eksternal
       juga dideteksi via perubahan signature.
@@ -53,6 +56,7 @@ class ToolReadCache:
         - _covered : path -> [(start,end), ...] yang tercakup (union)
         - _sig     : path -> (mtime_ns, size, total_lines)
         - _searches: set (query, path, context_lines)
+        - _listings: set (path, max_entries)
         - _locks   : path -> threading.Lock (in-flight dedup)
     """
 
@@ -62,6 +66,7 @@ class ToolReadCache:
         self._covered: Dict[str, List[Tuple[int, int]]] = {}
         self._sig: Dict[str, Tuple[int, int, int]] = {}
         self._searches: Set[Tuple[str, str, int]] = set()
+        self._listings: Set[Tuple[str, int]] = set()
         self._locks: Dict[str, threading.Lock] = {}
 
     # ------------------------------------------------------------------ #
@@ -303,6 +308,43 @@ class ToolReadCache:
             self._searches.add(key)
 
     # ------------------------------------------------------------------ #
+    # List dedup (list_files)
+    # ------------------------------------------------------------------ #
+    def claim_listing(self, rel_path: str, max_entries: int) -> bool:
+        """Klaim satu listing directory secara atomic.
+
+        Listing directory yang IDENTIK (path + max_entries) untuk state
+        filesystem yang sama menghasilkan output yang sama; menjalankannya
+        berulang tidak menambah informasi bagi LLM. Seperti `claim_search`,
+        klaim DISELARASKAN dengan konteks oleh runtime (`forget_listing`) dan
+        DIBATALKAN oleh setiap mutasi file (`invalidate`) sehingga listing yang
+        sudah tidak akurat (isi directory berubah) selalu dijalankan ulang.
+
+        Returns:
+            True bila listing (path, max_entries) SUDAH pernah dijalankan
+            (duplicate); False bila ini yang pertama (dan langsung diklaim).
+        """
+        key = (str(rel_path), int(max_entries))
+        with self._lock:
+            if key in self._listings:
+                return True
+            self._listings.add(key)
+            return False
+
+    def forget_listing(self, rel_path: str, max_entries: int) -> None:
+        """Lupakan satu klaim listing (hasilnya tidak lagi ada di konteks).
+
+        Dipakai runtime compaction: bila hasil `list_files(path)` sudah TIDAK
+        terlihat di konteks, listing identik HARUS dapat dijalankan ulang
+        (bukan stub palsu). Mutasi file tetap memakai `invalidate()` (membuang
+        semua klaim listing + search).
+        """
+        key = (str(rel_path), int(max_entries))
+        with self._lock:
+            self._listings.discard(key)
+
+
+    # ------------------------------------------------------------------ #
     # Invalidation
     # ------------------------------------------------------------------ #
     def invalidate(self, rel_path: Optional[str]) -> None:
@@ -319,6 +361,7 @@ class ToolReadCache:
             self._covered.pop(rel_path, None)
             self._sig.pop(rel_path, None)
             self._searches.clear()
+            self._listings.clear()
 
     def reset(self) -> None:
         """Kosongkan seluruh cache (scope tetap satu instance/task)."""
@@ -327,6 +370,7 @@ class ToolReadCache:
             self._covered.clear()
             self._sig.clear()
             self._searches.clear()
+            self._listings.clear()
 
     def __len__(self) -> int:  # pragma: no cover - introspection
         with self._lock:

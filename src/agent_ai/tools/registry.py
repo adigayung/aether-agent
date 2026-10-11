@@ -257,7 +257,7 @@ def build_registry(
     # agar runtime dapat menyelaraskan tanda "tersedia" dengan konteks yang
     # benar-benar dikirim ke LLM saat compaction membuang detail sumber.
     reg.read_cache = read_cache
-    reg.register(ListFilesTool(root=resolved))
+    reg.register(ListFilesTool(root=resolved, read_cache=read_cache))
     reg.register(ReadFileTool(root=resolved, read_cache=read_cache))
     reg.register(SearchCodeTool(root=resolved, read_cache=read_cache))
     reg.register(WriteFileTool(root=resolved, change_sink=change_sink, read_cache=read_cache))

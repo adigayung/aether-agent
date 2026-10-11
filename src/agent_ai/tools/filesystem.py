@@ -292,7 +292,9 @@ class ListFilesTool(BaseTool):
         "Ini adalah cara utama untuk melihat isi directory. "
         "Gunakan tool ini untuk inspeksi workspace, bukan run_command dengan ls/dir. "
         "Untuk membaca file, gunakan read_file. "
-        "Untuk mencari teks dalam file, gunakan search_code."
+        "Untuk mencari teks dalam file, gunakan search_code. "
+        "Directory yang SAMA (path + max_entries) pada state filesystem yang sama "
+        "diringkas menjadi penanda 'already_listed' (jangan diulang)."
     )
     input_schema = {
         "type": "object",
@@ -303,12 +305,37 @@ class ListFilesTool(BaseTool):
         "required": [],
     }
 
-    def __init__(self, root: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        root: Optional[Path] = None,
+        read_cache: Optional[ToolReadCache] = None,
+    ) -> None:
         self.root = Path(root) if root else _DEFAULT_ROOT
+        # Cache listing/dedup (dibuat oleh build_registry). None = tanpa dedup
+        # (backward compatible: tool yang dikonstruksi langsung tidak berubah).
+        self._read_cache = read_cache
 
     def execute(self, **arguments: Any) -> Dict[str, Any]:
         rel_path = arguments.get("path", ".") or "."
         max_entries = int(arguments.get("max_entries", _DEFAULT_MAX_ENTRIES))
+
+        cache = self._read_cache
+        # Dedup: listing directory IDENTIK (path + max_entries) tidak dijalankan
+        # ulang selama state filesystem belum berubah (mutasi file membatalkan
+        # klaim lewat `ToolReadCache.invalidate`).
+        if cache is not None and cache.claim_listing(rel_path, max_entries):
+            return {
+                "path": rel_path,
+                "already_listed": True,
+                "list_dedup": True,
+                "message": (
+                    "ALREADY_LISTED: The same list_files(path, max_entries) has "
+                    "already been performed for the current filesystem state and "
+                    "its result is already in the conversation. Do NOT repeat it; "
+                    "use the previous result. List again only for a DIFFERENT "
+                    "directory (or after files change)."
+                ),
+            }
 
         target = _resolve_within_root(rel_path, self.root)
         if not target.exists():
@@ -334,6 +361,7 @@ class ListFilesTool(BaseTool):
 
         return {
             "path": rel_path,
+            "max_entries": max_entries,
             "count": len(entries),
             "truncated": truncated,
             "entries": entries,

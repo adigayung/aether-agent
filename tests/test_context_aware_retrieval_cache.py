@@ -271,6 +271,14 @@ def test_dedup_preserved_when_context_intact(tmp_path: Path) -> None:
 
 
 def test_compaction_recovers_read_content(tmp_path: Path, monkeypatch=None) -> None:
+    """Hasil yang DIPADATKAN tetapi MASIH DIKIRIM tidak boleh memicu re-read.
+
+    Semantik dedup yang BENAR: dedup dilepas hanya bila hasil tool benar-benar
+    DIBUANG (tidak dikirim ke LLM). Hasil yang dipadatkan (lokator+preview)
+    TETAP tersedia bagi LLM, sehingga re-read fisik hanya membuang I/O dan
+    memicu oscillation (isi baru langsung dipadatkan lagi). Lihat
+    `test_repeated_read_eviction.py` untuk kasus eviction sesungguhnya.
+    """
     # Task 04: compression.enabled=false -> compaction OFF. Enable for this test.
     try:
         import agent_ai.config.settings as _settings
@@ -318,9 +326,11 @@ def test_compaction_recovers_read_content(tmp_path: Path, monkeypatch=None) -> N
         )
 
         second = reader.results[1]
-        # Detail read pertama sudah DIBUANG compaction -> isi DIKIRIM LAGI.
-        assert "content" in second
-        assert second.get("already_available") is not True
+        # Hasil read pertama hanya DIPADATKAN (masih dikirim) -> dedup tetap
+        # berlaku: read identik kedua mengembalikan stub, TANPA physical read
+        # ulang dan tanpa mengirim ulang isi yang akan dipadatkan lagi.
+        assert second.get("already_available") is True
+        assert "content" not in second
     finally:
         try:
             if (monkeypatch is None or not hasattr(monkeypatch, "setattr")) and _orig is not None:
@@ -328,6 +338,7 @@ def test_compaction_recovers_read_content(tmp_path: Path, monkeypatch=None) -> N
                 _settings2.compression_enabled = _orig  # type: ignore[assignment]
         except Exception:
             pass
+
 
 
 def test_sync_forgets_search_when_not_visible(tmp_path: Path) -> None:
@@ -357,8 +368,10 @@ def test_sync_forgets_search_when_not_visible(tmp_path: Path) -> None:
     orchestrator._sync_retrieval_cache(history, history.messages)  # noqa: SLF001
     assert cache.claim_search("needle", ".", 0) is True
 
-    # Hasil DIPADATKAN (isi hilang) -> klaim dilupakan -> bisa dicari ulang.
-    compiled = [
+    # Hasil DIPADATKAN tetapi MASIH DIKIRIM (pesan ada di `compiled`) -> klaim
+    # TETAP ada. Ini yang mencegah Agent mengulang pencarian identik setiap
+    # round (hasil yang dipadatkan tetap tersedia bagi LLM).
+    compiled_compacted = [
         history.messages[0],
         history.messages[1],
         ChatMessage(
@@ -368,8 +381,15 @@ def test_sync_forgets_search_when_not_visible(tmp_path: Path) -> None:
             tool_call_id="s1",
         ),
     ]
-    orchestrator._sync_retrieval_cache(history, compiled)  # noqa: SLF001
+    orchestrator._sync_retrieval_cache(history, compiled_compacted)  # noqa: SLF001
+    assert cache.claim_search("needle", ".", 0) is True
+
+    # Hasil BENAR-BENAR DIBUANG dari konteks (pesan tidak ada di `compiled`) ->
+    # klaim dilupakan -> pencarian dapat dijalankan ulang.
+    compiled_evicted = [history.messages[0], history.messages[1]]
+    orchestrator._sync_retrieval_cache(history, compiled_evicted)  # noqa: SLF001
     assert cache.claim_search("needle", ".", 0) is False
+
 
 
 # --------------------------------------------------------------------------- #

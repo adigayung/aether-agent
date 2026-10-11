@@ -980,6 +980,28 @@ class AgentOrchestrator:
             context_lines = 0
         return (str(query), str(path), context_lines)
 
+    @staticmethod
+    def _listing_result_key(content: Optional[str]) -> Optional[Tuple[str, int]]:
+        """Ekstrak (path, max_entries) dari hasil list_files berisi.
+
+        Stub `already_listed` (tanpa `entries`) dilewati. Mengembalikan None
+        bila bukan hasil listing yang memuat entri.
+        """
+        if not content:
+            return None
+        try:
+            data = json.loads(content)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(data, dict) or "entries" not in data:
+            return None
+        path = data.get("path") or "."
+        try:
+            max_entries = int(data.get("max_entries", 0) or 0)
+        except (TypeError, ValueError):
+            max_entries = 0
+        return (str(path), max_entries)
+
     def _sync_retrieval_cache(
         self,
         history: ConversationHistory,
@@ -1031,8 +1053,45 @@ class AgentOrchestrator:
             if (message.content or "") != (before or ""):
                 compacted_ids.add(message.tool_call_id)
 
-        # read_file: rentang yang MASIH terlihat = union span hasil read yang
-        # hadir di konteks DAN belum dipadatkan.
+        originals = {
+            message.tool_call_id: message.content
+            for message in history.messages
+            if message.role == "tool" and message.tool_call_id
+        }
+        present_ids = {
+            message.tool_call_id
+            for message in compiled
+            if getattr(message, "role", None) == "tool" and message.tool_call_id
+        }
+        # `compacted_ids` = hasil tool yang ISI-nya dipadatkan (lossy) tetapi
+        # MASIH DIKIRIM ke LLM. Ini SENGAJA dipisahkan dari `present_ids`:
+        # hasil yang dipadatkan TETAAP tersedia bagi LLM (representasi
+        # lokator+preview), hanya bentuknya ringkas. Ia HANYA dipakai untuk
+        # observability, BUKAN untuk mematikan dedup (lihat komentar di bawah).
+        compacted_ids = set()
+        for message in compiled:
+            if getattr(message, "role", None) != "tool" or not message.tool_call_id:
+                continue
+            before = originals.get(message.tool_call_id)
+            if before is None:
+                continue
+            if (message.content or "") != (before or ""):
+                compacted_ids.add(message.tool_call_id)
+
+        # read_file: rentang yang MASIH tersedia = union span hasil read yang
+        # HADIR di konteks yang benar-benar dikirim (present_ids).
+        #
+        # BUGFIX (oscillation read/search BERULANG): sebelumnya "tersedia"
+        # mensyaratkan hasil TIDAK dipadatkan (`not in compacted_ids`). Padahal
+        # `compile_compacted_messages` MEMADATKAN jendela kerja setiap round
+        # ketika anggaran sempit (mempertahankan lokator+preview), sehingga
+        # setiap round dedup dimatikan -> Agent membaca/mencari ULANG secara
+        # fisik -> isi yang baru diterima langsung dipadatkan lagi -> berulang
+        # tanpa akhir (loop `read_file`/`search_code` identik). Hasil yang
+        # dipadatkan TETAP tersedia bagi LLM; bila butuh isi MENTAH, LLM dapat
+        # memakai `force=true` (didokumentasikan di prompt). Karena itu dedup
+        # HANYA dilepas bila hasil benar-benar DIBUANG dari konteks (tidak
+        # `present`), bukan saat ia sekadar dipadatkan.
         available: Dict[str, List[Tuple[int, int]]] = {}
         seen_paths = set()
         for message in history.messages:
@@ -1043,18 +1102,21 @@ class AgentOrchestrator:
                 continue
             path, start, end = span
             seen_paths.add(path)
-            visible = (
-                message.tool_call_id in present_ids
-                and message.tool_call_id not in compacted_ids
-            )
+            # Zat GIZI bagi dedup: hasil ini ADA di konteks yang dikirim
+            # (dipadatkan ataupun utuh). Hanya DIBUANG (evicted) = tidak visible.
+            visible = message.tool_call_id in present_ids
             if visible:
                 available.setdefault(path, []).append((start, end))
                 if stats is not None:
                     stats["context_spans_visible"] += 1
+                    if message.tool_call_id in compacted_ids:
+                        stats["context_spans_compacted_kept"] = (
+                            stats.get("context_spans_compacted_kept", 0) + 1
+                        )
             elif stats is not None:
-                # Rentang yang hasilnya TIDAK lagi terlihat LLM (dipadatkan/
-                # dibuang) -> dedup untuk rentang ini dimatikan (bukan bug:
-                # isinya memang sudah tidak ada di konteks).
+                # Rentang yang hasilnya benar-benar DIBUANG dari konteks ->
+                # dedup untuk rentang ini dimatikan (agar LLM dapat mengambil
+                # ulang isi yang memang sudah tidak ada).
                 stats["context_spans_hidden"] += 1
         if stats is not None:
             stats["context_paths_visible"] = len(available)
@@ -1063,7 +1125,8 @@ class AgentOrchestrator:
             )
         cache.sync_from_context(available, seen_paths)
 
-        # search_code: hasil yang sudah TIDAK terlihat harus dapat dicari ulang.
+        # search_code: hasil yang sudah DIBUANG (tidak dikirim) harus dapat
+        # dicari ulang; hasil yang hanya dipadatkan tetap dianggap tersedia.
         # Hanya keputusan "terakhir" per (query, path, ctx) yang dipakai, agar
         # pencarian ulang yang hasilnya masih terlihat tidak ikut dilupakan.
         latest_search_gone: Dict[Tuple[str, str, int], bool] = {}
@@ -1073,14 +1136,27 @@ class AgentOrchestrator:
             key = self._search_result_key(message.content)
             if key is None:
                 continue
-            visible = (
-                message.tool_call_id in present_ids
-                and message.tool_call_id not in compacted_ids
-            )
+            visible = message.tool_call_id in present_ids
             latest_search_gone[key] = not visible
         for (query, path, context_lines), gone in latest_search_gone.items():
             if gone:
                 cache.forget_search(query, path, context_lines)
+
+        # list_files: sama seperti search_code — hasil yang sudah DIBUANG
+        # (tidak dikirim) harus dapat dijalankan ulang; hasil yang hanya
+        # dipadatkan tetap dianggap tersedia.
+        latest_listing_gone: Dict[Tuple[str, int], bool] = {}
+        for message in history.messages:
+            if message.role != "tool" or (message.name or "") != "list_files":
+                continue
+            key = self._listing_result_key(message.content)
+            if key is None:
+                continue
+            latest_listing_gone[key] = message.tool_call_id not in present_ids
+        for (path, max_entries), gone in latest_listing_gone.items():
+            if gone:
+                cache.forget_listing(path, max_entries)
+
 
     def _model_name(self) -> str:
         """Nama model aktif untuk logging. Tidak pernah secret.
