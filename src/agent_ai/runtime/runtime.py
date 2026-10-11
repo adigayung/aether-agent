@@ -34,6 +34,7 @@ TIDAK dipakai oleh jalur normal.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
 
 from agent_ai.core.cancel import CancellationToken
@@ -74,6 +75,7 @@ _FILE_OPERATION_TYPES = {
 }
 
 if TYPE_CHECKING:  # pragma: no cover - hanya untuk type hint, hindari import cycle
+    from agent_ai.changes.task_evidence import TaskChangeEvidence
     from agent_ai.changes.tracker import ChangeTracker
     from agent_ai.fallback.manager import FallbackManager
     from agent_ai.planning.replanner import Replanner
@@ -121,6 +123,7 @@ class AgentRuntime:
         session_store: Optional["SessionStore"] = None,
         session_id: Optional[str] = None,
         change_tracker: Optional["ChangeTracker"] = None,
+        change_evidence: Optional["TaskChangeEvidence"] = None,
         max_validation_cycles: Optional[int] = None,
         stop_on_validation_failure: Optional[bool] = None,
         recovery_manager: Optional["RecoveryManager"] = None,
@@ -140,7 +143,34 @@ class AgentRuntime:
         # agar loop berhenti di safe boundary saat user menekan Stop. Bukan
         # sistem cancellation kedua: token tunggal milik gateway per task.
         self.cancel_token = cancel_token
-        self.executor = executor or ToolExecutor()
+        # Project-local storage (Task 5): root project target. Bila diisi,
+        # runtime menulis `.aether/log/<task_id>.log` dan memakai AI Project
+        # Bible project-local (`.aether/bible`) lewat ProjectBrain.
+        self.project_root = project_root
+        # Executor: bila pemanggil memberi executor (mis. TaskExecutor yang
+        # sudah merakit registry ber-root workspace), pakai apa adanya. Bila
+        # TIDAK, dan `project_root` diketahui, rakit executor ber-root project
+        # tersebut sehingga tool filesystem/workspace benar-benar beroperasi di
+        # project target (bukan root AETHER). Tanpa `project_root`, perilaku
+        # lama dipertahankan (registry global).
+        if executor is not None:
+            self.executor = executor
+        elif project_root:
+            try:
+                from pathlib import Path as _Path
+
+                from agent_ai.tools.registry import build_registry
+
+                self.executor = ToolExecutor(
+                    registry=build_registry(
+                        root=_Path(project_root), cancel_token=cancel_token
+                    ),
+                    workspace_root=project_root,
+                )
+            except Exception:  # noqa: BLE001 - fallback ke registry default
+                self.executor = ToolExecutor()
+        else:
+            self.executor = ToolExecutor()
         self.max_iterations = max_iterations
         self.options = options
         self.system_prompt = system_prompt
@@ -149,10 +179,6 @@ class AgentRuntime:
         # Set False untuk memakai jalur legacy (per step plan + recovery).
         self.use_continuous_loop = use_continuous_loop
 
-        # Project-local storage (Task 5): root project target. Bila diisi,
-        # runtime menulis `.aether/log/<task_id>.log` dan memakai AI Project
-        # Bible project-local (`.aether/bible`) lewat ProjectBrain.
-        self.project_root = project_root
         self.project_brain_enabled = project_brain
         self._task_log: Optional[Any] = None
         # Log response API LLM project-local (`.aether/log/response/<task_id>.json`).
@@ -201,6 +227,33 @@ class AgentRuntime:
         self.session_store = session_store
         self.session_id = session_id
         self.change_tracker = change_tracker
+        # Change EVIDENCE per task (OPSIONAL): adapter tipis di atas
+        # ChangeTracker EXISTING yang menyediakan daftar perubahan file nyata
+        # (created/modified/deleted) untuk continuous loop + review. Runtime
+        # TIDAK membuat tracker kedua: bila `change_tracker` diberikan tanpa
+        # `change_evidence`, adapter dibangun di atas tracker yang sama.
+        #
+        # Bila keduanya TIDAK diberikan tetapi `project_root` diketahui,
+        # runtime membuat SATU ChangeTracker untuk root itu (satu change index,
+        # bukan dua) + adapter di atasnya. Dengan begitu runtime yang dipakai
+        # langsung (mis. verifier/gateway) tetap memiliki change evidence,
+        # tanpa perlu pemanggil merakitnya. Bila `project_root` juga tidak ada,
+        # tidak ada deteksi perubahan sama sekali (perilaku lama).
+        self.change_evidence: Optional["TaskChangeEvidence"] = change_evidence
+        if self.change_evidence is None and self.change_tracker is None and project_root:
+            try:
+                from agent_ai.changes.tracker import ChangeTracker
+
+                self.change_tracker = ChangeTracker(root=Path(project_root))
+            except Exception:  # noqa: BLE001 - tracking tidak boleh crash runtime
+                self.change_tracker = None
+        if self.change_evidence is None and self.change_tracker is not None:
+            try:
+                from agent_ai.changes.task_evidence import TaskChangeEvidence
+
+                self.change_evidence = TaskChangeEvidence(self.change_tracker)
+            except Exception:  # noqa: BLE001 - evidence tidak boleh crash runtime
+                self.change_evidence = None
 
         # Advanced Recovery (#43), OPSIONAL. Bila None, runtime berperilaku
         # seperti sebelumnya (step gagal -> FAILED tanpa recovery).
@@ -463,6 +516,14 @@ class AgentRuntime:
         # Best-effort: kegagalan di sini TIDAK boleh menggagalkan eksekusi.
         self._setup_project_storage(prepared)
 
+        # Change evidence per task: ikat ke task_id AKTUAL yang sudah
+        # dikonsolidasikan `_setup_project_storage` (task_id dari prepared /
+        # lifecycle). Snapshot awal TIDAK dilakukan di sini (tidak ada
+        # full-project hashing saat task mulai); kandidat perubahan didaftarkan
+        # dari aktivitas tool nyata. Karena itu evidence dibangun SETELAH
+        # task_id ditetapkan.
+        self._begin_change_evidence()
+
         # Agent Execution Policy: resolve requested_mode -> effective_mode.
         # Murni informasi/strategi (bukan hard limit, bukan penggerak loop):
         # effective_mode SELALU dimulai sama dengan requested_mode; kenaikan
@@ -510,6 +571,7 @@ class AgentRuntime:
             self._current_environment_context = self._session_environment_context()
             result = self._run_continuous(prepared, progress, user_parts=user_parts)
             result = self._maybe_validate(prepared, progress, result, lifecycle)
+            self._finish_change_evidence()
             self._lifecycle_finalize(lifecycle, result)
             return result
 
@@ -518,6 +580,7 @@ class AgentRuntime:
         if plan is None or not plan.steps:
             result = self._run_single(prepared, progress, user_parts=user_parts)
             result = self._maybe_validate(prepared, progress, result, lifecycle)
+            self._finish_change_evidence()
             self._lifecycle_finalize(lifecycle, result)
             return result
 
@@ -528,6 +591,7 @@ class AgentRuntime:
         # Validation (opsional): hanya bila execution sukses & validation aktif.
         result = self._maybe_validate(prepared, progress, result, lifecycle)
 
+        self._finish_change_evidence()
         self._lifecycle_finalize(lifecycle, result)
         return result
 
@@ -1024,6 +1088,11 @@ class AgentRuntime:
             # saat provider utama gagal (setelah retry habis). Orchestrator
             # tetap provider-agnostic (tidak mengimpor subsistem fallback).
             provider_fallback_resolver=self._provider_fallback_resolver,
+            # Change evidence per task (OPSIONAL): daftar perubahan file yang
+            # BENAR-BENAR terdeteksi (created/modified/deleted) dipakai sebagai
+            # evidence untuk verification nudge existing. Tidak ada evaluator
+            # completion baru: nudge tetap memutuskan lewat aturan existing.
+            change_evidence=self.change_evidence,
         )
 
     def _session_environment_context(self) -> Optional[str]:
@@ -1150,10 +1219,37 @@ class AgentRuntime:
         sehingga state internal tetap konsisten antar-round.
         """
         if event_type == "tool_called":
+            # Registrasi kandidat perubahan SEGERA sebelum tool dieksekusi:
+            # snapshot kondisi "sebelum" diambil deterministik dari tool call
+            # LLM (bukan dari angka/tebakan), sehingga perubahan yang terjadi
+            # dapat dibedakan created vs modified.
+            self._register_tool_change_target(payload)
             self._emit_activity_phase_for_tool(payload)
         elif event_type == "agent_observation":
             self._update_working_state_from_observation(payload)
+        elif event_type == "tool_result":
+            # Efek filesystem NYATA (hanya setelah tool selesai): deteksi
+            # perubahan dibatasi pada path yang memang disentuh task.
+            self._mark_tool_effects(payload)
         self._emit_event(event_type, payload)
+
+    def _register_tool_change_target(self, payload: Dict[str, Any]) -> None:
+        """Catat path target tool mutasi sebagai kandidat perubahan (bounded).
+
+        Dipanggil dari event `tool_called` (sebelum eksekusi) memakai argumen
+        tool yang tersedia; bukan inferensi dari hasil.
+        """
+        tool = str(payload.get("tool") or "").strip().lower()
+        if tool not in _FILE_OPERATION_TYPES:
+            return
+        arguments = payload.get("arguments")
+        if not isinstance(arguments, dict):
+            return
+        if tool == "move_file":
+            paths = (arguments.get("source"), arguments.get("destination"))
+        else:
+            paths = (arguments.get("path"),)
+        self._register_change_target(*paths)
 
     def _update_working_state_from_observation(
         self, payload: Dict[str, Any]
@@ -1187,8 +1283,137 @@ class AgentRuntime:
                     self._working_state_manager.record_files_inspected(str(path))
             elif tool in ("write_file", "edit_file", "delete_file", "move_file",
                           "create_skill", "delete_skill", "update_skill"):
-                if path:
+                if path and tool in _FILE_OPERATION_TYPES:
+                    # HANYA tool filesystem: `path` argumennya benar-benar path
+                    # file. Tool Skill memakai `path` sebagai identifier skill,
+                    # bukan path filesystem (tidak boleh masuk daftar perubahan).
                     self._working_state_manager.record_files_changed(str(path))
+        except Exception:  # noqa: BLE001 - state update tidak boleh crash
+            return
+
+    # ------------------------------------------------------------------ #
+    # Change evidence per task (ChangeTracker existing, bounded detection)
+    # ------------------------------------------------------------------ #
+    def _begin_change_evidence(self) -> None:
+        """Ikat change evidence ke task_id AKTUAL task yang sedang berjalan.
+
+        Idempoten: `run()` dapat dipanggil ulang pada instance runtime yang
+        sama (mis. verifier/gateway memakai satu runtime untuk beberapa task);
+        `begin()` selalu mengembalikan state bersih untuk task_id tersebut.
+        Best-effort: kegagalan TIDAK boleh menggagalkan eksekusi task.
+        """
+        evidence = self.change_evidence
+        if evidence is None:
+            return
+        try:
+            evidence.begin(self._current_task_id)
+        except Exception:  # noqa: BLE001 - evidence tidak boleh crash task
+            return
+
+    def _register_change_target(self, *paths: Any) -> None:
+        """Catat path mutasi sebagai kandidat + snapshot kondisi "sebelum".
+
+        Dipanggil SEGERA sebelum tool mutasi dijalankan (deterministik dari
+        tool call LLM), sehingga perbandingan hash/size berikutnya dapat
+        membedakan file yang DIBUAT vs DIUBAH.
+
+        Read-only & bounded: hanya file yang benar-benar disentuh task.
+        """
+        evidence = self.change_evidence
+        if evidence is None:
+            return
+        for path in paths:
+            try:
+                evidence.register_path(path, task_id=self._current_task_id)
+            except Exception:  # noqa: BLE001 - snapshot tidak boleh crash task
+                continue
+
+    def _mark_tool_effects(self, payload: Dict[str, Any]) -> None:
+        """Tandai efek filesystem NYATA dari satu tool call yang selesai.
+
+        Sumber: event `tool_result` (payload eksekusi apa adanya) dari
+        orchestrator — bukan interpretasi tambahan.
+
+        * Mutasi berhasil (status=success) -> deteksi perubahan dibatasi pada
+          path yang dilaporkan tool (bounded, bukan full-project hashing).
+        * Mutasi GAGAL -> path dihapus dari kandidat agar tidak ada perubahan
+          semu yang terdeteksi untuk file yang tidak tersentuh.
+        * Command berhasil (`run_command`) -> deteksi ulang pada kandidat yang
+          sudah terdaftar, untuk menangkap file yang ditulis lewat command.
+        """
+        evidence = self.change_evidence
+        if evidence is None:
+            return
+        tool = str(payload.get("tool") or "").strip().lower()
+        if tool not in _FILE_OPERATION_TYPES and tool != "run_command":
+            return
+        try:
+            if tool == "run_command":
+                if payload.get("success"):
+                    # `run_command` tidak melaporkan path: file baru yang
+                    # ditulis command hanya dapat ditangkap dengan memindai
+                    # SCOPE kandidat yang sudah terdaftar (bounded, bukan
+                    # seluruh project). Bila task belum punya kandidat, tidak
+                    # ada yang dipindai -> tidak ada perubahan yang dikarang.
+                    discover = getattr(evidence, "discover_from_candidates", None)
+                    if callable(discover):
+                        discover(task_id=self._current_task_id)
+                    evidence.detect(task_id=self._current_task_id)
+                return
+            output = payload.get("output")
+            path = None
+            old_path = None
+            if isinstance(output, dict):
+                path = output.get("path")
+                old_path = output.get("old_path")
+            elif isinstance(output, str):
+                try:
+                    parsed = json.loads(output)
+                except (ValueError, TypeError):
+                    parsed = None
+                if isinstance(parsed, dict):
+                    path = parsed.get("path")
+                    old_path = parsed.get("old_path")
+            if old_path:
+                # Move: source berhenti ada di lokasi lama. Snapshot source
+                # SUDAH tercatat sebelum tool berjalan; menghentikan tracking
+                # di sana mencegah laporan 'deleted' semu.
+                evidence.unregister_path(old_path, task_id=self._current_task_id)
+            if not path:
+                return
+            if not payload.get("success"):
+                evidence.unregister_path(path, task_id=self._current_task_id)
+                return
+            evidence.detect(task_id=self._current_task_id)
+        except Exception:  # noqa: BLE001 - evidence tidak boleh crash task
+            return
+
+    def _finish_change_evidence(self) -> None:
+        """Tutup change evidence task dan lampirkan ringkasannya ke Working State.
+
+        Ringkasan berisi fakta yang benar-benar terdeteksi (path + kind);
+        tidak mengarang jenis perubahan atau hasil validasi.
+        """
+        evidence = self.change_evidence
+        if evidence is None:
+            return
+        try:
+            evidence.finish(self._current_task_id)
+            summary = evidence.summary(self._current_task_id)
+        except Exception:  # noqa: BLE001 - evidence tidak boleh crash task
+            return
+        if not summary:
+            return
+        try:
+            manager = self._working_state_manager
+            if manager is None:
+                return
+            for item in summary:
+                path = item.get("path")
+                kind = item.get("kind")
+                if not path:
+                    continue
+                manager.record_files_changed(f"{path} ({kind})")
         except Exception:  # noqa: BLE001 - state update tidak boleh crash
             return
 

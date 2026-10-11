@@ -30,8 +30,17 @@ def test_create_and_list_sessions(tmp_store):
     p1 = svc.list_sessions(project_id="p1")
     assert len(p1) == 2
 
-    all_s = svc.list_sessions()
-    assert len(all_s) == 3
+    # ISOLASI: tidak ada daftar lintas-project. Project lain hanya melihat miliknya.
+    p2 = svc.list_sessions(project_id="p2")
+    assert len(p2) == 1
+    assert p2[0]["session_id"] == s3["session_id"]
+
+    # Tanpa project_id -> error (bukan daftar global).
+    import pytest
+    from agent_ai.consultant.service import ConsultantScopeError
+
+    with pytest.raises(ConsultantScopeError):
+        svc.list_sessions()
 
 
 def test_full_retention_context_bounded(tmp_store):

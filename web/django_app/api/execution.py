@@ -176,6 +176,8 @@ class TaskExecutor:
         project_matrix: Optional[Any] = None,
         approval_gate: Optional[Callable[[Dict[str, Any]], bool]] = None,
         requested_mode: Optional[str] = None,
+        change_tracker: Optional[Any] = None,
+        change_evidence: Optional[Any] = None,
     ) -> AgentRuntime:
         """Rakit AgentRuntime dengan ToolExecutor yang punya PermissionManager.
 
@@ -304,6 +306,11 @@ class TaskExecutor:
             options=options,
             fallback_manager=fallback_manager,
             provider_factory=fallback_provider_factory,
+            # ChangeTracker + change evidence milik task ini (dibangun di gate
+            # `run` dengan task_id yang benar). Keduanya OPSIONAL: bila None,
+            # runtime berperilaku seperti sebelumnya (backward compatible).
+            change_tracker=change_tracker,
+            change_evidence=change_evidence,
             # Project-local storage (Task 5): root project target -> Task Log
             # (`.aether/log/<task_id>.log`) + AI Project Bible
             # (`.aether/bible`). Bila None, storage project-local dilewati.
@@ -360,6 +367,8 @@ class TaskExecutor:
         project_permission_matrix: Optional[Any] = None,
         approval_gate: Optional[Callable[[Dict[str, Any]], bool]] = None,
         requested_mode: Optional[str] = None,
+        change_tracker: Optional[Any] = None,
+        change_evidence: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Jalankan PreparedTask lewat AETHER Runtime (synchronous).
 
@@ -424,18 +433,36 @@ class TaskExecutor:
         # Ini menjadi CONSISTENCY CHECK akhir (mis. perubahan lewat
         # run_command), BUKAN lagi satu-satunya sumber update UI: event live
         # dipancarkan SEGERA setelah tiap operasi file berhasil (change_sink).
-        change_tracker = None
-        if workspace_root:
+        #
+        # Bila caller sudah menyediakan tracker/evidence (mis. verifier yang
+        # ingin menginspeksi perubahan task), keduanya dipakai apa adanya:
+        # TIDAK ada tracker atau change index kedua.
+        if change_evidence is None and change_tracker is not None:
+            try:
+                from agent_ai.changes.task_evidence import TaskChangeEvidence
+
+                change_evidence = TaskChangeEvidence(change_tracker, task_id=task_id)
+            except Exception:  # noqa: BLE001 - tracking tidak boleh crash task
+                change_evidence = None
+        if change_tracker is None and workspace_root:
             try:
                 from pathlib import Path as _Path
 
+                from agent_ai.changes.task_evidence import TaskChangeEvidence
                 from agent_ai.changes.tracker import ChangeTracker
 
                 change_tracker = ChangeTracker(root=_Path(workspace_root))
                 change_tracker.start(task_id)
                 change_tracker.snapshot(".", task_id=task_id)
+                # Evidence terikat ke task_id task ini (isolasi antar-task):
+                # SATU tracker existing + adapter tipis di atasnya, dipakai
+                # runtime untuk deteksi perubahan bounded pada titik mutasi.
+                change_evidence = TaskChangeEvidence(
+                    change_tracker, task_id=task_id
+                )
             except Exception:  # noqa: BLE001 - tracking tidak boleh crash task
                 change_tracker = None
+                change_evidence = None
 
         # Path yang sudah diemit LIVE oleh tool (write/edit/delete/move).
         # Dipakai untuk dedup: consistency-check akhir tidak mengemit ulang
@@ -534,6 +561,8 @@ class TaskExecutor:
                 project_matrix=project_permission_matrix,
                 approval_gate=approval_gate,
                 requested_mode=requested_mode,
+                change_tracker=change_tracker,
+                change_evidence=change_evidence,
             )
             result = runtime.run(
                 prepared,
@@ -581,6 +610,19 @@ class TaskExecutor:
             except Exception:  # noqa: BLE001 - deteksi tidak boleh crash task
                 pass
 
+        # Change evidence task ini (fakta filesystem yang benar-benar
+        # terdeteksi). Dipakai sebagai ringkasan evidence untuk review/laporan;
+        # TIDAK mengubah status, hasil, maupun keputusan completion.
+        runtime_evidence = getattr(result, "evidence", None)
+        detected_changes = None
+        if isinstance(runtime_evidence, dict):
+            detected_changes = runtime_evidence.get("changed_files")
+        elif change_evidence is not None:
+            try:
+                detected_changes = change_evidence.summary(task_id)
+            except Exception:  # noqa: BLE001 - evidence tidak boleh crash task
+                detected_changes = None
+
         # Sinkronkan status akhir dari runtime ke record gateway.
         # Catatan: event terminal (task_completed/task_failed/task_cancelled)
         # diemit oleh AgentRuntime (sumber tunggal observability). Di sini hanya
@@ -615,6 +657,10 @@ class TaskExecutor:
             "error": result.error,
             "iterations": result.iterations,
             "policy": policy_summary if isinstance(policy_summary, dict) else None,
+            # Ringkasan perubahan file NYATA task ini (additive; None bila tidak
+            # ada evidence). Bentuknya sama dengan payload `change_detected`
+            # (path/kind/size), sehingga konsumen review dapat memakainya.
+            "changes": detected_changes,
         }
 
 

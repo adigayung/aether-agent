@@ -89,15 +89,29 @@ watch(
 );
 
 // Load session list when tab becomes visible or project changes.
+// ISOLASI: saat project berubah, lokal sessionId + pesan di-reset agar TIDAK
+// me-resume sesi project lain; slot sesi aktif per-project di App.vue sudah
+// diganti (emit kosong bila belum ada).
 watch(
   () => [activeSideTab.value, props.projectId],
-  () => {
+  ([tab], [prevTab, prevProjectId]) => {
+    if (prevProjectId !== undefined && prevProjectId !== props.projectId) {
+      _resetForProjectChange();
+    }
     if (activeSideTab.value === "sessions") {
       loadSessions();
     }
   },
   { immediate: true }
 );
+
+function _resetForProjectChange() {
+  sessionId.value = "";
+  messages.value = [];
+  error.value = "";
+  sessions.value = [];
+  emit("update:activeSessionId", "");
+}
 
 async function loadSessions() {
   if (sessionsLoading.value) return;

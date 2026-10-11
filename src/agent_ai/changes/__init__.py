@@ -8,14 +8,18 @@ Git/database.
         ChangeRecord,
         ChangeSet,
         ChangeTracker,
+        TaskChangeEvidence,
         diff,
     )
 
 Read-only terhadap source project. Isolasi per task_id.
+`TaskChangeEvidence` = adapter tipis di atas ChangeTracker (bukan tracker
+kedua) untuk menyediakan bukti perubahan ringkas pada continuous runtime.
 """
 
 from agent_ai.changes import diff
 from agent_ai.changes.models import ChangeRecord, ChangeSet, ChangeType
+from agent_ai.changes.task_evidence import TaskChangeEvidence
 from agent_ai.changes.tracker import ChangeTracker
 
 __all__ = [
@@ -23,5 +27,6 @@ __all__ = [
     "ChangeRecord",
     "ChangeSet",
     "ChangeTracker",
+    "TaskChangeEvidence",
     "diff",
 ]

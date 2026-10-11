@@ -257,10 +257,13 @@ watch(shell.activeNav, (nav) => {
 });
 
 // Project aktif berubah -> refresh daftar task (queue), history, & running.
+// Sekaligus ganti slot sesi Consultant aktif ke project baru (ISOLASI: tidak
+// me-resume sesi project lain).
 watch(selectedProjectId, () => {
   taskData.refreshTasks();
   taskData.refreshTaskHistory();
   queue.refreshRunningTask();
+  consultant.setActiveProject(selectedProjectId.value);
 });
 
 // Konfirmasi Stop Task: pasang/lepas listener Escape.
@@ -288,6 +291,9 @@ onMounted(async () => {
   // Baca project/session terakhir untuk ditawarkan "buka kembali" di launcher.
   // AETHER TIDAK auto-masuk Workbench: user harus menentukan workspace dulu.
   await workspace.loadLastProject();
+  // Sinkronkan slot sesi Consultant aktif ke project yang sedang aktif
+  // (ISOLASI per project; tidak me-resume sesi project lain).
+  consultant.setActiveProject(selectedProjectId.value);
   // Sinkronkan "task running" saat ini dari Global Task Queue (mis. task yang
   // sudah berjalan sebelum halaman dimuat/di-refresh).
   queue.refreshRunningTask();

@@ -57,23 +57,35 @@ class ChangeTracker:
         self.root = Path(root) if root else _DEFAULT_ROOT
         # task_id -> ChangeSet
         self._sets: Dict[str, ChangeSet] = {}
-        # task_id -> {rel_path: (hash, size)} snapshot
+        # task_id -> {rel_path: (hash, size)} snapshot (kondisi "sebelum")
         self._snapshots: Dict[str, Dict[str, tuple]] = {}
 
     # ------------------------------------------------------------------ #
     # Lifecycle
     # ------------------------------------------------------------------ #
     def start(self, task_id: str) -> ChangeSet:
-        """Mulai tracking untuk sebuah task_id.
+        """Mulai tracking untuk sebuah task_id (idempoten).
+
+        Aman dipanggil ULANG untuk task_id yang sama (mis. gateway menyiapkan
+        baseline lewat `snapshot(".", task_id)` lalu runtime memanggil `start`
+        lagi saat eksekusi berjalan). Baseline snapshot yang SUDAH ada TIDAK
+        dihapus: menghapusnya akan membuat file yang sudah dikenal terlihat
+        'created' (perubahan semu). Untuk task_id BARU, ChangeSet dan snapshot
+        dimulai dari kosong.
 
         Raises:
             ValueError: bila task_id kosong.
         """
         if not task_id:
             raise ValueError("ChangeTracker butuh task_id.")
+        existing = self._sets.get(task_id)
+        if existing is not None:
+            # Sudah pernah di-start: pertahankan ChangeSet + baseline snapshot.
+            self._snapshots.setdefault(task_id, {})
+            return existing
         change_set = ChangeSet(task_id=task_id)
         self._sets[task_id] = change_set
-        self._snapshots[task_id] = {}
+        self._snapshots.setdefault(task_id, {})
         return change_set
 
     def finish(self, task_id: str) -> Optional[ChangeSet]:
@@ -87,6 +99,17 @@ class ChangeTracker:
     def get_changes(self, task_id: str) -> Optional[ChangeSet]:
         """Ambil ChangeSet untuk task_id (None bila tidak ada)."""
         return self._sets.get(task_id)
+
+    def tracked_paths(self, task_id: str) -> List[str]:
+        """Path kandidat yang sudah tercatat untuk task (bounded, deterministik).
+
+        Dipakai untuk mendeteksi file yang dibuat lewat jalur yang TIDAK
+        melaporkan path (mis. `run_command`): hasil command di-scan HANYA pada
+        prefix path yang sudah menjadi kandidat task, bukan seluruh project.
+        Path di luar scope task tidak pernah dilaporkan (tidak mengarang
+        daftar perubahan).
+        """
+        return list(self._snapshots.get(task_id, {}))
 
     # ------------------------------------------------------------------ #
     # Snapshot
@@ -136,7 +159,7 @@ class ChangeTracker:
             Daftar ChangeRecord (created/modified/deleted).
         """
         before = self._snapshots.get(task_id, {})
-        current = self.snapshot(path)  # tidak menyimpan ke snapshot task
+        current = self.snapshot(path)  # disimpan sebagai basis, bukan keputusan
 
         records: List[ChangeRecord] = []
         now = time.time()
@@ -153,31 +176,49 @@ class ChangeTracker:
                     after_size=after_size,
                     timestamp=now,
                 ))
-            else:
-                before_hash, before_size = before[rel]
-                if before_hash != after_hash:
-                    records.append(ChangeRecord(
-                        path=rel,
-                        change_type=ChangeType.MODIFIED,
-                        before_hash=before_hash,
-                        after_hash=after_hash,
-                        before_size=before_size,
-                        after_size=after_size,
-                        timestamp=now,
-                    ))
-
-        # Deleted.
-        for rel, (before_hash, before_size) in before.items():
-            if rel not in current:
+                continue
+            base = before[rel]
+            before_hash, before_size = base[0], base[1]
+            # Perubahan ditentukan dari KONTEN yang tersedia (hash + ukuran),
+            # bukan timestamp/mtime: hash berbeda -> isi file benar-benar
+            # berubah (created/modified/deleted). Bila hash sama, file identik
+            # walau mtime berubah -> TIDAK dilaporkan.
+            if before_hash != after_hash:
                 records.append(ChangeRecord(
                     path=rel,
-                    change_type=ChangeType.DELETED,
+                    change_type=ChangeType.MODIFIED,
                     before_hash=before_hash,
-                    after_hash=None,
+                    after_hash=after_hash,
                     before_size=before_size,
-                    after_size=None,
+                    after_size=after_size,
                     timestamp=now,
                 ))
+
+        # Deleted. Perbandingan DIBATASI pada scope `path` yang diperiksa:
+        # snapshot task dapat memuat file yang di-track untuk path yang lebih
+        # sempit (mis. snapshot per-file saat tool mutasi), sehingga file di
+        # luar scope tidak boleh dilaporkan 'deleted' hanya karena tidak
+        # muncul pada pemindaian sub-path ini.
+        scope = _resolve_within_root(path, self.root)
+        for rel, base in before.items():
+            if rel in current:
+                continue
+            before_hash, before_size = base[0], base[1]
+            try:
+                candidate = _resolve_within_root(rel, self.root)
+            except Exception:  # noqa: BLE001 - path di luar root diabaikan
+                continue
+            if candidate != scope and scope not in candidate.parents:
+                continue
+            records.append(ChangeRecord(
+                path=rel,
+                change_type=ChangeType.DELETED,
+                before_hash=before_hash,
+                after_hash=None,
+                before_size=before_size,
+                after_size=None,
+                timestamp=now,
+            ))
 
         return sorted(records, key=lambda r: r.path)
 

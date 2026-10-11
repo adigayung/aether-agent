@@ -47,15 +47,29 @@ from agent_ai.consultant.prompt import (
     CONSULTANT_SYSTEM_PROMPT,
     build_consultant_system_prompt,
 )
-from agent_ai.consultant.service import ConsultantService, extract_task_proposal
+from agent_ai.consultant.service import (
+    ConsultantProjectScope,
+    ConsultantScopeError,
+    ConsultantService,
+    extract_task_proposal,
+)
 from agent_ai.consultant.tools import (
     ConsultantBibleTool,
     ConsultantRunCommandTool,
     build_consultant_registry,
 )
+from agent_ai.consultant.migration import (
+    MigrationReport,
+    MigrationEntry,
+    ProjectIdentitySource,
+    StaticIdentitySource,
+    audit_legacy_migration,
+)
 
 __all__ = [
     "ConsultantService",
+    "ConsultantProjectScope",
+    "ConsultantScopeError",
     "ConsultantResult",
     "ConsultantTurn",
     "extract_task_proposal",
@@ -74,4 +88,9 @@ __all__ = [
     "MODE_QUICK",
     "MODE_INVESTIGATE",
     "normalize_consultant_mode",
+    "MigrationReport",
+    "MigrationEntry",
+    "ProjectIdentitySource",
+    "StaticIdentitySource",
+    "audit_legacy_migration",
 ]

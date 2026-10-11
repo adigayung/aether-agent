@@ -39,6 +39,10 @@ Thumbs.db
 # Workspace testing terisolasi (BUKAN bagian source AETHER)
 dummy_test/
 
+# Backup lokal (audit-trail pembersihan data legacy; TIDAK di-upload)
+data/backup/
+*.orphans_backup
+
 # User project workspaces
 # Folder projects tetap ada di repository,
 # tetapi seluruh isi/subfolder project tidak di-upload.

@@ -1063,11 +1063,8 @@ def consultant_sessions(
     body = _parse_json_body(request)
     project_id = body.get("project_id") or None
     title = body.get("title") or None
-    if not project_id:
-        try:
-            project_id = service.project_store.get_active_project_id() or None
-        except Exception:  # noqa: BLE001
-            project_id = None
+    # project_id resolution (fallback ke active project) dilakukan gateway;
+    # tanpa project yang jelas, gateway mengembalikan ValidationError.
     session = service.create_consultant_session(project_id=project_id, title=title)
     return _json_response(session, status=201)
 
@@ -1083,14 +1080,12 @@ def consultant_session_detail(
     PATCH /api/consultant/sessions/<id> -> rename (body: {\"title\": \"...\"}).
 
     DELETE /api/consultant/sessions/<id> -> delete session.
+
+    Semua operasi di-scope ke SATU project: project_id dari query, atau
+    fallback ke active project (dilakukan gateway). Tanpa project yang jelas,
+    gateway mengembalikan error (isolasi sesi per project).
     """
-    # project_id filter (opsional, agar scope per-project konsisten)
     project_id = request.GET.get("project_id") or None
-    if not project_id:
-        try:
-            project_id = service.project_store.get_active_project_id() or None
-        except Exception:  # noqa: BLE001
-            project_id = None
 
     if request.method == "GET":
         session = service.get_consultant_session(session_id, project_id=project_id)
@@ -1116,11 +1111,8 @@ def consultant_session_detail(
             raise NotFoundError("Session not found")
         return _json_response(updated)
 
-    # DELETE
-    if project_id:
-        deleted = service.delete_consultant_session(session_id, project_id=project_id)
-    else:
-        deleted = service.delete_consultant_session(session_id)
+    # DELETE — selalu ter-scope ke satu project (tidak ada delete lintas-project)
+    deleted = service.delete_consultant_session(session_id, project_id=project_id)
     if not deleted:
         from api.services import NotFoundError
 

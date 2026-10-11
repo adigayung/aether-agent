@@ -243,6 +243,67 @@ def _validate_matrix_payload(payload: Any) -> None:
                 )
 
 
+class _GatewayConsultantScope:
+    """ConsultantProjectScope yang memakai registry + active project GW.
+
+    Sumber kebenaran:
+        * project id terdaftar  -> ``GatewayService.projects`` (ProjectRegistry),
+        * path root otoritatif  -> ProjectRegistry config (``.root``); fallback
+          ke ``GatewayService.project_store`` (SQLite launcher metadata) untuk
+          project yang belum ada di registry JSON.
+        * active project        -> ``GatewayService.project_store`` (SQLite).
+    """
+
+    def __init__(self, gateway: "GatewayService") -> None:
+        self._gateway = gateway
+
+    def active_project_id(self) -> Optional[str]:
+        try:
+            active = self._gateway.project_store.get_active_project_id()
+        except Exception:  # noqa: BLE001 - state aktif tidak boleh crash
+            return None
+        return str(active) if active else None
+
+    def project_root(self, project_id: str) -> Optional[str]:
+        if not project_id:
+            return None
+        # 1) Registry AETHER (sumber struktur project).
+        try:
+            config = self._gateway.projects.get(project_id)
+        except Exception:  # noqa: BLE001 - registry error -> coba store
+            config = None
+        if config is not None:
+            root = getattr(config, "root", None)
+            if root:
+                return str(root)
+        # 2) Fallback: launcher metadata (id -> path). Tetap project terdaftar.
+        try:
+            meta = self._gateway.project_store.get_project(project_id)
+        except Exception:  # noqa: BLE001
+            meta = None
+        if meta and meta.get("path"):
+            return str(meta["path"])
+        return None
+
+    def registered_project_ids(self) -> List[str]:
+        ids: List[str] = []
+        try:
+            for config in self._gateway.projects.list():
+                pid = getattr(config, "id", None)
+                if pid:
+                    ids.append(str(pid))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            for meta in self._gateway.project_store.list_projects():
+                pid = meta.get("id")
+                if pid and str(pid) not in ids:
+                    ids.append(str(pid))
+        except Exception:  # noqa: BLE001
+            pass
+        return ids
+
+
 class GatewayService:
     """Facade tipis menuju komponen AETHER yang sudah ada.
 
@@ -355,49 +416,140 @@ class GatewayService:
         & tool AETHER yang sudah ada dengan boundary read-only terhadap CODE
         PROJECT dan read+update terhadap Project Bible. Dibuat lazy agar jalur
         read-only gateway tetap ringan.
+
+        Sesi Consultant di-SCOPE per project: storage project-local di
+        ``<project_path>/.aether/consultant/sessions.json``. Resolusi project
+        otoritatif disuntikkan lewat ``ConsultantProjectScope`` (registry +
+        active project state) sehingga core tidak bergantung pada layer web.
         """
         if self._consultant_service is None:
             from agent_ai.consultant import ConsultantService
 
-            self._consultant_service = ConsultantService()
+            self._consultant_service = ConsultantService(
+                project_scope=_GatewayConsultantScope(self)
+            )
         return self._consultant_service
 
     # ------------------------------------------------------------------ #
     # Consultant Session Management (pass-through to ConsultantService)
     # ------------------------------------------------------------------ #
+    #
+    # ISOLASI PER PROJECT: setiap operasi sesi WAJIB punya project_id. Bila
+    # tidak diberikan, fallback HANYA ke active project; bila tetap tidak ada,
+    # raise ValidationError yang jelas (TIDAK pernah lintas-project).
+    def _consultant_session_project_id(self, project_id: Optional[str]) -> str:
+        """Resolve project_id efektif untuk operasi sesi Consultant."""
+        candidate = (project_id or "").strip()
+        if candidate:
+            return candidate
+        try:
+            active = self.project_store.get_active_project_id()
+        except Exception:  # noqa: BLE001 - project state tidak boleh crash
+            active = None
+        if active:
+            return str(active)
+        raise ValidationError(
+            "project_id wajib untuk operasi sesi Consultant dan tidak ada "
+            "active project. Pilih project terlebih dahulu."
+        )
+
     def list_consultant_sessions(self, project_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """List consultant sessions, newest first, optionally filtered by project_id."""
-        return self.consultant_service.list_sessions(project_id=project_id)
+        """List consultant sessions untuk SATU project, terbaru lebih dulu."""
+        pid = self._consultant_session_project_id(project_id)
+        return self.consultant_service.list_sessions(project_id=pid)
 
     def get_consultant_session(
         self, session_id: str, project_id: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
-        """Get a consultant session by ID, optionally scoped to a project."""
-        return self.consultant_service.get_session(session_id, project_id=project_id)
+        """Get a consultant session by ID pada SATU project."""
+        pid = self._consultant_session_project_id(project_id)
+        return self.consultant_service.get_session(session_id, project_id=pid)
 
     def create_consultant_session(
         self, project_id: Optional[str] = None, title: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Create a new consultant session (scoped to project if given)."""
-        return self.consultant_service.create_session(project_id=project_id, title=title)
+        """Create a new consultant session untuk SATU project."""
+        pid = self._consultant_session_project_id(project_id)
+        return self.consultant_service.create_session(project_id=pid, title=title)
 
     def rename_consultant_session(
         self, session_id: str, title: str, project_id: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
-        """Rename a consultant session."""
-        return self.consultant_service.rename_session(session_id, title, project_id=project_id)
+        """Rename a consultant session pada SATU project."""
+        pid = self._consultant_session_project_id(project_id)
+        return self.consultant_service.rename_session(session_id, title, project_id=pid)
 
     def delete_consultant_session(
         self, session_id: str, project_id: Optional[str] = None
     ) -> bool:
-        """Delete a consultant session."""
-        return self.consultant_service.delete_session(session_id, project_id=project_id)
+        """Delete a consultant session pada SATU project."""
+        pid = self._consultant_session_project_id(project_id)
+        return self.consultant_service.delete_session(session_id, project_id=pid)
 
     def reset_consultant_session(
         self, session_id: str, project_id: Optional[str] = None
     ) -> bool:
-        """Clear a consultant session's turns (keep metadata)."""
-        return self.consultant_service.reset_session(session_id, project_id=project_id)
+        """Clear a consultant session's turns pada SATU project."""
+        pid = self._consultant_session_project_id(project_id)
+        return self.consultant_service.reset_session(session_id, project_id=pid)
+
+    def _consultant_identity_sources(self) -> List[Any]:
+        """Sumber identitas project TAMBAHAN untuk migrasi legacy.
+
+        Registry AETHER (``projects/*/project.json``) adalah sumber struktur
+        utama. Bila registry KOSONG (mis. project.json belum dibuat) tapi
+        launcher SQLite (``data/aether.db`` -> tabel ``projects``) masih
+        menyimpan pemetaan id->path yang OTORITATIF, sumber itu disediakan agar
+        sesi legacy yang pemiliknya dapat dibuktikan tetap bisa dipulihkan.
+        """
+        from agent_ai.consultant.migration import StaticIdentitySource
+
+        identities: Dict[str, str] = {}
+        try:
+            for meta in self.project_store.list_projects():
+                pid = meta.get("id")
+                path = meta.get("path")
+                if pid and path:
+                    identities[str(pid)] = str(path)
+        except Exception:  # noqa: BLE001 - audit tidak boleh crash karena store
+            identities = {}
+        return [StaticIdentitySource(identities, label="launcher-db")]
+
+    def audit_consultant_legacy_migration(
+        self,
+        *,
+        legacy_path: Optional[str] = None,
+        dry_run: bool = False,
+        orphan_mapping: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Audit + pulihkan sesi Consultant legacy (GLOBAL -> per project).
+
+        READ-ONLY terhadap file legacy. Registry kosong ditangani dengan
+        menambahkan sumber identitas OTORITATIF alternatif (launcher SQLite).
+        Sesi tanpa identitas yang dapat dibuktikan tetap orphan; pemulihan
+        eksplisit memakai ``orphan_mapping`` (``{session_id: project_id}``)
+        yang dikonfirmasi pengguna.
+
+        Args:
+            legacy_path: path file legacy (default: data/consultant_sessions.json).
+            dry_run: bila True, hitung laporan tanpa menulis apa pun.
+            orphan_mapping: pemetaan eksplisit sesi orphan -> project_id
+                (hanya dipakai bila project_id tujuan TERVERIFIKASI).
+
+        Returns:
+            Dict laporan migrasi (lihat ``MigrationReport.to_dict``).
+        """
+        from agent_ai.consultant.migration import audit_legacy_migration
+
+        scope = _GatewayConsultantScope(self)
+        report = audit_legacy_migration(
+            scope,
+            legacy_path=legacy_path,
+            dry_run=dry_run,
+            identity_sources=self._consultant_identity_sources(),
+            orphan_mapping=orphan_mapping,
+        )
+        return report.to_dict()
 
     @property
     def github_backup_service(self) -> Any:
@@ -2732,20 +2884,16 @@ class GatewayService:
 
         normalized_images = self._normalize_images(images)
 
-        # Default ke active project (konsisten dengan _resolve_workspace_root)
-        # agar sesi Consultant ter-tag dan TERISOLASI per project.
-        if not project_id:
-            try:
-                project_id = self.project_store.get_active_project_id() or None
-            except Exception:  # noqa: BLE001 - project state tidak boleh menggagalkan consult
-                project_id = None
+        # Sesi Consultant WAJIB ter-scope ke satu project (ISOLASI). Bila
+        # project_id kosong, fallback HANYA ke active project; bila tetap tidak
+        # ada, raise error jelas (TIDAK ada sesi lintas-project).
+        project_id = self._consultant_session_project_id(project_id)
 
         if root is None:
             root = self._resolve_workspace_root(project_id)
         if not root:
             # Fallback ke root workspace AETHER (repo tempat backend berjalan)
-            # agar Consultant tetap dapat menganalisis project AETHER sendiri
-            # walau belum ada project aktif.
+            # agar Consultant tetap dapat menganalisis project AETHER sendiri.
             from pathlib import Path as _Path
 
             root = str(_Path(__file__).resolve().parents[3])

@@ -221,6 +221,7 @@ class AgentOrchestrator:
         policy_escalator: Optional[Callable[[str, str | None], Any]] = None,
         working_state_provider: Optional[Callable[[], str]] = None,
         provider_fallback_resolver: Optional[Callable[[BaseException], Any]] = None,
+        change_evidence: Optional[Any] = None,
     ) -> None:
         self.provider = provider
         self.executor = executor or ToolExecutor()
@@ -300,6 +301,14 @@ class AgentOrchestrator:
         # callback ini; orchestrator hanya memakainya secara generik
         # (provider-agnostic), sesuai prinsip Core yang provider-agnostic.
         self.provider_fallback_resolver = provider_fallback_resolver
+        # Change evidence per task (OPSIONAL, duck-typed). Bila diisi (mis.
+        # `TaskChangeEvidence` dari runtime), orchestrator dapat memakai DAFTAR
+        # PERUBAHAN FILE YANG BENAR-BENAR TERDETEKSI sebagai evidence tambahan
+        # untuk mekanisme yang SUDAH ADA (verification nudge + ringkasan
+        # evidence hasil run). Tidak ada evaluator completion baru: keputusan
+        # selesai tetap MURNI dari response LLM tanpa tool call. Orchestrator
+        # tidak mengimpor subsistem changes (Core tetap provider-agnostic).
+        self.change_evidence = change_evidence
 
     # ------------------------------------------------------------------ #
     # Tool definitions
@@ -1433,6 +1442,29 @@ class AgentOrchestrator:
             ),
             "nudge_sent": bool(getattr(loop, "verification_nudge_sent", False)),
         }
+
+    def _change_evidence_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Ringkasan perubahan file NYATA dari change evidence (bila tersedia).
+
+        Duck-typed: cukup `summary()` + `counts()`. None bila evidence tidak
+        disuntikkan atau belum ada perubahan terdeteksi. Ini fakta filesystem
+        (path + kind + ukuran), bukan hasil validasi atau jenis perubahan yang
+        dikarang.
+        """
+        evidence = self.change_evidence
+        if evidence is None:
+            return None
+        try:
+            changes = evidence.summary()
+            if not changes:
+                return None
+            snapshot: Dict[str, Any] = {"changes": changes}
+            counts = evidence.counts()
+            if isinstance(counts, dict):
+                snapshot["counts"] = counts
+            return snapshot
+        except Exception:  # noqa: BLE001 - evidence tidak boleh crash loop
+            return None
 
     @classmethod
     def _needs_verification_nudge(cls, loop: AgentLoop) -> bool:
@@ -2600,20 +2632,41 @@ class AgentOrchestrator:
                 # kurang. Ini TIDAK menyatakan gagal, TIDAK menentukan completion
                 # dari keyword/metadata, dan TIDAK memicu pada cancellation atau
                 # kegagalan provider (keduanya keluar via `break` di atas).
+                # Change evidence (fakta filesystem): hasil perubahan NYATA task
+                # ini (created/modified/deleted) dilampirkan pada event nudge dan
+                # pada ringkasan evidence hasil run. Ini TIDAK menentukan
+                # completion: keputusan selesai tetap murni response LLM.
+                change_snapshot = self._change_evidence_snapshot()
                 if self._needs_verification_nudge(loop):
                     loop.verification_nudge_sent = True
                     history.append_user_message(
                         self._verification_nudge_message().content
                     )
+                    nudge_payload: Dict[str, Any] = {
+                        "reason": "missing_validation_after_change",
+                        "iteration": loop.iteration,
+                    }
+                    if change_snapshot is not None:
+                        nudge_payload["changed_files"] = change_snapshot.get(
+                            "changes"
+                        )
                     emit_event(
                         self.event_sink,
                         "verification_nudge",
-                        {
-                            "reason": "missing_validation_after_change",
-                            "iteration": loop.iteration,
-                        },
+                        nudge_payload,
                     )
                     continue
+                # Observability: fakta perubahan saat LLM menyatakan final.
+                if change_snapshot is not None:
+                    emit_event(
+                        self.event_sink,
+                        "change_evidence",
+                        {
+                            "iteration": loop.iteration,
+                            "changes": change_snapshot.get("changes"),
+                            "counts": change_snapshot.get("counts"),
+                        },
+                    )
                 history.append_assistant_message(content=response.text or "")
                 loop.finish(result=response.text or "")
                 break
@@ -2810,6 +2863,16 @@ class AgentOrchestrator:
         # TERSTRUKTUR (fakta langkah). TIDAK mengubah teks final LLM (`result`)
         # maupun kontrak `status`; additive untuk consumer hasil runtime.
         evidence = self._verification_evidence(loop)
+        # Change evidence NYATA (bila change evidence disuntikkan runtime):
+        # daftar perubahan file yang benar-benar terdeteksi filesystem.
+        # Additive — tidak mengubah `status`, `result`, atau keputusan loop.
+        change_snapshot = self._change_evidence_snapshot()
+        if change_snapshot is not None:
+            evidence = dict(evidence)
+            evidence["changed_files"] = change_snapshot.get("changes")
+            counts = change_snapshot.get("counts")
+            if isinstance(counts, dict):
+                evidence["change_counts"] = counts
         return OrchestratorResult(
             status=loop.status,
             result=loop.state.result,

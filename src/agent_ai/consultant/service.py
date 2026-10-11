@@ -19,8 +19,7 @@ from __future__ import annotations
 import re
 import threading
 import uuid
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from agent_ai.consultant.guard import (
     ConsultantBoundProvider,
@@ -41,7 +40,10 @@ from agent_ai.core.orchestrator import AgentOrchestrator
 # Consultant maupun Agent Task). Satu implementasi tunggal; alias dipertahankan
 # agar pemanggil lama tetap bekerja.
 from agent_ai.vision.parts import build_image_parts as _build_image_parts
-from agent_ai.consultant.store import ConsultantSessionStore
+from agent_ai.consultant.store import (
+    ConsultantSessionStore,
+    project_sessions_path,
+)
 
 #: Batas langkah reasoning/tool per giliran konsultasi (safety, bukan target).
 _DEFAULT_MAX_STEPS = 40
@@ -88,8 +90,8 @@ class ConsultantSession:
 
     Metadata tambahan (project_id, title, created_at, updated_at) memungkinkan
     panel Sessions UI menampilkan daftar sesi per project, mengurutkan, dan
-    memungkinkan rename. Session tetap in-memory (MVP); lihat docstrings
-    ConsultantService untuk kebijakan persistensi.
+    memungkinkan rename. Sesi DIPERSISTENKAN project-local di
+    ``<project_path>/.aether/consultant/sessions.json`` (lihat store.py).
     """
 
     def __init__(
@@ -190,211 +192,336 @@ class ConsultantSession:
         )
 
 
+class ConsultantProjectScope:
+    """Resolusi project OTORITATIF untuk scoping sesi Consultant.
+
+    Sesi Consultant HANYA boleh diakses pada satu project. Karena core
+    (`agent_ai`) tidak boleh bergantung pada layer web, scope di-INJECT oleh
+    pemanggil (mis. GatewayService) yang memiliki akses ke project registry.
+
+    Kontrak minimal:
+        active_project_id() -> Optional[str]
+            project id yang sedang aktif (fallback aman bila pemanggil tidak
+            menyebutkan project_id).
+        project_root(project_id) -> Optional[str]
+            path root OTORITATIF untuk sebuah project id (dari registry).
+            Mengembalikan None bila project tidak dikenal.
+
+    Implementasi default ``None`` (tanpa scope) berarti service TIDAK dapat
+    memetakan project_id -> root; dalam mode itu hanya ``store_path`` eksplisit
+    (untuk test/verifier, satu file) yang dipakai.
+    """
+
+    def active_project_id(self) -> Optional[str]:
+        return None
+
+    def project_root(self, project_id: str) -> Optional[str]:
+        return None
+
+    def registered_project_ids(self) -> List[str]:
+        """Daftar project id yang TERVERIFIKASI terdaftar (untuk migrasi)."""
+        return []
+
+
+class ConsultantScopeError(ValueError):
+    """Operasi sesi Consultant tanpa project scope yang jelas/dikenal."""
+
+
+class _ConsultantProjectContext:
+    """Store + in-memory cache untuk SATU project (isolasi keras).
+
+    Cache key = ``(project_id, session_id)``. Kunci tuple penting untuk mode
+    store eksplisit (satu file melayani banyak project_id): cache tidak boleh
+    mencampur sesi id-sama dari project berbeda.
+    """
+
+    __slots__ = ("store", "sessions", "persist_callback")
+
+    def __init__(self, store: ConsultantSessionStore, persist_callback: Any) -> None:
+        self.store = store
+        self.sessions: Dict[Any, ConsultantSession] = {}
+        self.persist_callback = persist_callback
+
+
 class ConsultantService:
     """Menjalankan satu giliran konsultasi memakai komponen AETHER existing.
 
+    ISOLASI PER PROJECT
+        Sesi Consultant disimpan PROJECT-LOCAL di
+        ``<project_path>/.aether/consultant/sessions.json`` dan HANYA diakses
+        lewat ``project_id`` yang dapat dipetakan ke root project otoritatif.
+        Tidak ada jalur yang mencampur sesi antar-project (tidak ada pencarian
+        lintas-project, tidak ada daftar global).
+
     Args:
         max_steps: batas langkah reasoning/tool per giliran (safety).
+        store_path: path file sessions eksplisit (SINGLE-project, untuk
+            test/verifier). Bila diisi, seluruh project_id dipetakan ke file
+            yang sama (isolasi tetap dijaga di dalam file via project_id).
+        project_scope: resolver project otoritatif (lihat
+            :class:`ConsultantProjectScope`). Wajib untuk mode project-local.
     """
 
-    def __init__(self, max_steps: int = _DEFAULT_MAX_STEPS, store_path: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        max_steps: int = _DEFAULT_MAX_STEPS,
+        store_path: Optional[str] = None,
+        project_scope: Optional[ConsultantProjectScope] = None,
+    ) -> None:
         self.max_steps = max_steps
-        # Persistent store for Consultant sessions (write-through JSON).
-        self._store = ConsultantSessionStore(store_path)
-        # In-memory cache keyed by (project_id, session_id) for fast access.
-        # Loaded from store at init; kept in sync via write-through.
-        self._sessions: Dict[Tuple[str, str], ConsultantSession] = {}
-        self._lock = threading.Lock()
-        self._load_sessions_from_store()
+        self._project_scope = project_scope
+        # Explicit single-file store (test/verifier). None => project-local.
+        self._explicit_store_path = store_path
+        # One context (store + in-memory cache) PER project root. Keyed by the
+        # resolved project root (or "" for the explicit single-file mode).
+        self._contexts: Dict[str, "_ConsultantProjectContext"] = {}
+        self._lock = threading.RLock()
+
+    # ------------------------------------------------------------------ #
+    # Project scoping
+    # ------------------------------------------------------------------ #
+    def _resolve_project_id(self, project_id: Optional[str]) -> str:
+        """Tentukan project id efektif, atau raise untuk mode project-scoped.
+
+        Aturan:
+            * ``project_id`` diberikan -> dipakai.
+            * tidak diberikan, scope ada + active project -> fallback active.
+            * tidak diberikan, scope ada tapi tanpa active -> error (isolasi).
+            * tidak diberikan, TANPA scope & TANPA store_path (usage bare
+              core: verifier/script) -> namespace anonim "" (ephemeral,
+              in-memory) agar perilaku API lama tetap bekerja. Tidak ada file
+              global yang ditulis, sehingga tidak ada kebocoran lintas-project.
+        """
+        candidate = (project_id or "").strip()
+        if candidate:
+            return candidate
+        scope = self._project_scope
+        if scope is not None:
+            active = (scope.active_project_id() or "").strip()
+            if active:
+                return active
+            raise ConsultantScopeError(
+                "project_id wajib untuk operasi sesi Consultant. Tidak ada active "
+                "project yang dapat dipakai sebagai fallback."
+            )
+        if self._explicit_store_path is not None:
+            # Explicit store = persistent sessions => scoping WAJIB.
+            raise ConsultantScopeError(
+                "project_id wajib untuk operasi sesi Consultant pada store "
+                "eksplisit (isolasi per project)."
+            )
+        # Bare core usage (tanpa scope & tanpa path): sesi ephemeral in-memory.
+        return ""
+
+    def _resolve_root(self, project_id: str) -> Optional[str]:
+        """Root OTORITATIF untuk project_id (None bila tidak dikenal)."""
+        if self._project_scope is None:
+            return None
+        root = self._project_scope.project_root(project_id)
+        if not root:
+            return None
+        return str(root)
+
+    def _context_for_project(self, project_id: str) -> "_ConsultantProjectContext":
+        """Ambil/buat context (store + cache) untuk satu project."""
+        with self._lock:
+            if self._explicit_store_path is not None:
+                # Single-file mode: one context for all project_ids.
+                key = "explicit"
+                ctx = self._contexts.get(key)
+                if ctx is None:
+                    ctx = _ConsultantProjectContext(
+                        ConsultantSessionStore(self._explicit_store_path),
+                        self._make_persist_callback_for_key(key),
+                    )
+                    self._contexts[key] = ctx
+                return ctx
+
+            if self._project_scope is None:
+                # Bare core usage (no scope, no path): EPHEMERAL in-memory store.
+                # Nothing is written to disk, so no cross-project file leak.
+                key = "ephemeral"
+                ctx = self._contexts.get(key)
+                if ctx is None:
+                    ctx = _ConsultantProjectContext(
+                        ConsultantSessionStore(ephemeral=True),
+                        self._make_persist_callback_for_key(key),
+                    )
+                    self._contexts[key] = ctx
+                return ctx
+
+            root = self._resolve_root(project_id)
+            if not root:
+                raise ConsultantScopeError(
+                    f"Project '{project_id}' tidak terdaftar (root otoritatif "
+                    "tidak ditemukan). Sesi Consultant tidak dapat diakses."
+                )
+            ctx = self._contexts.get(root)
+            if ctx is None:
+                ctx = _ConsultantProjectContext(
+                    ConsultantSessionStore(project_sessions_path(root)),
+                    self._make_persist_callback_for_key(root),
+                )
+                self._contexts[root] = ctx
+            return ctx
+
+    def _make_persist_callback_for_key(self, key: str):
+        """Write-through callback yang menulis ke context ber-key ``key``."""
+        def _persist(session: ConsultantSession) -> None:
+            ctx = self._contexts.get(key)
+            if ctx is not None:
+                ctx.store.save_session(session.to_dict())
+        return _persist
 
     # ------------------------------------------------------------------ #
     # Sessions
     # ------------------------------------------------------------------ #
-    def _make_persist_callback(self):
-        """Create a write-through callback for ConsultantSession.add()."""
-        def _persist(session: ConsultantSession) -> None:
-            self._store.save_session(session.to_dict())
-        return _persist
-
     def _get_session(
         self, session_id: Optional[str], project_id: Optional[str] = None
     ) -> ConsultantSession:
-        """Ambil/buat sesi konsultasi (thread-safe).
+        """Ambil/buat sesi konsultasi pada SATU project (thread-safe).
 
-        Sesi di-key oleh ``(project_id, session_id)`` sehingga sesi Consultant
-        TERISOLASI per project: id sesi yang sama pada project berbeda tidak
-        pernah berbagi konteks. Tanpa session_id tetap membuat sesi ephemeral
-        agar perilaku API lama tidak berubah. Pembuatan sesi bernama dapat
-        dilakukan lewat create_session.
+        ``project_id`` TIDAK lagi opsional secara bebas: bila kosong, fallback
+        hanya ke active project (bila scope menyediakannya); jika tidak, raise
+        :class:`ConsultantScopeError`. Tidak ada fallback lintas-project.
         """
-        project_key = project_id or ""
+        effective_pid = self._resolve_project_id(project_id)
+        ctx = self._context_for_project(effective_pid)
+        key = (effective_pid, session_id)
         with self._lock:
             if session_id:
-                existing = self._sessions.get((project_key, session_id))
+                existing = ctx.sessions.get(key)
                 if existing is not None:
                     return existing
-                # Fallback: restore from persistent store (e.g. after restart or
-                # when the session was created under a different in-memory map).
-                stored = self._store.get_session(
-                    session_id, project_id=project_id if project_id else None
-                )
+                stored = ctx.store.get_session(session_id, project_id=effective_pid)
                 if stored is not None:
                     session = ConsultantSession.from_dict(stored)
-                    session._on_change = self._make_persist_callback()
-                    self._sessions[(project_key, session_id)] = session
+                    session.project_id = effective_pid
+                    session._on_change = ctx.persist_callback
+                    ctx.sessions[key] = session
                     return session
-                # Adopsi sesi anonim (project belum ditetapkan) dengan session_id
-                # yang sama, lalu kaitkan ke project sekarang. Menjaga kontinuitas
-                # sesi yang dibuat lewat create_session() tanpa project.
-                anonymous = self._sessions.pop(("", session_id), None)
-                if anonymous is not None and project_id:
-                    anonymous.project_id = project_id
-                    self._sessions[(project_key, session_id)] = anonymous
-                    return anonymous
             session = ConsultantSession(
                 session_id=session_id,
-                project_id=project_id,
-                on_change=self._make_persist_callback(),
+                project_id=effective_pid,
+                on_change=ctx.persist_callback,
             )
-            self._sessions[(project_key, session.session_id)] = session
-            self._store.save_session(session.to_dict())
+            ctx.sessions[(effective_pid, session.session_id)] = session
+            ctx.store.save_session(session.to_dict())
             return session
 
     def _find_session(
         self, session_id: str, project_id: Optional[str] = None
     ) -> Optional[ConsultantSession]:
-        """Cari objek sesi (project_id None = cari lintas project)."""
-        if project_id is not None:
-            session = self._sessions.get((project_id, session_id))
+        """Cari sesi pada SATU project; None bila tidak ada.
+
+        Tidak ada varian lintas-project: ``project_id`` selalu diwajibkan
+        (fallback hanya ke active project via scope).
+        """
+        effective_pid = self._resolve_project_id(project_id)
+        ctx = self._context_for_project(effective_pid)
+        key = (effective_pid, session_id)
+        with self._lock:
+            session = ctx.sessions.get(key)
             if session is not None:
                 return session
-            stored = self._store.get_session(session_id, project_id=project_id)
+            stored = ctx.store.get_session(session_id, project_id=effective_pid)
             if stored is not None:
                 session = ConsultantSession.from_dict(stored)
-                session._on_change = self._make_persist_callback()
-                self._sessions[(project_id, session_id)] = session
+                session.project_id = effective_pid
+                session._on_change = ctx.persist_callback
+                ctx.sessions[key] = session
                 return session
-            return None
-        for session in self._sessions.values():
-            if session.session_id == session_id:
-                return session
-        stored = self._store.get_session(session_id)
-        if stored is not None:
-            session = ConsultantSession.from_dict(stored)
-            session._on_change = self._make_persist_callback()
-            self._sessions[(stored.get("project_id") or "", session.session_id)] = session
-            return session
         return None
-
-    def _load_sessions_from_store(self) -> None:
-        """Muat sesi dari persistent store ke cache in-memory (saat init)."""
-        try:
-            metas = self._store.list_sessions()
-        except Exception:  # noqa: BLE001 - store tidak boleh menggagalkan startup
-            return
-        persist_cb = self._make_persist_callback()
-        for meta in metas:
-            sid = meta.get("session_id")
-            pid = meta.get("project_id") or ""
-            if not sid:
-                continue
-            if (pid, sid) in self._sessions:
-                continue
-            data = self._store.get_session(sid, project_id=pid if pid else None)
-            if data:
-                session = ConsultantSession.from_dict(data)
-                session._on_change = persist_cb
-                self._sessions[(pid, sid)] = session
-
-    def _load_sessions_from_store(self) -> None:
-        """Muat sesi dari persistent store ke cache in-memory (saat init)."""
-        try:
-            metas = self._store.list_sessions()
-        except Exception:  # noqa: BLE001 - store tidak boleh menggagalkan startup
-            return
-        for meta in metas:
-            sid = meta.get("session_id")
-            pid = meta.get("project_id") or ""
-            if not sid:
-                continue
-            if (pid, sid) in self._sessions:
-                continue
-            data = self._store.get_session(sid, project_id=pid if pid else None)
-            if data:
-                self._sessions[(pid, sid)] = ConsultantSession.from_dict(data)
 
     def create_session(
         self, project_id: Optional[str] = None, title: Optional[str] = None
     ) -> Dict[str, Any]:
         """Buat sesi Consultant baru (ter-scope ke project) dan simpan ke disk."""
+        effective_pid = self._resolve_project_id(project_id)
+        ctx = self._context_for_project(effective_pid)
         with self._lock:
             session = ConsultantSession(
-                project_id=project_id,
+                project_id=effective_pid,
                 title=title,
-                on_change=self._make_persist_callback(),
+                on_change=ctx.persist_callback,
             )
-            self._sessions[(project_id or "", session.session_id)] = session
-            self._store.save_session(session.to_dict())
+            ctx.sessions[(effective_pid, session.session_id)] = session
+            ctx.store.save_session(session.to_dict())
             return session.to_dict()
 
     def list_sessions(self, project_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Daftar metadata sesi, terbaru lebih dulu; dapat difilter project."""
+        """Daftar metadata sesi untuk SATU project, terbaru lebih dulu.
+
+        ``project_id`` diwajibkan (fallback hanya ke active project). Tidak ada
+        daftar lintas-project.
+        """
+        effective_pid = self._resolve_project_id(project_id)
+        ctx = self._context_for_project(effective_pid)
         with self._lock:
-            sessions = [
-                s for s in self._sessions.values()
-                if project_id is None or s.project_id == project_id
-            ]
-            sessions.sort(key=lambda s: s.updated_at, reverse=True)
-            return [s.to_dict() for s in sessions]
+            by_id: Dict[str, ConsultantSession] = {
+                s.session_id: s
+                for (pid, _sid), s in ctx.sessions.items()
+                if pid == effective_pid
+            }
+            # Include sessions from the store that were not yet cached.
+            for meta in ctx.store.list_sessions(effective_pid):
+                sid = meta.get("session_id")
+                if sid and sid not in by_id:
+                    data = ctx.store.get_session(sid, project_id=effective_pid)
+                    if data:
+                        session = ConsultantSession.from_dict(data)
+                        session.project_id = effective_pid
+                        session._on_change = ctx.persist_callback
+                        ctx.sessions[(effective_pid, sid)] = session
+                        by_id[sid] = session
+            result = list(by_id.values())
+            result.sort(key=lambda s: s.updated_at, reverse=True)
+            return [s.to_dict() for s in result]
 
     def get_session(
         self, session_id: str, project_id: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
-        """Kembalikan konteks sesi (bila ada).
-
-        Bila project_id diberikan, sesi dicari pada project tersebut; bila tidak,
-        sesi dicari lintas project (kompatibel dengan pemanggil lama).
-        """
-        with self._lock:
-            session = self._find_session(session_id, project_id)
-            return session.to_dict() if session is not None else None
+        """Kembalikan konteks sesi pada SATU project (bila ada)."""
+        session = self._find_session(session_id, project_id)
+        return session.to_dict() if session is not None else None
 
     def rename_session(
         self, session_id: str, title: str, project_id: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
-        """Ubah judul sesi; None bila sesi tidak ditemukan."""
+        """Ubah judul sesi pada SATU project; None bila tidak ditemukan."""
+        effective_pid = self._resolve_project_id(project_id)
+        ctx = self._context_for_project(effective_pid)
+        session = self._find_session(session_id, effective_pid)
+        if session is None:
+            return None
         with self._lock:
-            session = self._find_session(session_id, project_id)
-            if session is None:
-                return None
             session.title = str(title or "New Chat").strip() or "New Chat"
             session.touch()
-            self._store.save_session(session.to_dict())
+            ctx.store.save_session(session.to_dict())
             return session.to_dict()
 
     def delete_session(
         self, session_id: str, project_id: Optional[str] = None
     ) -> bool:
-        """Hapus sesi Consultant (alias terarah untuk reset_session)."""
+        """Hapus sesi Consultant pada SATU project."""
         return self.reset_session(session_id, project_id=project_id)
 
     def reset_session(
         self, session_id: str, project_id: Optional[str] = None
     ) -> bool:
-        """Hapus konteks sesi (mulai konsultasi baru). Returns True bila ada."""
+        """Hapus konteks sesi pada SATU project. Returns True bila ada."""
+        effective_pid = self._resolve_project_id(project_id)
+        ctx = self._context_for_project(effective_pid)
+        key = (effective_pid, session_id)
         with self._lock:
-            deleted = False
-            if project_id is not None:
-                deleted = self._sessions.pop((project_id, session_id), None) is not None
-            else:
-                for key, session in list(self._sessions.items()):
-                    if session.session_id == session_id:
-                        del self._sessions[key]
-                        deleted = True
-                        break
-            if deleted:
-                self._store.delete_session(session_id, project_id=project_id)
-            return deleted
+            existed = key in ctx.sessions
+            if not existed:
+                existed = ctx.store.get_session(session_id, project_id=effective_pid) is not None
+            if not existed:
+                return False
+            ctx.sessions.pop(key, None)
+            ctx.store.delete_session(session_id, project_id=effective_pid)
+            return True
 
     # ------------------------------------------------------------------ #
     # Consult
@@ -420,9 +547,10 @@ class ConsultantService:
             root: root project target. Bila diisi, tool dibatasi ke root itu dan
                 Project Bible dibaca/ditulis di `<root>/.aether/bible/`.
             session_id: id sesi konsultasi (untuk konteks lintas giliran).
-            project_id: id project terkait. Dipakai untuk MENGISOLASI sesi per
-                project: sesi dengan id sama pada project berbeda tidak berbagi
-                konteks. Bila None, sesi berada pada scope global (perilaku lama).
+            project_id: id project terkait. WAJIB (atau dapat di-resolve dari
+                active project via ``project_scope``): sesi disimpan
+                project-local dan MENGISOLASI konteks per project. Bila kosong
+                dan tidak ada active project, raise :class:`ConsultantScopeError`.
             max_steps: override batas langkah.
             mode: mode Consultant ("quick" | "investigate"). Default "quick".
                 Mode menentukan tool yang benar-benar tersedia bagi LLM dan
@@ -525,11 +653,14 @@ class ConsultantService:
 
         proposal = extract_task_proposal(reply)
 
-        # Simpan giliran ke konteks sesi (untuk konsultasi berikutnya).
+        # Simpan giliran ke konteks sesi (untuk konsultasi berikutnya). Write
+        # through terjadi via callback session (ctx.store). Derive project id
+        # efektif dari session (bila project_id kosong -> fallback active).
         session.add("user", str(message).strip())
         session.add("consultant", reply)
         # Write-through: persist updated session (with new turns) to disk.
-        self._store.save_session(session.to_dict())
+        ctx = self._context_for_project(session.project_id or self._resolve_project_id(project_id))
+        ctx.store.save_session(session.to_dict())
 
         return ConsultantResult(
             session_id=session.session_id,

@@ -198,11 +198,23 @@ def _run() -> int:
     print("[17] tidak ada Git dependency OK")
 
     # 18) tidak ada duplicate filesystem engine.
+    #     `task_evidence.py` adalah ADAPTER tipis di atas ChangeTracker yang
+    #     SAMA (bukan tracker/filesystem engine kedua): ia hanya mengatur
+    #     kandidat path + ringkasan, tanpa I/O filesystem sendiri.
     files = {p.name for p in changes_dir.glob("*.py")}
-    assert files == {"__init__.py", "models.py", "tracker.py", "diff.py"}, files
+    assert files == {
+        "__init__.py",
+        "models.py",
+        "tracker.py",
+        "diff.py",
+        "task_evidence.py",
+    }, files
     # tracker memakai helper filesystem yang sudah ada.
     tracker_src = (changes_dir / "tracker.py").read_text(encoding="utf-8")
     assert "from agent_ai.tools.filesystem import" in tracker_src, "harus reuse filesystem helper"
+    # adapter TIDAK pernah memiliki tracker sendiri (satu change index).
+    evidence_src = (changes_dir / "task_evidence.py").read_text(encoding="utf-8")
+    assert "ChangeTracker(" not in evidence_src, "adapter tidak boleh membuat tracker kedua"
     print("[18] tidak ada duplicate filesystem engine OK")
 
     print()
