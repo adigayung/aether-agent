@@ -2535,7 +2535,13 @@ class AgentOrchestrator:
             task: task/permintaan user.
             system_prompt: override system prompt (default: system prompt loop).
             max_steps: emergency safety guard terhadap runaway loop. Nilai
-                default TINGGI dan bukan limit behavior agent.
+                default TINGGI dan bukan limit behavior agent. Batas ini
+                ditegakkan PER TOOL CALL: sisa anggaran diperiksa tepat sebelum
+                batch tool call didispatch, sehingga satu respons LLM berisi
+                banyak tool call tidak dapat melewatinya (bila batch melebihi
+                sisa anggaran, hanya tool call yang tercakup anggaran yang
+                dijalankan dan task dihentikan FAILED dengan alasan eksplisit —
+                bukan DONE).
             options: override GenerateOptions (default: options loop).
             user_parts: content blocks opsional untuk pesan user awal (mis.
                 image, format internal AETHER provider-agnostic). Kosong
@@ -2602,6 +2608,19 @@ class AgentOrchestrator:
         # identik). Nilai ini TIDAK dipakai untuk mengubah eksekusi, dedup, cache,
         # force, maupun loop — hanya untuk mengemit event `retrieval_repeat`.
         retrieval_seen: Dict[Tuple[str, str, str, str, str], int] = {}
+        # BUG-2 (enforcement batas `max_steps` PER TOOL CALL): `loop.iteration`
+        # bertambah satu per tool call yang DIEKSEKUSI (`loop.record_action()`
+        # dipanggil setelah batch selesai), sedangkan guard `max_steps` di atas
+        # while loop hanya diperiksa di AWAL round. Tanpa penjagaan di titik
+        # dispatch, satu respons LLM berisi banyak tool call dapat melewati batas
+        # (mis. max_steps=1 + batch 3 call -> 3 langkah tereksekusi). Karena itu
+        # sisa anggaran diperiksa TEPAT SEBELUM batch didispatch: hanya tool call
+        # yang masih tercakup anggaran yang dijalankan; sisanya TIDAK PERNAH
+        # dimulai dan task dihentikan sebagai FAILED (bukan DONE palsu).
+        # Dua variabel ini melacak fakta tersebut untuk alasan terminal +
+        # evidence/observability (TIDAK mengubah keputusan completion LLM).
+        batch_budget_abort = False
+        batch_budget_dropped = 0
 
         while not loop.is_finished:
             # Bible context lifecycle (murah & deterministik): sisipkan context
@@ -2807,7 +2826,48 @@ class AgentOrchestrator:
             # baru eksekusi tool call sebagai SATU BATCH melalui Tool Execution
             # Coordinator (paralel untuk call independen, sequential untuk yang
             # berkonflik), lalu kirim hasilnya (role="tool") pada urutan input.
-            model_tool_calls = response.tool_calls()
+            model_tool_calls = list(response.tool_calls())
+
+            # BUG-2: HARD BUDGET pada titik paling awal SEBELUM tool call mana
+            # pun didispatch (termasuk yang akan dijalankan paralel oleh
+            # coordinator). Sisa anggaran = max_steps - jumlah step yang SUDAH
+            # tercatat. Guard di awal while loop tidak cukup: batch dieksekusi
+            # UTUH lalu `loop.record_action()` menambah beberapa step sekaligus,
+            # sehingga batch dapat melewati batas tanpa pernah diperiksa lagi.
+            remaining_budget = int(max_steps) - int(loop.iteration)
+            if remaining_budget <= 0:
+                # Defense-in-depth: guard di awal loop sudah menangani kasus ini.
+                # Bila tetap terjadi (mis. anggaran benar-benar habis), JANGAN
+                # dispatch apa pun dan hentikan sebagai FAILED.
+                batch_budget_dropped = len(model_tool_calls)
+                loop.fail(
+                    f"Emergency safety limit tercapai: {int(loop.iteration)} "
+                    f"langkah tool sudah dieksekusi (max_steps={int(max_steps)}); "
+                    "tidak ada sisa anggaran untuk tool call pada respons ini. "
+                    "Loop dihentikan oleh AETHER (infrastructure), bukan "
+                    "keputusan LLM; task TIDAK selesai."
+                )
+                emit_event(
+                    self.event_sink,
+                    "loop_safety_abort",
+                    {
+                        "max_steps": int(max_steps),
+                        "iteration": int(loop.iteration),
+                        "dropped_tool_calls": int(batch_budget_dropped),
+                        "batched_tool_calls": len(model_tool_calls),
+                    },
+                )
+                batch_budget_abort = True
+                break
+            if len(model_tool_calls) > remaining_budget:
+                # Batch melebihi sisa anggaran: JALANKAN hanya yang tercakup
+                # anggaran; sisanya TIDAK PERNAH dimulai (tidak didispatch).
+                # Riwayat assistant dibangun dari subset yang benar-benar
+                # dijalankan saja, sehingga kontrak tool calling tetap
+                # konsisten (tiap assistant tool_call punya balasan role="tool").
+                batch_budget_dropped = len(model_tool_calls) - remaining_budget
+                model_tool_calls = model_tool_calls[:remaining_budget]
+
             tool_calls = [
                 ToolCall.create(action.name, action.arguments, id=action.id)
                 for action in model_tool_calls
@@ -3018,6 +3078,36 @@ class AgentOrchestrator:
                     },
                 )
 
+            # BUG-2: bila batch tadi DIPOTONG karena anggaran `max_steps` habis,
+            # sebagian tool call TIDAK PERNAH dijalankan. Task TIDAK boleh
+            # dilanjutkan (dan TIDAK boleh ditandai DONE): hentikan deterministik
+            # sebagai FAILED dengan alasan eksplisit bahwa batas max_steps
+            # tercapai di tengah batch. Tool call yang sudah dijalankan tetap
+            # tercatat lengkap (hasil role="tool" + step) sehingga riwayat tidak
+            # inkonsisten; tidak ada tool call yang dijalankan dua kali karena
+            # loop langsung berhenti di sini.
+            if batch_budget_dropped:
+                batch_budget_abort = True
+                loop.fail(
+                    f"Emergency safety limit tercapai: {int(loop.iteration)} "
+                    f"langkah tool dieksekusi (max_steps={int(max_steps)}). Batch "
+                    f"respons ini memuat {int(loop.iteration) + int(batch_budget_dropped)} "
+                    f"tool call; {int(batch_budget_dropped)} tool call tambahan "
+                    "TIDAK dijalankan karena anggaran habis. Loop dihentikan oleh "
+                    "AETHER (infrastructure), bukan keputusan LLM; task TIDAK selesai."
+                )
+                emit_event(
+                    self.event_sink,
+                    "loop_safety_abort",
+                    {
+                        "max_steps": int(max_steps),
+                        "iteration": int(loop.iteration),
+                        "dropped_tool_calls": int(batch_budget_dropped),
+                        "phase": "tool_calls",
+                    },
+                )
+                break
+
         learning = self._learn_from_run(task, loop)
         # Evidence-Based Self-Verification: lampirkan ringkasan evidence
         # TERSTRUKTUR (fakta langkah). TIDAK mengubah teks final LLM (`result`)
@@ -3040,6 +3130,15 @@ class AgentOrchestrator:
             evidence = dict(evidence)
             evidence["truncation_abort"] = True
             evidence["truncation_recoveries"] = int(truncation_recoveries)
+        if batch_budget_abort and not truncation_abort:
+            # Fakta infrastruktur (BUG-2): loop dihentikan karena anggaran
+            # `max_steps` habis DI TENGAH batch tool call. Additive — TIDAK
+            # mengubah `status` (tetap FAILED dari `loop.fail()`) maupun
+            # keputusan completion.
+            evidence = dict(evidence)
+            evidence["max_steps_abort"] = True
+            evidence["max_steps"] = int(max_steps)
+            evidence["max_steps_dropped_tool_calls"] = int(batch_budget_dropped)
         return OrchestratorResult(
             status=loop.status,
             result=loop.state.result,
