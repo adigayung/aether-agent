@@ -81,7 +81,7 @@ class ToolExecutor:
         # Root workspace project (untuk matrix inside/outside). None = tidak
         # diketahui -> scope INSIDE (boundary tool tetap berlaku).
         self.workspace_root = str(workspace_root) if workspace_root is not None else None
-        # Matrix project-local opsional (bila project punya `.aether/permissions.json`).
+        # Matrix project-local opsional (bila project punya `.aether/settings/permissions.json`).
         self.project_matrix = project_matrix
         # Gate approval ASK opsional (dipasang pada execution path produksi).
         # Bila None, ASK diperlakukan seperti sebelumnya (tidak dijalankan).

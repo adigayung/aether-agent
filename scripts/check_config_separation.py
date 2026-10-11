@@ -7,7 +7,7 @@ memakai sumber konfigurasi existing masing-masing:
                                    (`data/settings.json`, loader existing
                                    `agent_ai.config.settings`).
     - Sidebar -> Projects        = PROJECT SETTINGS / POLICY
-                                   (`<root>/.aether/permissions.json`,
+                                   (`<root>/.aether/settings/permissions.json`,
                                    ProjectPermissionStore existing).
 
 Yang diuji:
@@ -59,7 +59,7 @@ def _read_json(path: Path) -> dict:
 
 
 def _permissions_path(root: Path) -> Path:
-    return root / ".aether" / "permissions.json"
+    return root / ".aether" / "settings" / "permissions.json"
 
 
 def _run() -> int:
@@ -90,15 +90,19 @@ def _run() -> int:
     )
     from agent_ai.projects.permissions import (
         PERMISSIONS_FILE_NAME,
+        SETTINGS_DIR_NAME,
         ProjectPermissionStore,
     )
 
     assert PERMISSIONS_FILE_NAME == "permissions.json", PERMISSIONS_FILE_NAME
+    assert SETTINGS_DIR_NAME == "settings", SETTINGS_DIR_NAME
     store_probe = ProjectPermissionStore(root=root_a)
     # Dua lokasi file yang benar-benar berbeda -> tidak ada file konfigurasi
-    # gabungan baru.
+    # gabungan baru. Lokasi project dipusatkan di `.aether/settings/`.
     assert store_probe.path != settings_mod.SETTINGS_PATH
     assert store_probe.path.name == "permissions.json"
+    assert store_probe.path.parent.name == "settings"
+    assert store_probe.path == root_a / ".aether" / "settings" / "permissions.json"
     assert settings_mod.SETTINGS_PATH.name == "settings.json"
     print("[1] sumber konfigurasi terpisah OK -> settings.json vs permissions.json")
 
@@ -280,16 +284,25 @@ def _run() -> int:
         assert bad not in global_panel, (
             f"GlobalSettingsPanel tidak boleh memakai API Project Policy ('{bad}')"
         )
-    # Panel PROJECT hanya memakai API policy; TIDAK memuat setting global.
+    # Panel PROJECT (Project Settings) memakai API policy + API agent settings
+    # per-project; TIDAK memanggil API Global Settings (`/api/settings`).
     assert "getProjectPolicy" in policy_panel and "saveProjectPolicy" in policy_panel
+    assert (
+        "getProjectAgentSettings" in policy_panel
+        and "saveProjectAgentSettings" in policy_panel
+    )
     for bad in (
         "getGlobalSettings",
         "updateGlobalSettings",
-        "/settings",
         "settings.json",
     ):
         assert bad not in policy_panel, (
             f"ProjectPolicyPanel tidak boleh memuat '{bad}' (itu Global Settings)"
+        )
+    # Panel GLOBAL TIDAK boleh memanggil API Project Settings (policy/agents).
+    for bad in ("getProjectAgentSettings", "saveProjectAgentSettings"):
+        assert bad not in global_panel, (
+            f"GlobalSettingsPanel tidak boleh memuat '{bad}' (itu Project Settings)"
         )
     # TIDAK ada logic agent/runtime di kedua panel.
     for panel in (global_panel, policy_panel):
@@ -333,7 +346,10 @@ def _run() -> int:
     assert "ProjectPermissionStore" in services_src, (
         "gateway harus memakai ProjectPermissionStore existing"
     )
-    # View global settings & project policy terpisah (dua route, dua view).
+    assert "ProjectSettingsStore" in services_src, (
+        "gateway harus memakai ProjectSettingsStore untuk prompt per-project"
+    )
+    # View global settings & project settings terpisah (route & view berbeda).
     urls_src = (DJANGO_APP_DIR / "api" / "urls.py").read_text(encoding="utf-8")
     assert '"settings"' in urls_src and "global_settings" in urls_src, (
         "route /api/settings belum ada"
@@ -341,9 +357,15 @@ def _run() -> int:
     assert "project_policy" in urls_src and "/policy" in urls_src.replace(
         '"projects/<str:project_id>/policy"', "/policy"
     ), "route Project Policy belum ada"
+    assert "project_agent_settings" in urls_src and "/agents" in urls_src.replace(
+        '"projects/<str:project_id>/agents"', "/agents"
+    ), "route Project Settings -> Agents belum ada"
     views_src = (DJANGO_APP_DIR / "api" / "views.py").read_text(encoding="utf-8")
     assert "def global_settings" in views_src and "def project_policy" in views_src, (
         "view Global Settings & Project Policy harus terpisah"
+    )
+    assert "def project_agent_settings" in views_src, (
+        "view Project Settings -> Agents belum ada"
     )
     print("[8] boundary backend OK -> endpoint/store existing dipakai ulang (tanpa config kedua)")
 

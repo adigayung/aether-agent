@@ -183,10 +183,10 @@ export function deleteProject(projectId) {
 
 // --- Project Policy / Permission Matrix (PROJECT-LOCAL) --------------------
 // Policy permission SETIAP project disimpan project-local di
-// `<root>/.aether/permissions.json` (dibuat dari Default Project Permission
-// Matrix saat project dibuat). Di-enforce oleh PermissionManager AETHER
-// existing saat Agent melakukan action — BUKAN sistem permission kedua.
-// Dikelola dari Sidebar -> Projects -> Project Settings / Policy.
+// `<root>/.aether/settings/permissions.json` (dibuat dari Default Project
+// Permission Matrix saat project dibuat). Di-enforce oleh PermissionManager
+// AETHER existing saat Agent melakukan action — BUKAN sistem permission kedua.
+// Dikelola dari Sidebar -> Projects -> Project Settings -> Security.
 // Matrix: aksi x inside/outside workspace (allow | ask | deny).
 export function getProjectPolicy(projectId) {
   return request(`/projects/${encodeURIComponent(projectId)}/policy`);
@@ -196,6 +196,22 @@ export function saveProjectPolicy(projectId, { matrix }) {
   return request(`/projects/${encodeURIComponent(projectId)}/policy`, {
     method: "POST",
     body: JSON.stringify(matrix ? { matrix } : {}),
+  });
+}
+
+// --- Project Settings -> Agents (PROJECT-LOCAL) ----------------------------
+// System Prompt Agent & Consultant SETIAP project disimpan project-local di
+// `<root>/.aether/settings/agent.json` dan `<root>/.aether/settings/consultant.json`.
+// Ini BUKAN konfigurasi provider/model (yang tetap GLOBAL di `data/aether.db`).
+// Dikelola dari Sidebar -> Projects -> Project Settings -> Agents.
+export function getProjectAgentSettings(projectId) {
+  return request(`/projects/${encodeURIComponent(projectId)}/agents`);
+}
+
+export function saveProjectAgentSettings(projectId, payload) {
+  return request(`/projects/${encodeURIComponent(projectId)}/agents`, {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
   });
 }
 

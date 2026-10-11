@@ -41,8 +41,9 @@ export function useWorkspace({
   const lastProject = ref(null);
   // Target konfirmasi hapus project (page Projects, registry-only).
   const projectToDelete = ref(null);
-  // Project yang Project Settings / Policy-nya sedang dibuka (page Projects).
-  // Policy melekat PER PROJECT (`.aether/permissions.json`) — bukan global.
+  // Project yang Project Settings-nya sedang dibuka (page Projects).
+  // Policy melekat PER PROJECT (`.aether/settings/permissions.json`) — bukan
+  // global.
   const policyProject = ref(null);
   // Konfirmasi Close Project (dialog sebelum benar-benar menutup project).
   const closeProjectConfirm = ref(false);
@@ -99,7 +100,7 @@ export function useWorkspace({
       activeProject.value = record;
       selectedProjectId.value = record.id;
       await enterWorkbench();
-      // Tampilkan policy project BARU. Nilainya berasal dari `.aether/permissions.json`
+      // Tampilkan policy project BARU. Nilainya berasal dari `.aether/settings/permissions.json`
       // yang dibuat backend saat project dibuat (Default Project Permission Matrix)
       // — dibaca lewat endpoint policy existing, BUKAN konfigurasi kedua di frontend.
       openProjectPolicy(record);
@@ -169,9 +170,9 @@ export function useWorkspace({
     }
   }
 
-  // --- Projects page: Project Settings / Policy (PROJECT-LOCAL) --------------
-  // Policy disimpan per project di `<root>/.aether/permissions.json`. Hanya
-  // project yang dipilih yang terpengaruh; project lain tidak berubah.
+  // --- Projects page: Project Settings (PROJECT-LOCAL) -----------------------
+  // Policy disimpan per project di `<root>/.aether/settings/permissions.json`.
+  // Hanya project yang dipilih yang terpengaruh; project lain tidak berubah.
   function openProjectPolicy(project) {
     if (!project || !project.id) return;
     setError("");

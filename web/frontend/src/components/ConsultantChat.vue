@@ -18,6 +18,11 @@ import {
   deleteConsultantSession,
 } from "../api.js";
 import { renderMarkdown } from "../markdown.js";
+import {
+  CONSULTANT_STATUS_FALLBACK,
+  applyConsultantEvent,
+  eventBelongsToSession,
+} from "../consultantStatus.js";
 import QueuePanel from "./QueuePanel.vue";
 
 const props = defineProps({
@@ -75,6 +80,9 @@ const fileInput = ref(null);
 // Live status indikator (.consultant-thinking) di-update dari event runtime
 // NYATA Consultant (tool_called/tool_completed) yang dikirim lewat SSE
 // /api/events (sumber: SessionStore AETHER). BUKAN timer / rotasi teks.
+// Pemetaan event -> teks ada di ../consultantStatus.js (fungsi murni, diuji
+// terpisah) supaya invariant "event tak dikenal TIDAK mengosongkan status"
+// dapat diverifikasi tanpa me-render komponen.
 const liveStatus = ref("");
 // Handle EventSource aktif (dibuka bersamaan dengan send(), ditutup di
 // finally / catch / reset sesi). TIDAK pernah tertinggal terbuka.
@@ -513,42 +521,11 @@ function removeAttachment(index) {
 }
 
 // --- Live status dari event runtime NYATA ----------------------------------
-// Fungsi MURNI: petakan satu event runtime Consultant menjadi SATU baris teks
-// status. Mengganti teks sebelumnya (bukan menambah riwayat/list). Nama event
-// yang dipakai sudah ada di api.js KNOW_EVENTS (tool_called/tool_completed).
-function statusTextForEvent(payload) {
-  if (!payload || typeof payload !== "object") return "";
-  const type = payload.event_type || "";
-  const body = payload.payload || {};
-  const tool = body.tool || "";
-  if (type === "tool_called") {
-    switch (tool) {
-      case "read_file":
-        return "Reading source code…";
-      case "search_code":
-        return "Searching source code…";
-      case "list_files":
-        return "Inspecting project files…";
-      case "atlas_query":
-      case "rig_query":
-      case "project_map_status":
-        return "Checking project map…";
-      case "consultant_bible":
-      case "bible_retrieval":
-        return "Reading Project Bible…";
-      case "run_command":
-        return "Running command…";
-      case "update_project_bible":
-        return "Updating Project Bible…";
-      default:
-        return tool ? "Working…" : "";
-    }
-  }
-  if (type === "tool_completed") {
-    return "Analyzing results…";
-  }
-  return "";
-}
+// Fungsi MURNI statusTextForEvent()/applyConsultantEvent() dipindah ke
+// ../consultantStatus.js (dapat diuji dengan Node tanpa membangun komponen
+// Vue). Kontraknya dipertahankan: tool_called -> teks per tool,
+// tool_completed -> "Analyzing results…", event lain -> "" (TIDAK mengubah
+// status yang sedang tampil).
 
 // Tutup EventSource live (idempotent). Dipanggil di akhir send(), saat gagal,
 // saat project berubah, dan saat sesi berpindah/dibuat ulang.
@@ -572,9 +549,11 @@ function openLiveStream(sid) {
     sessionId: sid,
     onEvent: (payload) => {
       // Hanya tanggapi event milik sesi ini (defensif; server sudah filter).
-      if (payload && payload.session_id && payload.session_id !== sid) return;
-      const next = statusTextForEvent(payload);
-      if (next) liveStatus.value = next;
+      if (!eventBelongsToSession(payload, sid)) return;
+      // PENTING: applyConsultantEvent() MENGEMBALIKAN status sebelumnya bila
+      // event tidak dipetakan (mis. observation_received). Ini yang mencegah
+      // status (mis. "Analyzing results…") tereset sebelum sempat terlihat.
+      liveStatus.value = applyConsultantEvent(liveStatus.value, payload);
     },
   });
 }
@@ -1001,7 +980,7 @@ onMounted(() => {
           </div>
         </div>
 
-        <div v-if="sending" class="consultant-thinking">{{ liveStatus || "Consultant is investigating…" }}</div>
+        <div v-if="sending" class="consultant-thinking">{{ liveStatus || CONSULTANT_STATUS_FALLBACK }}</div>
       </div>
 
       <div v-if="error" class="wb-error">{{ error }}</div>

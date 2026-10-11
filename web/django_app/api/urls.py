@@ -78,6 +78,12 @@ urlpatterns = [
         views.project_policy,
         name="project_policy",
     ),
+    # Project Settings -> Agents (PROJECT-LOCAL: System Prompt Agent & Consultant).
+    path(
+        "projects/<str:project_id>/agents",
+        views.project_agent_settings,
+        name="project_agent_settings",
+    ),
     path("projects/<str:project_id>", views.delete_project, name="delete_project"),
     path("active-project", views.active_project, name="active_project"),
     path("open-in-explorer", views.open_in_explorer, name="open_in_explorer"),

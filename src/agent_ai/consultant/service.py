@@ -656,10 +656,24 @@ class ConsultantService:
         # sehingga LLM berhenti mencari map dan menyusun jawaban final —
         # konsultasi selesai NORMAL (bukan FAILED karena menyentuh max_steps).
         # Provider asli tetap dipakai untuk ProjectBrain (konteks Bible).
+        #
+        # System Prompt Consultant: bila project (`root`) mengoverride lewat
+        # `<root>/.aether/settings/consultant.json`, prompt project itulah yang
+        # dipakai; jika tidak, prompt bawaan AETHER (`build_consultant_system_prompt`)
+        # tetap berlaku sehingga perilaku default tidak berubah.
+        consultant_prompt = None
+        if root:
+            from agent_ai.projects.project_settings import (
+                project_consultant_system_prompt,
+            )
+
+            consultant_prompt = project_consultant_system_prompt(root)
+        if not consultant_prompt:
+            consultant_prompt = build_consultant_system_prompt(effective_mode)
         orchestrator = AgentOrchestrator(
             provider=ConsultantBoundProvider(provider, retrieval_guard),
             executor=executor,
-            system_prompt=build_consultant_system_prompt(effective_mode),
+            system_prompt=consultant_prompt,
             brain=brain,
             brain_learning=False,
             event_sink=_sink,

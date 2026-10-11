@@ -7,9 +7,11 @@ Membuktikan:
   punya file policy.
 - `ProjectPolicy.default()` mengembalikan baseline matrix tersebut.
 - `ProjectPermissionStore.ensure_default()` menginisialisasi
-  `<root>/.aether/permissions.json` (matrix default) untuk project BARU dan
-  TIDAK menimpa file yang sudah ada (perubahan user tidak di-reset).
+  `<root>/.aether/settings/permissions.json` (matrix default) untuk project BARU
+  dan TIDAK menimpa file yang sudah ada (perubahan user tidak di-reset).
 - File LEGACY (`{"mode","scope"}`) tetap dibaca (backward compatible).
+- File LAMA di `<root>/.aether/permissions.json` dimigrasikan ke lokasi baru
+  `.aether/settings/permissions.json` dengan aman.
 - `ProjectRegistry.register()` (project baru) membuat `permissions.json` di root
   project BARU, bukan di project lain.
 - Isolasi: dua project punya `permissions.json` masing-masing; perubahan satu
@@ -29,6 +31,7 @@ from agent_ai.projects.permissions import (
     DEFAULT_PROJECT_POLICY_MODE,
     DEFAULT_PROJECT_POLICY_SCOPE,
     PERMISSIONS_FILE_NAME,
+    SETTINGS_DIR_NAME,
     ProjectPermissionStore,
     ProjectPolicy,
 )
@@ -40,6 +43,12 @@ def _read(path: Path) -> dict:
 
 
 def _permissions_path(root: Path) -> Path:
+    """Lokasi KANONIK policy (`.aether/settings/permissions.json`)."""
+    return root / ".aether" / SETTINGS_DIR_NAME / PERMISSIONS_FILE_NAME
+
+
+def _legacy_permissions_path(root: Path) -> Path:
+    """Lokasi LAMA policy (`.aether/permissions.json`) untuk uji migrasi."""
     return root / ".aether" / PERMISSIONS_FILE_NAME
 
 
@@ -196,3 +205,66 @@ def test_policy_change_does_not_mutate_default(tmp_path):
     other.mkdir()
     other_store = ProjectPermissionStore(root=other)
     assert other_store.ensure_default().to_dict() == DEFAULT_MATRIX_RULES
+
+
+# --------------------------------------------------------------------------- #
+# 6. Migrasi lokasi LAMA (`.aether/permissions.json`) -> `.aether/settings/...`
+# --------------------------------------------------------------------------- #
+def test_legacy_location_is_migrated_to_settings_dir(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+    legacy = _legacy_permissions_path(root)
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    custom = {
+        action: {"inside": "deny", "outside": "deny"} for action in DEFAULT_MATRIX_RULES
+    }
+    legacy.write_text(json.dumps(custom), encoding="utf-8")
+
+    store = ProjectPermissionStore(root=root)
+    # Belum ada file baru -> load memicu migrasi.
+    policy = store.load()
+    assert policy.to_dict() == custom
+    assert _permissions_path(root).is_file()
+    assert _read(_permissions_path(root)) == custom
+    # File lama TIDAK dihapus (aman untuk rollback) dan tetap utuh.
+    assert legacy.is_file()
+    assert _read(legacy) == custom
+
+
+def test_migration_does_not_overwrite_new_file(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+    legacy = _legacy_permissions_path(root)
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(
+        json.dumps({action: {"inside": "deny", "outside": "deny"} for action in DEFAULT_MATRIX_RULES}),
+        encoding="utf-8",
+    )
+    # File BARU sudah ada dengan nilai berbeda -> TIDAK boleh ditimpa.
+    new_path = _permissions_path(root)
+    new_path.parent.mkdir(parents=True, exist_ok=True)
+    new_custom = {
+        action: {"inside": "allow", "outside": "allow"} for action in DEFAULT_MATRIX_RULES
+    }
+    new_path.write_text(json.dumps(new_custom), encoding="utf-8")
+
+    policy = ProjectPermissionStore(root=root).load()
+    assert policy.to_dict() == new_custom
+    assert _read(new_path) == new_custom
+
+
+def test_ensure_default_does_not_duplicate_legacy(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+    legacy = _legacy_permissions_path(root)
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    custom = {
+        action: {"inside": "ask", "outside": "deny"} for action in DEFAULT_MATRIX_RULES
+    }
+    legacy.write_text(json.dumps(custom), encoding="utf-8")
+
+    # ensure_default TIDAK boleh menimpa policy lama dengan default; ia
+    # memigrasikan policy lama apa adanya ke lokasi baru.
+    policy = ProjectPermissionStore(root=root).ensure_default()
+    assert policy.to_dict() == custom
+    assert _read(_permissions_path(root)) == custom

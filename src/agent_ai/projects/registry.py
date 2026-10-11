@@ -93,7 +93,7 @@ class ProjectRegistry:
         ProjectIntelligence(project_dir, root=config.root).create()
 
         # Inisialisasi Default Project Policy untuk project BARU:
-        # `<root>/.aether/permissions.json` dibuat dari baseline default yang
+        # `<root>/.aether/settings/permissions.json` dibuat dari baseline default yang
         # berlaku. File bersifat PROJECT-LOCAL (hanya di root project ini) dan
         # TIDAK menimpa policy yang sudah ada (idempotent). Setelah dibuat,
         # policy menjadi milik project tersebut sehingga perubahan lewat UI

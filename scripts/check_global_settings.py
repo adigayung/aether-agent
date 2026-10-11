@@ -138,6 +138,7 @@ def _run() -> int:
                 "agent": {
                     "system_prompt": _default_agent_prompt(),
                     "default_system_prompt": _default_agent_prompt(),
+                    "default_mode": "balanced",
                 },
             }, got
             print(f"[2] GET /api/settings OK -> nilai aktual = {got}")
@@ -227,20 +228,28 @@ def _run() -> int:
     )
     assert "Agent" in settings_vue, "tab Settings -> Agent harus ada"
 
-    # Panel Agent (System Prompt): memakai endpoint settings yang SAMA, tanpa
-    # sistem prompt/konfigurasi kedua dan tanpa logic agent di frontend.
+    # Panel Agent (Execution Mode): memakai endpoint settings yang SAMA, tanpa
+    # sistem konfigurasi kedua dan tanpa logic agent di frontend. System Prompt
+    # Agent/Consultant TIDAK lagi global — dipindah ke Project Settings ->
+    # Agents (`<root>/.aether/settings/agent.json` / `consultant.json`).
     agent_panel = (FRONTEND_DIR / "components" / "AgentSettingsPanel.vue").read_text(
         encoding="utf-8"
     )
     assert "getGlobalSettings" in agent_panel and "updateGlobalSettings" in agent_panel, (
         agent_panel[:200]
     )
-    assert "system_prompt" in agent_panel, "editor harus memuat system_prompt"
+    assert "default_mode" in agent_panel, "panel global harus memuat default_mode"
+    assert "system_prompt" not in agent_panel, (
+        "System Prompt TIDAK lagi global (pindah ke Project Settings -> Agents)"
+    )
+    assert "Project Settings" in agent_panel, (
+        "panel harus mengarahkan user ke Project Settings -> Agents"
+    )
     for bad in ("AgentRuntime", "AgentLoop", "orchestrator", "Replanner", "localStorage"):
         assert bad not in agent_panel, f"AgentSettingsPanel tidak boleh memuat '{bad}'"
     # Sidebar -> Settings sudah menu existing; pastikan item Settings tetap ada.
     app_vue = (FRONTEND_DIR / "App.vue").read_text(encoding="utf-8")
-    assert 'activeNav = \'settings\'' in app_vue, "Sidebar -> Settings harus tetap tersedia"
+    assert 'activeNav = ' + "'settings'" in app_vue, "Sidebar -> Settings harus tetap tersedia"
     print(
         "[7] boundary frontend OK -> Sidebar Settings, tab terpisah, "
         "endpoint /settings, tanpa logic agent"

@@ -945,13 +945,13 @@ const { editorOpen, editorFile, openFileInEditor, closeCodeEditor, onEditorError
                   </td>
                   <td><span class="mono">{{ p.root || p.path }}</span></td>
                   <td class="td-actions">
-                    <!-- Project Settings / Policy: policy melekat PER PROJECT
-                         (`.aether/permissions.json`), bukan setting global. -->
+                    <!-- Project Settings: policy melekat PER PROJECT
+                         (`.aether/settings/permissions.json` + prompt Agents). -->
                     <button
                       type="button"
                       class="icon-btn policy"
-                      title="Project Settings / Policy"
-                      aria-label="Project Settings / Policy"
+                      title="Project Settings"
+                      aria-label="Project Settings"
                       @click.stop="openProjectPolicy(p)"
                     >
                       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H1a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H7a1.7 1.7 0 0 0 1-1.5V1a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V7a1.7 1.7 0 0 0 1.5 1H23a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
@@ -1091,9 +1091,11 @@ const { editorOpen, editorFile, openFileInEditor, closeCodeEditor, onEditorError
       @error="onEditorError"
     />
 
-    <!-- ============ PERMISSION POLICY MODAL (per project) ============== -->
-    <!-- Policy dibuka dari tombol gear pada baris project (Sidebar -> Projects).
-         Nilai yang ditampilkan = policy AKTUAL project (`.aether/permissions.json`).
+    <!-- ============ PROJECT SETTINGS MODAL (per project) =============== -->
+    <!-- Dibuka dari tombol gear pada baris project (Sidebar -> Projects).
+         Tab Security = policy AKTUAL project (`.aether/settings/permissions.json`).
+         Tab Agents   = System Prompt Agent/Consultant project
+                        (`.aether/settings/agent.json` / `consultant.json`).
          TIDAK lagi berupa panel inline di bawah tombol gear. -->
     <ProjectPolicyPanel
       v-if="policyProject"

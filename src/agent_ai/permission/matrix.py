@@ -1,7 +1,7 @@
 """Project Permission Matrix: policy per aksi x lokasi (inside/outside).
 
 Modul ini melengkapi Permission Policy Layer existing (#54) dengan representasi
-MATRIX yang dipakai project (`<root>/.aether/permissions.json`). Ini BUKAN
+MATRIX yang dipakai project (`<root>/.aether/settings/permissions.json`). Ini BUKAN
 sistem permission kedua: ia hanya *model + resolver* yang tetap menghasilkan
 keputusan lewat `PermissionPolicy`/`PermissionManager` yang sudah ada.
 
@@ -48,7 +48,7 @@ TERMINAL_READ = "read"
 TERMINAL_MUTATE = "mutate"
 
 #: Matrix default AETHER (berlaku untuk project BARU, dan untuk project lama
-#: yang belum punya `.aether/permissions.json`).
+#: yang belum punya `.aether/settings/permissions.json`).
 DEFAULT_MATRIX_RULES: Dict[str, Dict[str, str]] = {
     MatrixAction.READ_FILES.value: {"inside": "allow", "outside": "allow"},
     MatrixAction.MODIFY_FILES.value: {"inside": "allow", "outside": "deny"},

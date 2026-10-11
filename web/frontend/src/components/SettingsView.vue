@@ -31,8 +31,9 @@ const props = defineProps({
 // Halaman Settings dipisah menjadi SECTION (tab) agar tidak menjadi satu
 // halaman panjang:
 //   - "general"   : Global Settings AETHER (`data/settings.json`).
-//   - "agent"     : System Prompt / Agent Instructions Agent
-//                   (`data/settings.json` -> `agent.system_prompt`).
+//   - "agent"     : Preferensi eksekusi Agent GLOBAL (`agent.default_mode`).
+//                   System Prompt Agent/Consultant melekat PER PROJECT
+//                   (Sidebar -> Projects -> Project Settings -> Agents).
 //   - "providers" : konfigurasi provider/model/credential (LLM Config AETHER).
 // Default = General (konfigurasi global aplikasi).
 const activeTab = ref("general");
@@ -313,7 +314,7 @@ watch(activeTab, (tab) => {
   <!-- ================= GENERAL: Global Settings AETHER ================= -->
   <GlobalSettingsPanel v-if="activeTab === 'general'" />
 
-  <!-- ================= AGENT: System Prompt Agent ================= -->
+  <!-- ================= AGENT: Agent Execution Mode ================= -->
   <AgentSettingsPanel v-else-if="activeTab === 'agent'" />
 
   <!-- ================= PROVIDERS: LLM Config AETHER ================= -->

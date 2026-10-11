@@ -1009,10 +1009,10 @@ class GatewayService:
     # Project Policy / Permission (PROJECT-LOCAL)
     #
     # Gateway HANYA mengorkestrasi: policy disimpan di
-    # `<root project target>/.aether/permissions.json` (project-local) memakai
-    # `ProjectPermissionStore` AETHER. TIDAK ada sistem permission kedua:
-    # mode/scope dipetakan ke `PermissionConfig`/`PolicyMode` existing dan
-    # di-enforce oleh PermissionManager yang sudah ada.
+    # `<root project target>/.aether/settings/permissions.json` (project-local)
+    # memakai `ProjectPermissionStore` AETHER. TIDAK ada sistem permission
+    # kedua: mode/scope dipetakan ke `PermissionConfig`/`PolicyMode` existing
+    # dan di-enforce oleh PermissionManager yang sudah ada.
     # ------------------------------------------------------------------ #
     def _project_policy_store(self, project_id: str):
         """Store policy project-local untuk project_id (root divalidasi)."""
@@ -1021,7 +1021,8 @@ class GatewayService:
         return ProjectPermissionStore(root=self._project_root_by_id(project_id))
 
     def get_project_policy(self, project_id: str) -> Dict[str, Any]:
-        """GET Project Permission Matrix aktual dari `<root>/.aether/permissions.json`.
+        """GET Project Permission Matrix aktual dari
+        `<root>/.aether/settings/permissions.json`.
 
         Mengembalikan nilai policy AKTUAL project tersebut (bukan default
         global). Bila file belum ada, default policy (matrix default) dipakai
@@ -1047,7 +1048,8 @@ class GatewayService:
     def save_project_policy(
         self, project_id: str, body: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """POST Project Permission Matrix -> simpan ke `<root>/.aether/permissions.json`.
+        """POST Project Permission Matrix -> simpan ke
+        `<root>/.aether/settings/permissions.json`.
 
         Body menerima matrix kanonik (langsung atau dibungkus `{"matrix": {...}}`):
 
@@ -1134,6 +1136,136 @@ class GatewayService:
             return store.load().matrix
         except Exception:  # noqa: BLE001 - policy tidak boleh crash eksekusi
             return None
+
+    # ------------------------------------------------------------------ #
+    # Project Settings -> Agents (System Prompt Agent & Consultant)
+    #
+    # Konfigurasi SYSTEM PROMPT per-project disimpan di
+    # `<root project target>/.aether/settings/agent.json` dan
+    # `<root project target>/.aether/settings/consultant.json`. Ini
+    # PROJECT-LOCAL (isolasi antar-project) dan BUKAN konfigurasi provider/model
+    # (provider/model tetap GLOBAL di `data/aether.db`).
+    # ------------------------------------------------------------------ #
+    def _project_settings_store(self, project_id: str):
+        """Store konfigurasi per-project untuk project_id (root divalidasi)."""
+        from agent_ai.projects.project_settings import ProjectSettingsStore
+
+        return ProjectSettingsStore(root=self._project_root_by_id(project_id))
+
+    def get_project_agent_settings(self, project_id: str) -> Dict[str, Any]:
+        """GET System Prompt Agent/Consultant project-local.
+
+        Mengembalikan nilai AKTUAL project tersebut:
+          - `agent.system_prompt` / `consultant.system_prompt` = override
+            project bila ada (string), `null` bila project TIDAK mengoverride.
+          - `*_default_prompt` = prompt bawaan AETHER (untuk tombol Restore
+            default), sehingga UI tetap menampilkan sumber yang benar.
+          - `paths` = lokasi file project-local (untuk transparansi UI).
+
+        Raises:
+            ValidationError: bila project_id kosong.
+            NotFoundError: bila project tidak ditemukan.
+        """
+        from agent_ai.config.settings import (
+            _default_agent_system_prompt,
+        )
+        from agent_ai.consultant.prompt import build_consultant_system_prompt
+
+        store = self._project_settings_store(project_id)
+        data = {
+            "project_id": str(project_id),
+            "agent": {
+                "system_prompt": store.agent_system_prompt(),
+                "default_system_prompt": _default_agent_system_prompt(),
+            },
+            "consultant": {
+                "system_prompt": store.consultant_system_prompt(),
+                "default_system_prompt": build_consultant_system_prompt(),
+            },
+            "paths": {
+                "agent": str(store.agent_path),
+                "consultant": str(store.consultant_path),
+            },
+            "exists": {
+                "agent": store.agent_exists,
+                "consultant": store.consultant_exists,
+            },
+        }
+        return data
+
+    def save_project_agent_settings(
+        self, project_id: str, body: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """POST System Prompt Agent/Consultant -> simpan project-local.
+
+        Body menerima subset:
+            {"agent": {"system_prompt": "..."},
+             "consultant": {"system_prompt": "..."}}
+
+        Nilai string kosong/None pada suatu prompt = HAPUS override (default
+        AETHER berlaku kembali). Hanya project ini yang terpengaruh.
+
+        Raises:
+            ValidationError: bila project_id kosong atau payload tidak valid.
+            NotFoundError: bila project tidak ditemukan.
+        """
+        from agent_ai.projects.project_settings import ProjectSettingsError
+
+        body = body or {}
+        # Pemisahan konfigurasi: provider/model/API key TIDAK boleh masuk lewat
+        # endpoint Project Settings -> Agents (tetap GLOBAL).
+        global_keys = {
+            "provider",
+            "provider_instance_id",
+            "model",
+            "model_id",
+            "api_key",
+            "api_key_env",
+            "api_url",
+            "base_url",
+            "port",
+            "compression",
+            "api_retry",
+        }
+        leaked = set(body) & global_keys
+        if leaked:
+            raise ValidationError(
+                "Field berikut milik konfigurasi GLOBAL AETHER (bukan Project "
+                f"Settings -> Agents): {', '.join(sorted(leaked))}. "
+                "Provider/model dikelola dari Sidebar -> Settings."
+            )
+        unknown = set(body) - {"agent", "consultant"}
+        if unknown:
+            raise ValidationError(
+                f"Field tidak dikenal: {', '.join(sorted(unknown))}."
+            )
+
+        store = self._project_settings_store(project_id)
+        try:
+            if "agent" in body:
+                agent = body.get("agent")
+                if not isinstance(agent, dict):
+                    raise ValidationError("'agent' harus berupa object.")
+                extra = set(agent) - {"system_prompt"}
+                if extra:
+                    raise ValidationError(
+                        f"Field tidak dikenal: {', '.join(sorted(extra))}."
+                    )
+                store.save_agent_settings(agent)
+            if "consultant" in body:
+                consultant = body.get("consultant")
+                if not isinstance(consultant, dict):
+                    raise ValidationError("'consultant' harus berupa object.")
+                extra = set(consultant) - {"system_prompt"}
+                if extra:
+                    raise ValidationError(
+                        f"Field tidak dikenal: {', '.join(sorted(extra))}."
+                    )
+                store.save_consultant_settings(consultant)
+        except ProjectSettingsError as exc:
+            raise ValidationError(str(exc)) from exc
+
+        return self.get_project_agent_settings(project_id)
 
     def set_active_project(self, project_id: str) -> Dict[str, Any]:
         """Jadikan project sebagai active project (persistent).
@@ -2028,15 +2160,15 @@ class GatewayService:
         # belum mengenal parameter ini (perilaku text-only tidak berubah).
         if user_parts:
             run_kwargs["user_parts"] = user_parts
-        # Policy project-local (`<root>/.aether/permissions.json`) HANYA untuk
-        # project task ini. Hanya dikirim bila policy ADA, agar verifier/
+        # Policy project-local (`<root>/.aether/settings/permissions.json`) HANYA
+        # untuk project task ini. Hanya dikirim bila policy ADA, agar verifier/
         # executor lama yang belum mengenal parameter ini tetap bekerja.
         project_config = self.project_permission_config(record.project_id)
         if project_config is not None:
             run_kwargs["project_permission_config"] = project_config
         # Project Permission Matrix project-local (aksi x inside/outside). Bila
-        # project punya `.aether/permissions.json`, matrix-nya di-enforce pada
-        # execution path (DENY menahan, ASK menahan + butuh approval). Bila
+        # project punya `.aether/settings/permissions.json`, matrix-nya di-enforce
+        # pada execution path (DENY menahan, ASK menahan + butuh approval). Bila
         # tidak ada, perilaku existing tidak berubah.
         project_matrix = self.project_permission_matrix(record.project_id)
         if project_matrix is not None:

@@ -11,7 +11,7 @@ Membuktikan (deterministik, tanpa model/API cloud nyata):
     4. HTTP endpoint: GET /api/tasks/approvals (pending) + POST
        /api/tasks/approvals/resolve (Allow/Deny) -> action tertahan dilanjutkan.
     5. Approval TIDAK tertukar antar task (task_id per request).
-    6. Project BARU -> `.aether/permissions.json` ada (matrix default) dan GET
+    6. Project BARU -> `.aether/settings/permissions.json` ada (matrix default) dan GET
        policy mengembalikan matrix AKTUAL (sumber policy project baru).
     7. Boundary frontend: policy dibuka sebagai MODAL (ProjectPolicyPanel),
        approv()/resolveApproval ada di api.js, TIDAK ada permission engine kedua.
@@ -268,13 +268,13 @@ def _run() -> int:
     root_new = FIX_ROOT / "proj_new"
     root_new.mkdir(parents=True, exist_ok=True)
     proj = service.create_project(name="PolicyUXNew", path=str(root_new))
-    pfile = root_new / ".aether" / "permissions.json"
+    pfile = root_new / ".aether" / "settings" / "permissions.json"
     assert pfile.is_file(), f"permissions.json harus dibuat di {pfile}"
     assert json.loads(pfile.read_text(encoding="utf-8")) == PermissionMatrix.default().to_dict()
     got = client.get(f"/api/projects/{proj['id']}/policy").json()
     assert got["matrix"] == PermissionMatrix.default().to_dict(), got
     assert got["exists"] is True, got
-    print("[6] project baru -> permissions.json + GET policy aktual OK")
+    print("[6] project baru -> .aether/settings/permissions.json + GET policy aktual OK")
 
     # --- [7] Boundary frontend (modal + api + tanpa engine kedua) ----------
     api_js = (FRONTEND_DIR / "api.js").read_text(encoding="utf-8")

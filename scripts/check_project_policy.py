@@ -1,17 +1,17 @@
 """Verifikasi Project Permission Matrix AETHER (per project).
 
 Membuktikan:
-    1. Policy disimpan project-local di `<root>/.aether/permissions.json`
+    1. Policy disimpan project-local di `<root>/.aether/settings/permissions.json`
        sebagai Permission Matrix (aksi x inside/outside).
     2. Mode matrix: ALLOW / ASK (require_approval) / DENY.
     3. Scope matrix: inside / outside workspace.
     4. Policy per project INDEPENDEN (project A TIDAK memengaruhi project B).
     5. GET mengembalikan nilai AKTUAL matrix project tersebut.
-    6. Save melalui API menulis kembali ke `.aether/permissions.json`.
+    6. Save melalui API menulis kembali ke `.aether/settings/permissions.json`.
     7. Enforcement: matrix di-enforce PermissionManager EXISTING (bukan sistem
        permission kedua) — DENY menahan, ASK menahan + butuh approval.
     8. Backward compatible: project lama tanpa policy -> matrix default.
-    9. Project BARU otomatis punya `.aether/permissions.json` (matrix default).
+    9. Project BARU otomatis punya `.aether/settings/permissions.json` (matrix default).
    10. Boundary frontend: policy dikelola per project, tanpa policy engine kedua.
 
 Deterministik, tanpa model/API cloud. Fixture project dibuat di
@@ -68,9 +68,13 @@ def teardown_fixture() -> None:
 
 
 def _read_permissions(root: Path) -> dict:
-    path = root / ".aether" / "permissions.json"
+    path = root / ".aether" / "settings" / "permissions.json"
     assert path.is_file(), f"permissions.json harus ada di {path}"
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _policy_file(root: Path) -> Path:
+    return root / ".aether" / "settings" / "permissions.json"
 
 
 def _run() -> int:
@@ -118,7 +122,7 @@ def _run() -> int:
     )
     print("[1] model Permission Matrix (allow/ask/deny x inside/outside) OK")
 
-    # --- [2] Store project-local: `<root>/.aether/permissions.json` --------
+    # --- [2] Store project-local: `<root>/.aether/settings/permissions.json` --------
     root_a = FIX_ROOT / "proj_a"
     store_a = ProjectPermissionStore(root=root_a)
     assert not store_a.exists()
@@ -127,7 +131,7 @@ def _run() -> int:
     store_a.save(ProjectPolicy.from_dict(_DENY_ALL_MATRIX))
     raw = _read_permissions(root_a)
     assert raw == _DENY_ALL_MATRIX, raw
-    print("[2] matrix tersimpan project-local di .aether/permissions.json OK")
+    print("[2] matrix tersimpan project-local di .aether/settings/permissions.json OK")
 
     # --- Setup gateway (isolasi registry + store SQLite) -------------------
     workspace = DUMMY_ROOT / "project_policy_registry"
@@ -158,7 +162,7 @@ def _run() -> int:
     assert got_b["matrix"] == PermissionMatrix.default().to_dict(), got_b
     print("[3] GET mengembalikan matrix policy AKTUAL per project OK")
 
-    # --- [4] Save via API -> menulis `.aether/permissions.json` -----------
+    # --- [4] Save via API -> menulis `.aether/settings/permissions.json` -----------
     ask_matrix = {
         action: {"inside": "ask", "outside": "deny"} for action in _MATRIX_ACTIONS
     }
@@ -173,7 +177,7 @@ def _run() -> int:
     # Nilai project A TIDAK berubah.
     raw_a = _read_permissions(root_a)
     assert raw_a == _DENY_ALL_MATRIX, raw_a
-    print("[4] Save via API menulis matrix ke .aether/permissions.json OK")
+    print("[4] Save via API menulis matrix ke .aether/settings/permissions.json OK")
 
     # --- [5] Policy INDEPENDEN per project ---------------------------------
     allow_matrix = {
@@ -284,7 +288,7 @@ def _run() -> int:
     empty_project = service.create_project(
         name="PolicyEmpty", path=str(FIX_ROOT / "proj_a")
     )
-    (root_a / ".aether" / "permissions.json").unlink()
+    (root_a / ".aether" / "settings" / "permissions.json").unlink()
     m_default = service.project_permission_matrix(empty_project["id"])
     assert m_default is not None
     assert (
@@ -302,8 +306,8 @@ def _run() -> int:
     raw_new = _read_permissions(root_new)
     assert raw_new == PermissionMatrix.default().to_dict(), raw_new
     # Project LAIN belum dibuat -> file hanya ada di project baru ini.
-    assert not (root_new2 / ".aether" / "permissions.json").exists()
-    print("[9] project baru otomatis punya .aether/permissions.json (matrix default) OK")
+    assert not _policy_file(root_new2).exists()
+    print("[9] project baru otomatis punya .aether/settings/permissions.json (matrix default) OK")
 
     # --- [10] Perubahan policy TIDAK mengubah default ----------------------
     proj_new = service.create_project(name="PolicyNewB", path=str(root_new))
@@ -321,11 +325,9 @@ def _run() -> int:
     print("[10] perubahan policy tidak mengubah default project berikutnya OK")
 
     # --- [11] Isolasi: setiap project punya permissions.json sendiri --------
-    assert (root_new / ".aether" / "permissions.json").is_file()
-    assert (root_new2 / ".aether" / "permissions.json").is_file()
-    assert (root_new / ".aether" / "permissions.json") != (
-        root_new2 / ".aether" / "permissions.json"
-    )
+    assert _policy_file(root_new).is_file()
+    assert _policy_file(root_new2).is_file()
+    assert _policy_file(root_new) != _policy_file(root_new2)
     print("[11] tiap project punya permissions.json sendiri (isolasi) OK")
 
     # --- [12] Boundary frontend: Sidebar -> Projects -> Project Settings ---

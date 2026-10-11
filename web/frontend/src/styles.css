@@ -3400,11 +3400,46 @@ tr:hover .q-copy-btn.hist-copy {
   color: #fca5a5;
 }
 .consultant-thinking {
+  /* Neon cyan Live Status. Layout/posisi/ukuran font DIPERTAHANKAN persis
+     seperti sebelumnya (align-self, font-size 12px, italic, padding) — hanya
+     warna + glow yang berubah agar status terlihat terang di tema gelap. */
   align-self: flex-start;
   font-size: 12px;
-  color: var(--text-faint);
+  color: #00e5ff;
   font-style: italic;
   padding: 4px 2px;
+  font-weight: 550;
+  letter-spacing: 0.01em;
+  /* Glow berlapis: halo rapat + sebaran lebih lebar (terlihat "menyala"). */
+  text-shadow:
+    0 0 4px rgba(0, 229, 255, 0.95),
+    0 0 10px rgba(0, 229, 255, 0.6),
+    0 0 20px rgba(0, 229, 255, 0.32);
+  /* Animasi HANYA memodulasi intensitas glow (visual). Ia TIDAK mengganti,
+     memalsukan, atau mensimulasikan teks status — teks tetap 100% dari event
+     runtime (tool_called / tool_completed). */
+  animation: consultant-thinking-glow 2.4s ease-in-out infinite;
+}
+@keyframes consultant-thinking-glow {
+  0%,
+  100% {
+    text-shadow:
+      0 0 4px rgba(0, 229, 255, 0.95),
+      0 0 10px rgba(0, 229, 255, 0.6),
+      0 0 20px rgba(0, 229, 255, 0.32);
+  }
+  50% {
+    text-shadow:
+      0 0 5px rgba(0, 229, 255, 1),
+      0 0 13px rgba(0, 229, 255, 0.72),
+      0 0 26px rgba(0, 229, 255, 0.46);
+  }
+}
+/* Hormati preferensi aksesibilitas: tanpa animasi, glow tetap menyala. */
+@media (prefers-reduced-motion: reduce) {
+  .consultant-thinking {
+    animation: none;
+  }
 }
 .consultant-proposal {
   flex: 0 0 auto;

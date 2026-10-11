@@ -205,7 +205,8 @@ class TaskExecutor:
 
         permission_manager: PermissionManager efektif opsional. Bila None,
         memakai `self.permission_manager` (perilaku existing). Dipakai untuk
-        memasang policy project-local (`<root>/.aether/permissions.json`) pada
+        memasang policy project-local
+        (`<root>/.aether/settings/permissions.json`) pada
         perintah task project tertentu TANPA mengubah jalur lain.
 
         project_matrix: Project Permission Matrix project-local opsional.
@@ -398,14 +399,14 @@ class TaskExecutor:
                 AgentRuntime -> AgentOrchestrator (user_parts). Kosong (default)
                 = text-only tidak berubah.
             project_permission_config: PermissionConfig project-local opsional
-                (dari `<root>/.aether/permissions.json`). Bila diisi, policy
+                (dari `<root>/.aether/settings/permissions.json`). Bila diisi, policy
                 di-enforce oleh PermissionManager EXISTING untuk task project
                 ini saja (project lain tidak terpengaruh). Bila None, perilaku
                 default tidak berubah.
             project_permission_matrix: Project Permission Matrix project-local
-                opsional (dari `<root>/.aether/permissions.json`). Bila diisi,
-                matrix (aksi x inside/outside) di-enforce pada execution path:
-                DENY menahan eksekusi, ASK menahan + butuh approval. Matrix
+                opsional (dari `<root>/.aether/settings/permissions.json`). Bila
+                diisi, matrix (aksi x inside/outside) di-enforce pada execution
+                path: DENY menahan eksekusi, ASK menahan + butuh approval. Matrix
                 berlaku untuk project task ini saja. Bila None, perilaku
                 default tidak berubah.
             approval_gate: gate approval ASK opsional `(context) -> bool`. Bila

@@ -1047,16 +1047,22 @@ class AgentRuntime:
         message pada awal session continuous loop.
         """
         # System prompt default Agent: bila pemanggil TIDAK memberi system
-        # prompt, pakai System Prompt Agent dari Global Settings
-        # (`data/settings.json` -> `agent.system_prompt`, dikelola lewat
-        # Sidebar -> Settings -> Agent). Bila user belum mengaturnya, loader
-        # mengembalikan isi System Prompt Agent existing (default) sehingga
-        # behavior AETHER tetap sama. Prompt ini adalah INSTRUCTION DASAR Agent;
-        # context dinamis (Environment, Project Bible, Skill, tool) tetap
-        # disisipkan seperti sebelumnya oleh orchestrator. Bila pemanggil
-        # memberi system prompt sendiri (mis. Consultant), prompt itu yang
-        # dipakai.
+        # prompt, pakai System Prompt Agent per-project
+        # (`<project_root>/.aether/settings/agent.json` -> `system_prompt`).
+        # Bila project TIDAK mengoverride, jatuh ke System Prompt Agent Global
+        # Settings (`data/settings.json` -> `agent.system_prompt`, dikelola
+        # lewat Sidebar -> Settings -> Agent). Bila user belum mengaturnya,
+        # loader mengembalikan isi System Prompt Agent existing (default)
+        # sehingga behavior AETHER tetap sama. Prompt ini adalah INSTRUCTION
+        # DASAR Agent; context dinamis (Environment, Project Bible, Skill,
+        # tool) tetap disisipkan seperti sebelumnya oleh orchestrator. Bila
+        # pemanggil memberi system prompt sendiri (mis. Consultant), prompt itu
+        # yang dipakai.
         system_prompt = self.system_prompt
+        if system_prompt is None:
+            from agent_ai.projects.project_settings import project_agent_system_prompt
+
+            system_prompt = project_agent_system_prompt(self.project_root)
         if system_prompt is None:
             from agent_ai.config.settings import agent_system_prompt
 

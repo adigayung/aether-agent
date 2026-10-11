@@ -100,7 +100,7 @@ class PermissionRequest:
     #: dapat dibedakan (diperlakukan INSIDE; boundary tool tetap berlaku).
     workspace_root: Optional[str] = None
     #: Project Permission Matrix efektif (bila project punya
-    #: `.aether/permissions.json`). None = pakai PermissionConfig existing.
+    #: `.aether/settings/permissions.json`). None = pakai PermissionConfig existing.
     project_matrix: Optional[Any] = None
 
     def to_dict(self) -> Dict[str, Any]:

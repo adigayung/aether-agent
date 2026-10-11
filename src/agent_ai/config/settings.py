@@ -203,7 +203,7 @@ _EDITABLE_SETTINGS_KEYS = frozenset(
 )
 
 #: Key yang MILIK Project Settings / Policy (project-local, disimpan di
-#: `<root>/.aether/permissions.json`) — BUKAN Global Settings AETHER.
+#: `<root>/.aether/settings/permissions.json`) — BUKAN Global Settings AETHER.
 #:
 #: Ditolak eksplisit di layer konfigurasi global agar policy/permission project
 #: TIDAK PERNAH tercampur ke `data/settings.json`. Ini menegakkan pemisahan
@@ -482,9 +482,9 @@ def normalize_global_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
         raise SettingsWriteError("Body update harus berupa object JSON.")
 
     # Pemisahan konfigurasi: policy/permission adalah milik Project Settings
-    # (`<root>/.aether/permissions.json`), BUKAN Global Settings AETHER. Tolak
-    # dengan pesan yang mengarahkan user ke tempat yang benar (bukan menerima
-    # diam-diam lalu menyimpan konfigurasi project ke file global).
+    # (`<root>/.aether/settings/permissions.json`), BUKAN Global Settings AETHER.
+    # Tolak dengan pesan yang mengarahkan user ke tempat yang benar (bukan
+    # menerima diam-diam lalu menyimpan konfigurasi project ke file global).
     migrated = set(updates) & _PROJECT_POLICY_KEYS
     if migrated:
         raise SettingsWriteError(

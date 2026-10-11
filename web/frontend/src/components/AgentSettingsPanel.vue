@@ -1,18 +1,19 @@
 <script setup>
-// Agent Settings AETHER (System Prompt Agent) — Sidebar -> Settings -> Agent.
+// Agent Settings AETHER (Default Execution Mode) — Sidebar -> Settings -> Agent.
 //
-// Sumber konfigurasi TETAP `data/settings.json` (satu-satunya sumber
-// konfigurasi global AETHER). Komponen ini HANYA memanggil HTTP ke Django
-// Gateway (`/api/settings`), yang meneruskan ke loader konfigurasi AETHER yang
-// sudah ada (`agent_ai.config.settings`). TIDAK ada sistem prompt /
-// konfigurasi kedua di frontend: nilai yang ditampilkan = nilai AKTUAL dari
-// backend, dan setiap simpan dikirim PARSIAL (hanya `agent.system_prompt`)
-// sehingga key/setting lain di `data/settings.json` tidak hilang.
+// System Prompt Agent & Consultant TIDAK lagi di sini: konfigurasi prompt
+// MELEKAT PER PROJECT dan dikelola di
+// Sidebar -> Projects -> Project Settings -> Agents
+// (`<root>/.aether/settings/agent.json` / `consultant.json`).
 //
-// Prompt ini adalah INSTRUCTION DASAR Agent. Context dinamis yang sudah ada
-// (Project Environment, Project Bible, Skill, tool context) tetap disisipkan
-// oleh backend runtime AETHER seperti sebelumnya — frontend TIDAK menjalankan
-// logic agent apa pun di sini.
+// Panel ini HANYA menyisakan preferensi GLOBAL: Default Execution Mode
+// (`data/settings.json` -> `agent.default_mode`). Sumber konfigurasi TETAP
+// `data/settings.json` (satu-satunya sumber konfigurasi global AETHER).
+// Komponen ini HANYA memanggil HTTP ke Django Gateway (`/api/settings`) yang
+// meneruskan ke loader konfigurasi AETHER yang sudah ada
+// (`agent_ai.config.settings`). TIDAK ada sistem konfigurasi kedua di frontend:
+// nilai yang ditampilkan = nilai AKTUAL dari backend, dan setiap simpan dikirim
+// PARSIAL (hanya `agent.default_mode`) sehingga key/setting lain tidak hilang.
 import { computed, onMounted, ref } from "vue";
 import { getGlobalSettings, updateGlobalSettings } from "../api";
 
@@ -22,35 +23,16 @@ const error = ref("");
 const notice = ref("");
 
 // Nilai AKTUAL dari backend (sumber kebenaran tampilan; bukan nilai lokal UI).
-const actual = ref({ system_prompt: "", default_system_prompt: "", default_mode: "balanced" });
+const actual = ref({ default_mode: "balanced" });
 // Draft editor (diisi dari `actual` setiap kali load/save).
-const draft = ref("");
 const draftMode = ref("balanced");
 
-const maxChars = 200000;
-
-const dirty = computed(
-  () => draft.value !== actual.value.system_prompt || draftMode.value !== actual.value.default_mode
-);
-const charCount = computed(() => draft.value.length);
-const canSave = computed(
-  () => !busy.value && dirty.value && !!draft.value.trim() && charCount.value <= maxChars
-);
-const isCustom = computed(
-  () => actual.value.system_prompt !== actual.value.default_system_prompt
-);
-const isDefaultValue = computed(
-  () => draft.value === actual.value.default_system_prompt
-);
+const dirty = computed(() => draftMode.value !== actual.value.default_mode);
+const canSave = computed(() => !busy.value && dirty.value);
 
 function applyActual(settings) {
   const agent = settings.agent || {};
-  actual.value = {
-    system_prompt: agent.system_prompt || "",
-    default_system_prompt: agent.default_system_prompt || "",
-    default_mode: agent.default_mode || "balanced",
-  };
-  draft.value = actual.value.system_prompt;
+  actual.value = { default_mode: agent.default_mode || "balanced" };
   draftMode.value = actual.value.default_mode;
 }
 
@@ -67,18 +49,15 @@ async function load() {
   }
 }
 
-// Simpan PARSIAL: `agent.system_prompt` dan `agent.default_mode` yang dikirim.
-// Backend melakukan deep-merge ke `data/settings.json` sehingga key lain dipertahankan.
+// Simpan PARSIAL: hanya `agent.default_mode` yang dikirim. Backend melakukan
+// deep-merge ke `data/settings.json` sehingga key lain dipertahankan.
 async function save() {
   busy.value = true;
   error.value = "";
   notice.value = "";
   try {
     const data = await updateGlobalSettings({
-      agent: {
-        system_prompt: draft.value,
-        default_mode: draftMode.value,
-      },
+      agent: { default_mode: draftMode.value },
     });
     applyActual(data.settings || {});
     notice.value = "Pengaturan Agent berhasil disimpan.";
@@ -89,18 +68,8 @@ async function save() {
   }
 }
 
-// Batalkan perubahan yang belum disimpan (kembali ke nilai AKTUAL backend).
 function reset() {
-  draft.value = actual.value.system_prompt;
   draftMode.value = actual.value.default_mode;
-  notice.value = "";
-  error.value = "";
-}
-
-// Isi draft dengan System Prompt bawaan AETHER (belum tersimpan sampai Save).
-function restoreDefault() {
-  draft.value = actual.value.default_system_prompt || "";
-  draftMode.value = "balanced";
   notice.value = "";
   error.value = "";
 }
@@ -114,8 +83,7 @@ onMounted(load);
       <div>
         <div class="title">Agent</div>
         <div class="desc">
-          System Prompt / Agent Instructions yang dipakai AETHER Agent saat
-          membuat system message.
+          Preferensi eksekusi GLOBAL AETHER Agent.
         </div>
       </div>
       <button class="btn-aether btn-ghost-a" :disabled="loading || busy" @click="load">
@@ -130,44 +98,20 @@ onMounted(load);
         <span class="as-scope-badge">Global AETHER Settings</span>
         <span class="as-scope-note">
           Disimpan di <span class="mono">data/settings.json</span> ->
-          <span class="mono">agent.system_prompt</span> /
           <span class="mono">agent.default_mode</span>.
         </span>
       </div>
 
+      <div class="as-moved">
+        System Prompt Agent &amp; Consultant sekarang MELEKAT PER PROJECT —
+        kelola dari <strong>Sidebar → Projects → Project Settings → Agents</strong>
+        (<span class="mono">.aether/settings/agent.json</span> /
+        <span class="mono">consultant.json</span>).
+      </div>
+
       <div v-if="loading" class="wb-empty">Memuat pengaturan Agent…</div>
       <template v-else>
-        <div class="as-row">
-          <div class="as-label">
-            <div class="as-name">System Prompt Agent</div>
-            <div class="as-help">
-              Instruction DASAR Agent. Context dinamis (Project Environment,
-              Project Bible, Skill, dan definisi tool) tetap disisipkan otomatis
-              oleh AETHER; TIDAK perlu ditulis ulang di sini.
-            </div>
-          </div>
-          <div class="as-control">
-            <span class="status-tag" :class="isCustom ? 'ok' : 'idle'">
-              {{ isCustom ? "custom" : "default" }}
-            </span>
-          </div>
-        </div>
-
-        <textarea
-          v-model="draft"
-          class="as-textarea"
-          spellcheck="false"
-          rows="20"
-          placeholder="System Prompt Agent…"
-        ></textarea>
-
-        <div class="as-meta">
-          <span class="mono">{{ charCount }} / {{ maxChars }} karakter</span>
-          <span v-if="dirty" class="as-dirty">perubahan belum disimpan</span>
-          <span v-else class="as-clean">tersimpan</span>
-        </div>
-
-        <!-- Mode selector on Settings -> Agent -->
+        <!-- Mode selector on Settings -> Agent (GLOBAL preference). -->
         <div class="as-row as-mode-row">
           <div class="as-label">
             <div class="as-name">Default Execution Mode</div>
@@ -190,18 +134,12 @@ onMounted(load);
         </div>
 
         <div class="as-actions">
-          <button class="btn-aether btn-ghost-a" :disabled="busy" @click="restoreDefault">
-            Restore default
-          </button>
           <button class="btn-aether btn-ghost-a" :disabled="busy || !dirty" @click="reset">
             Reset
           </button>
           <button class="btn-aether btn-primary-a" :disabled="!canSave" @click="save">
             Save
           </button>
-        </div>
-        <div v-if="isDefaultValue" class="as-hint">
-          Editor sedang memuat System Prompt bawaan AETHER.
         </div>
       </template>
     </div>
@@ -213,19 +151,12 @@ onMounted(load);
       <div>
         <div class="title">Actual value</div>
         <div class="desc">
-          Nilai yang benar-benar dipakai AETHER Agent dari
+          Nilai yang benar-benar dipakai AETHER dari
           <span class="mono">data/settings.json</span>.
         </div>
       </div>
     </div>
     <div class="panel-body">
-      <div class="kv">
-        <span class="k mono">agent.system_prompt</span>
-        <span class="v mono">
-          {{ actual.system_prompt.length }} karakter ·
-          {{ isCustom ? "custom" : "default (bawaan)" }}
-        </span>
-      </div>
       <div class="kv">
         <span class="k mono">agent.default_mode</span>
         <span class="v mono">{{ actual.default_mode }}</span>
@@ -281,6 +212,17 @@ onMounted(load);
   font-family: var(--mono);
 }
 
+.as-moved {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  background: rgba(139, 92, 246, 0.06);
+  border: 1px solid rgba(139, 92, 246, 0.18);
+}
+
 .as-row {
   display: flex;
   align-items: flex-start;
@@ -304,50 +246,11 @@ onMounted(load);
   flex: 0 0 auto;
 }
 
-.as-textarea {
-  width: 100%;
-  min-height: 320px;
-  resize: vertical;
-  padding: 12px 14px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--bg-elev);
-  color: var(--text);
-  font-size: 12.5px;
-  line-height: 1.55;
-  font-family: var(--mono);
-}
-.as-textarea:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.18);
-}
-
-.as-meta {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-top: 8px;
-  font-size: 11.5px;
-  color: var(--text-faint);
-}
-.as-dirty {
-  color: #fcd34d;
-}
-.as-clean {
-  color: #86efac;
-}
-
 .as-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
   margin-top: 12px;
-}
-.as-hint {
-  margin-top: 8px;
-  font-size: 11.5px;
-  color: var(--text-faint);
 }
 
 .as-mode-row {

@@ -5,7 +5,7 @@ memakai sumber konfigurasi existing masing-masing:
 
     - Global Settings AETHER  -> `data/settings.json`
       (loader `agent_ai.config.settings`).
-    - Project Settings/Policy -> `<root>/.aether/permissions.json`
+    - Project Settings/Policy -> `<root>/.aether/settings/permissions.json`
       (`agent_ai.projects.permissions.ProjectPermissionStore`).
 
 Yang diuji:
@@ -44,6 +44,7 @@ from agent_ai.config.settings import (
 from agent_ai.permission.matrix import DEFAULT_MATRIX_RULES
 from agent_ai.projects.permissions import (
     PERMISSIONS_FILE_NAME,
+    SETTINGS_DIR_NAME,
     ProjectPermissionStore,
     ProjectPolicy,
 )
@@ -52,6 +53,11 @@ from agent_ai.projects.registry import ProjectRegistry
 
 def _read(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _policy_path(root: Path) -> Path:
+    """Lokasi KANONIK policy project (`.aether/settings/permissions.json`)."""
+    return root / ".aether" / SETTINGS_DIR_NAME / PERMISSIONS_FILE_NAME
 
 
 #: Matrix custom (semua deny) untuk menguji pemisahan konfigurasi.
@@ -125,7 +131,7 @@ def test_project_policy_writes_only_project_file(tmp_path):
     root.mkdir()
     store = ProjectPermissionStore(root=root)
     store.save(ProjectPolicy.from_dict(_DENY_ALL_MATRIX))
-    stored = _read(root / ".aether" / PERMISSIONS_FILE_NAME)
+    stored = _read(root / ".aether" / SETTINGS_DIR_NAME / PERMISSIONS_FILE_NAME)
     # Hanya aksi matrix yang tersimpan: TIDAK ada key Global Settings.
     assert set(stored) == set(DEFAULT_MATRIX_RULES), stored
     assert stored == _DENY_ALL_MATRIX
@@ -151,7 +157,7 @@ def test_global_settings_does_not_touch_project_policy(tmp_path, monkeypatch):
     root.mkdir()
     store = ProjectPermissionStore(root=root)
     store.save(ProjectPolicy.from_dict(_DENY_ALL_MATRIX))
-    policy_path = root / ".aether" / PERMISSIONS_FILE_NAME
+    policy_path = root / ".aether" / SETTINGS_DIR_NAME / PERMISSIONS_FILE_NAME
     before = _read(policy_path)
 
     update_global_settings({"port": 9999})
@@ -174,8 +180,8 @@ def test_policies_isolated_across_projects(tmp_path):
 
     ProjectPermissionStore(root=root_a).save(ProjectPolicy.from_dict(_DENY_ALL_MATRIX))
 
-    path_a = root_a / ".aether" / PERMISSIONS_FILE_NAME
-    path_b = root_b / ".aether" / PERMISSIONS_FILE_NAME
+    path_a = root_a / ".aether" / SETTINGS_DIR_NAME / PERMISSIONS_FILE_NAME
+    path_b = root_b / ".aether" / SETTINGS_DIR_NAME / PERMISSIONS_FILE_NAME
     assert path_a != path_b
     assert _read(path_a) == _DENY_ALL_MATRIX
     assert _read(path_b) == DEFAULT_MATRIX_RULES
@@ -220,7 +226,7 @@ def test_gateway_policy_rejects_global_settings_keys(tmp_path, monkeypatch):
     pid = project["id"]
     # Policy valid -> tersimpan.
     service.save_project_policy(pid, _DENY_ALL_MATRIX)
-    policy_path = root / ".aether" / PERMISSIONS_FILE_NAME
+    policy_path = root / ".aether" / SETTINGS_DIR_NAME / PERMISSIONS_FILE_NAME
     before = _read(policy_path)
 
     # Key Global Settings ditolak (400 ValidationError) & file policy tidak berubah.

@@ -1,4 +1,4 @@
-"""Project-local permission policy: `<root>/.aether/permissions.json`.
+"""Project-local permission policy: `<root>/.aether/settings/permissions.json`.
 
 Ini BUKAN sistem permission kedua. Modul ini hanya *persistence project-local*
 untuk konsep policy yang SUDAH ADA di `agent_ai.permission`:
@@ -8,11 +8,12 @@ untuk konsep policy yang SUDAH ADA di `agent_ai.permission`:
     PolicyMode.DENY             <-> "deny"    (UI: DENY)
 
 Konfigurasi disimpan independen untuk setiap project di dalam root project
-target:
+target (terpusat di `.aether/settings/`):
 
     <root project target>/
         .aether/
-            permissions.json
+            settings/
+                permissions.json
 
 Bentuk KANONIK (Project Permission Matrix: aksi x inside/outside workspace):
 
@@ -61,6 +62,8 @@ from agent_ai.permission.models import (
 
 #: Nama folder root metadata project (sama dengan aether_store/github_backup).
 AETHER_DIR_NAME = ".aether"
+#: Nama folder konfigurasi per-proyek (terpusat) di dalam `.aether/`.
+SETTINGS_DIR_NAME = "settings"
 #: Nama file policy permission project-local.
 PERMISSIONS_FILE_NAME = "permissions.json"
 
@@ -217,8 +220,9 @@ class ProjectPolicy:
     def default(cls) -> "ProjectPolicy":
         """Default Project Policy (baseline) untuk project BARU.
 
-        Satu sumber kebenaran untuk inisialisasi `<root>/.aether/permissions.json`
-        saat project dibuat. Setelah file ada, policy menjadi milik project
+        Satu sumber kebenaran untuk inisialisasi
+        `<root>/.aether/settings/permissions.json` saat project dibuat.
+        Setelah file ada, policy menjadi milik project
         tersebut dan default ini tidak berubah.
         """
         return cls(matrix=PermissionMatrix.default())
@@ -327,7 +331,13 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
 
 
 class ProjectPermissionStore:
-    """Store project-local `<root>/.aether/permissions.json`.
+    """Store project-local `<root>/.aether/settings/permissions.json`.
+
+    Lokasi konfigurasi per-proyek dipusatkan di `.aether/settings/`. File LAMA
+    (`.aether/permissions.json`) tetap dibaca sebagai sumber MIGRASI yang aman:
+    bila file baru BELUM ada dan file lama ADA, isinya dimigrasikan ke lokasi
+    baru. Bila keduanya ada, file BARU dipertahankan (TIDAK ditimpa) dan file
+    lama dibiarkan apa adanya (tidak dihapus otomatis).
 
     Args:
         root: root project target.
@@ -338,17 +348,56 @@ class ProjectPermissionStore:
 
     @property
     def path(self) -> Path:
+        """Lokasi KANONIK policy project (`.aether/settings/permissions.json`)."""
+        return (
+            self.root / AETHER_DIR_NAME / SETTINGS_DIR_NAME / PERMISSIONS_FILE_NAME
+        )
+
+    @property
+    def legacy_path(self) -> Path:
+        """Lokasi LAMA policy project (`.aether/permissions.json`)."""
         return self.root / AETHER_DIR_NAME / PERMISSIONS_FILE_NAME
 
     def exists(self) -> bool:
         return self.path.is_file()
 
+    def _migrate_legacy_if_needed(self) -> None:
+        """Migrasikan policy dari lokasi LAMA ke lokasi baru (aman & idempotent).
+
+        Aturan:
+            * File baru SUDAH ada -> TIDAK menyentuh apa pun (data baru menang;
+              file lama dibiarkan agar tidak kehilangan data).
+            * File baru BELUM ada & file lama ADA -> pindahkan KONTEN file lama
+              ke lokasi baru (mempertahankan perubahan user), tanpa menimpa
+              konfigurasi apa pun. File lama TIDAK dihapus (aman untuk rollback).
+            * File lama korup/tidak valid -> tetap dipindahkan apa adanya
+              (byte-for-byte) agar tidak kehilangan data; `load()` tetap
+              menangani parsing dengan fallback default.
+
+        Best-effort: kegagalan migrasi TIDAK boleh menggagalkan load/save
+        (policy jatuh ke default aman).
+        """
+        target = self.path
+        if target.is_file():
+            return
+        legacy = self.legacy_path
+        if not legacy.is_file():
+            return
+        try:
+            data = legacy.read_bytes()
+            _atomic_write_bytes(target, data)
+        except OSError:
+            return
+
     def load(self) -> ProjectPolicy:
         """Muat policy project (default aman/bisa-dipakai bila belum ada).
 
-        Project LAMA tanpa file policy -> Default Project Policy (matrix default)
-        tanpa merusak/mengubah project.
+        Bila file baru belum ada tetapi file LAMA ada, konfigurasi lama
+        dimigrasikan lebih dulu (tanpa menimpa data yang sudah ada di lokasi
+        baru). Project LAMA tanpa file policy -> Default Project Policy (matrix
+        default) tanpa merusak/mengubah project.
         """
+        self._migrate_legacy_if_needed()
         path = self.path
         if not path.is_file():
             return ProjectPolicy.default()
@@ -359,7 +408,7 @@ class ProjectPermissionStore:
         return ProjectPolicy.from_dict(raw)
 
     def save(self, policy: ProjectPolicy) -> ProjectPolicy:
-        """Simpan policy (atomic write) -> `<root>/.aether/permissions.json`."""
+        """Simpan policy (atomic write) -> `<root>/.aether/settings/permissions.json`."""
         data = json.dumps(policy.to_dict(), indent=2, ensure_ascii=False) + "\n"
         _atomic_write_bytes(self.path, data.encode("utf-8"))
         return policy
@@ -367,13 +416,14 @@ class ProjectPermissionStore:
     def ensure_default(self) -> ProjectPolicy:
         """Inisialisasi policy untuk project BARU dari Default Project Policy.
 
-        Dipakai HANYA saat project baru dibuat: bila `permissions.json` BELUM
-        ada -> tulis Default Project Policy (matrix default). Bila file SUDAH
-        ada -> file dipertahankan apa adanya (perubahan user TIDAK ditimpa).
+        Dipakai HANYA saat project baru dibuat: bila policy BELUM ada (baik di
+        lokasi baru maupun lama) -> tulis Default Project Policy (matrix
+        default). Bila policy SUDAH ada (baru atau lama) -> file dipertahankan
+        apa adanya (perubahan user TIDAK ditimpa).
 
         Returns:
             ProjectPolicy yang berlaku setelah operasi (default atau existing).
         """
-        if self.exists():
+        if self.exists() or self.legacy_path.is_file():
             return self.load()
         return self.save(ProjectPolicy.default())

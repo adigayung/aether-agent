@@ -10,7 +10,7 @@ Membuktikan matrix project benar-benar BERLAKU saat Agent melakukan action:
 - Terminal read-only (allow) vs terminal mutating (ask/deny).
 - DENY mencegah eksekusi (tool tidak dijalankan).
 - ASK menahan eksekusi + menandai butuh approval ke caller.
-- Project baru otomatis punya `.aether/permissions.json` (default matrix).
+- Project baru otomatis punya `.aether/settings/permissions.json` (default matrix).
 - Existing project tanpa file policy memakai default tanpa merusak project.
 
 Isolasi: memakai `tmp_path` (tidak menyentuh project produksi).
@@ -38,6 +38,7 @@ from agent_ai.permission.matrix import (
 )
 from agent_ai.projects.permissions import (
     PERMISSIONS_FILE_NAME,
+    SETTINGS_DIR_NAME,
     ProjectPermissionStore,
 )
 from agent_ai.projects.registry import ProjectRegistry
@@ -267,7 +268,7 @@ def test_new_project_gets_default_matrix_file(tmp_path):
     registry = ProjectRegistry(workspace=tmp_path / "ws")
     registry.register(name="New", root=str(root))
 
-    path = root / ".aether" / PERMISSIONS_FILE_NAME
+    path = root / ".aether" / SETTINGS_DIR_NAME / PERMISSIONS_FILE_NAME
     assert path.is_file()
     assert json.loads(path.read_text(encoding="utf-8")) == DEFAULT_MATRIX_RULES
 

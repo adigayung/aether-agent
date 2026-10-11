@@ -279,11 +279,12 @@ def delete_project(request: HttpRequest, service: GatewayService, project_id: st
 
 
 # ---------------------------------------------------------------------------
-# Project Policy / Permission (PROJECT-LOCAL: `<root>/.aether/permissions.json`).
+# Project Policy / Permission (PROJECT-LOCAL:
+# `<root>/.aether/settings/permissions.json`).
 #
 # Satu sumber policy per project. Mode/scope di-enforce oleh PermissionManager
 # EXISTING; TIDAK ada sistem permission kedua. Kelola dari Sidebar -> Projects
-# (Project Settings / Policy), bukan dari Settings global.
+# (Project Settings -> Security), bukan dari Settings global.
 # ---------------------------------------------------------------------------
 @csrf_exempt
 @require_http_methods(["GET", "POST"])
@@ -293,7 +294,8 @@ def project_policy(
 ) -> JsonResponse:
     """GET/POST /api/projects/<project_id>/policy -> Project Policy (per project).
 
-    GET  -> nilai policy AKTUAL project (`<root>/.aether/permissions.json`).
+    GET  -> nilai policy AKTUAL project
+            (`<root>/.aether/settings/permissions.json`).
     POST -> simpan policy (body: {mode, scope}); hanya project ini terpengaruh.
     """
     if request.method == "GET":
@@ -301,6 +303,35 @@ def project_policy(
 
     body = _parse_json_body(request)
     return _json_response(service.save_project_policy(project_id, body))
+
+
+# ---------------------------------------------------------------------------
+# Project Settings -> Agents (PROJECT-LOCAL: System Prompt Agent & Consultant).
+#
+# Konfigurasi System Prompt per-project disimpan di
+# `<root>/.aether/settings/agent.json` dan
+# `<root>/.aether/settings/consultant.json`. Ini BUKAN konfigurasi provider/model
+# (yang tetap GLOBAL di `data/aether.db`). Kelola dari Sidebar -> Projects
+# (Project Settings -> Agents).
+# ---------------------------------------------------------------------------
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+@_handle
+def project_agent_settings(
+    request: HttpRequest, service: GatewayService, project_id: str
+) -> JsonResponse:
+    """GET/POST /api/projects/<project_id>/agents -> System Prompt per project.
+
+    GET  -> System Prompt Agent & Consultant AKTUAL project (override + default).
+    POST -> simpan System Prompt project (body:
+            {"agent": {"system_prompt": ...},
+             "consultant": {"system_prompt": ...}}); hanya project ini.
+    """
+    if request.method == "GET":
+        return _json_response(service.get_project_agent_settings(project_id))
+
+    body = _parse_json_body(request)
+    return _json_response(service.save_project_agent_settings(project_id, body))
 
 
 # ---------------------------------------------------------------------------

@@ -120,8 +120,8 @@ onMounted(load);
 <template>
   <!-- Global AETHER Settings. Policy/permission TIDAK di sini: konfigurasi
        project (mode/scope permission) dikelola per project di
-       Sidebar -> Projects -> Project Settings / Policy
-       (`<root>/.aether/permissions.json`). -->
+       Sidebar -> Projects -> Project Settings -> Security
+       (`<root>/.aether/settings/permissions.json`). -->
   <section class="panel">
     <div class="panel-body">
       <div class="gs-scope">
