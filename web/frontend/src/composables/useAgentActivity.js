@@ -9,6 +9,29 @@ import { shouldFollowStartedTask } from "../taskView.js";
 import { playStatusSound } from "../audioRegistry.js";
 import { buildAgentActivityCopy } from "../activityCopy.js";
 
+// Event "aktivitas task": jenis event yang HANYA bermakna untuk Agent task
+// (runtime/tool/lifecycle/reasoning). Event konsultasi Consultant memakai jenis
+// yang SAMA (tool_called/tool_completed) tetapi TIDAK PERNAH membawa task_id,
+// sehingga jenis ini dipakai sebagai diskriminator provenance di handleEvent:
+// event aktivitas-task TANPA task_id = milik sesi Consultant -> dibuang dari
+// feed Agent Activity (observability Consultant tetap hidup lewat stream
+// consultant sendiri, ?session_id=).
+export const TASK_ACTIVITY_EVENT_TYPES = new Set([
+  "tool_called",
+  "tool_completed",
+  "observation_received",
+  "tool_result",
+  "agent_observation",
+  "provider_request",
+  "provider_response",
+  "phase_changed",
+  "validation_started",
+  "validation_completed",
+  "recovery_started",
+  "recovery_completed",
+  "agent_commentary",
+]);
+
 // Agent Activity + event state (#51).
 //
 // Bertanggung jawab atas: feed activity (live SSE atau history persistent log),
@@ -229,6 +252,19 @@ export function useAgentActivity({
         // bucket and the filesystem explorer can react incrementally.
         return;
       }
+    }
+
+    // Provenance (WAJIB): event "aktivitas task" (runtime/tool/lifecycle) hanya
+    // masuk feed Agent Activity bila membawa task_id. Event runtime Consultant
+    // memakai jenis yang sama (tool_called/tool_completed) TANPA task_id, dan
+    // stream global frontend tidak difilter -> tanpa guard ini tool konsultasi
+    // TAMPIL sebagai baris aktivitas Agent. Ditempatkan SETELAH approval + dedup
+    // + queue refresh + filter isolasi task, dan SEBELUM pushRolling/switch,
+    // sehingga state task (status/lifecycle/timing/audio) tidak tersentuh.
+    // Event global yang SAH tanpa task_id (task_queued, task_started, approval_*)
+    // serta change_detected TETAP lolos seperti sebelumnya.
+    if (TASK_ACTIVITY_EVENT_TYPES.has(evt.event_type) && !evt.task_id) {
+      return;
     }
 
     // Event live untuk task aktif -> tampilkan alur SSE (bukan history lama).

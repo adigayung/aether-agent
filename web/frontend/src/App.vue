@@ -88,6 +88,13 @@ const taskPageMode = ref("queue");
 // Health gateway (indikator sistem).
 const health = ref(null);
 
+// Collapse HORIZONTAL kolom Workbench (.ws-col.left / .ws-col.right) — seperti
+// side panel app modern. Dua state INDEPENDEN, in-memory per sesi (tanpa
+// persistence). Collapse dilakukan via ukuran grid track (rail tipis), BUKAN
+// display:none, sehingga transisi tetap halus dan lebar semula kembali persis.
+const leftCollapsed = ref(false);
+const rightCollapsed = ref(false);
+
 // Notifikasi global (banner error + notice sementara).
 const { error, notice, setError, clearNotice, showNotice } = useNotifications();
 
@@ -591,8 +598,22 @@ const { editorOpen, editorFile, openFileInEditor, closeCodeEditor, onEditorError
       </header>
 
       <!-- Workbench content -->
-      <div v-if="activeNav === 'agent'" class="ws-body">
-        <div class="ws-col left">
+      <div
+        v-if="activeNav === 'agent'"
+        class="ws-body"
+        :class="{ 'left-collapsed': leftCollapsed, 'right-collapsed': rightCollapsed }"
+      >
+        <div class="ws-col left" :class="{ 'is-collapsed': leftCollapsed }">
+          <button
+            class="ws-col-toggle left"
+            type="button"
+            :aria-expanded="leftCollapsed ? 'false' : 'true'"
+            :aria-label="leftCollapsed ? 'Expand main panel' : 'Collapse main panel'"
+            :title="leftCollapsed ? 'Expand panel' : 'Collapse panel'"
+            @click="leftCollapsed = !leftCollapsed"
+          >
+            <span class="ws-col-chevron" aria-hidden="true">{{ leftCollapsed ? "›" : "‹" }}</span>
+          </button>
           <div class="ws-scroll">
             <!-- Latest Task -->
             <section class="block">
@@ -799,7 +820,17 @@ const { editorOpen, editorFile, openFileInEditor, closeCodeEditor, onEditorError
           </div>
         </div>
 
-        <div class="ws-col right">
+        <div class="ws-col right" :class="{ 'is-collapsed': rightCollapsed }">
+          <button
+            class="ws-col-toggle right"
+            type="button"
+            :aria-expanded="rightCollapsed ? 'false' : 'true'"
+            :aria-label="rightCollapsed ? 'Expand side panel' : 'Collapse side panel'"
+            :title="rightCollapsed ? 'Expand panel' : 'Collapse panel'"
+            @click="rightCollapsed = !rightCollapsed"
+          >
+            <span class="ws-col-chevron" aria-hidden="true">{{ rightCollapsed ? "‹" : "›" }}</span>
+          </button>
           <QueuePanel
             class="wb-queue"
             :project-id="selectedProjectId || null"

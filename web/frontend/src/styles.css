@@ -331,6 +331,8 @@ button {
 }
 .ws-col.left {
   border-right: 1px solid var(--border-soft);
+  /* Anchor untuk tombol toggle (rail saat collapsed) — tombol selalu terlihat. */
+  position: relative;
 }
 /* Kolom kanan (CHANGES + EXPLORER): CHANGES tetap di atas dengan ukuran
    natural (flex-shrink:0), EXPLORER mengisi sisa tinggi dan memiliki scroll
@@ -342,7 +344,101 @@ button {
      minmax(0,1fr); tanpa ini rantai flex anak (explorer) tidak pernah
      dibatasi tinggi sehingga overflow-y daftar file tidak aktif. */
   min-height: 0;
+  /* Anchor untuk tombol toggle (rail saat collapsed) — tombol selalu terlihat. */
+  position: relative;
 }
+
+/* ---- Collapse HORIZONTAL kolom Workbench (toggle chevron) ----------------
+   Dua kolom .ws-body (.ws-col.left / .ws-col.right) dapat dikecilkan ke rail
+   tipis (±44px) dan dikembalikan persis ke lebar semula. Collapse dilakukan
+   dengan mengubah UKURAN GRID TRACK (bukan display:none) sehingga transisi
+   halus dan lebar asli kembali utuh. State: .ws-body.left-collapsed /
+   .ws-body.right-collapsed. Isi kolom digeser horizontal (bukan di-display:none)
+   sehingga animasi viewport-nya tetap terlihat, dan kolom men-set
+   overflow:hidden saat collapsed agar isi yang tidak muat tidak menyemprot.
+   Tidak menyentuh scroll contract internal (.ws-scroll/.changes-body/.explorer). */
+.ws-body {
+  transition: grid-template-columns 0.22s ease;
+}
+.ws-body.left-collapsed {
+  grid-template-columns: 44px 340px;
+}
+.ws-body.right-collapsed {
+  grid-template-columns: 1fr 44px;
+}
+.ws-body.left-collapsed.right-collapsed {
+  /* Kedua kolom collapsed: pertahankan track fleksibel di tengah agar rail
+     kiri tetap menempel ke tepi kiri dan rail kanan tetap ke tepi kanan
+     (bukan berdempet di kiri). Kedua kolom ditempatkan eksplisit. */
+  grid-template-columns: 44px 1fr 44px;
+}
+.ws-body.left-collapsed.right-collapsed > .ws-col.left {
+  grid-column: 1;
+}
+.ws-body.left-collapsed.right-collapsed > .ws-col.right {
+  grid-column: 3;
+}
+.ws-col {
+  transition: opacity 0.22s ease;
+}
+.ws-col.is-collapsed {
+  overflow: hidden;
+}
+/* Rail: isi kolom digeser keluar (ke kiri untuk kolom kiri, ke kanan untuk
+   kolom kanan) agar tidak menyemprot/terpotong pada lebar rail. */
+.ws-col.left.is-collapsed > *:not(.ws-col-toggle) {
+  transform: translateX(-100%);
+  transition: transform 0.22s ease;
+}
+.ws-col.right.is-collapsed > *:not(.ws-col-toggle) {
+  transform: translateX(100%);
+  transition: transform 0.22s ease;
+}
+
+/* Tombol chevron kecil di tepi dalam tiap kolom. */
+.ws-col-toggle {
+  position: absolute;
+  top: 50%;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--bg-panel, #16161c);
+  color: var(--text-faint);
+  cursor: pointer;
+  opacity: 0.55;
+  transform: translateY(-50%);
+  transition: opacity 0.16s ease, background 0.16s ease, color 0.16s ease;
+}
+.ws-col.left .ws-col-toggle {
+  right: 3px;
+}
+.ws-col.right .ws-col-toggle {
+  left: 3px;
+}
+.ws-col-toggle:hover {
+  opacity: 1;
+  color: var(--text);
+  background: var(--bg-hover);
+}
+.ws-col-toggle:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent, #8b5cf6);
+  outline-offset: 1px;
+}
+.ws-col-chevron {
+  font-size: 15px;
+  line-height: 1;
+  /* Arah panah = aksi berikutnya (‹ collapse / › expand); mirror otomatis
+     saat state berubah. Transisi halus tanpa perlu rotasi manual. */
+  transition: transform 0.22s ease;
+}
+
 .ws-col.right > .block:not(.explorer-block) {
   /* CHANGES & TASKS: tidak punya flex bawaan — diatur oleh .collapsed /
      :not(.collapsed) di bawah agar ketiga panel terbagi rata vertikal. */
@@ -2769,6 +2865,27 @@ tr:hover .q-copy-btn.hist-copy {
   }
   .wb-queue {
     max-height: 210px;
+  }
+  /* Mode stacked (<=1080px): dua kolom vertikal, jadi tombol collapse
+     horizontal TIDAK relevan (rail 44px akan memotong seluruh baris).
+     Sembunyikan tombol dan netralkan state collapsed agar tidak ada
+     track grid 44px yang tersisa. Isi kolom TIDAK perlu transform lagi
+     (transform rail dinetralkan juga) supaya layout stacked utuh. */
+  .ws-col-toggle {
+    display: none;
+  }
+  .ws-body,
+  .ws-body.left-collapsed,
+  .ws-body.right-collapsed,
+  .ws-body.left-collapsed.right-collapsed {
+    grid-template-columns: 1fr;
+  }
+  .ws-col.is-collapsed {
+    overflow: visible;
+  }
+  .ws-col.left.is-collapsed > *:not(.ws-col-toggle),
+  .ws-col.right.is-collapsed > *:not(.ws-col-toggle) {
+    transform: none;
   }
 }
 
