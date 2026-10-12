@@ -88,11 +88,15 @@ const taskPageMode = ref("queue");
 // Health gateway (indikator sistem).
 const health = ref(null);
 
-// Collapse HORIZONTAL kolom Workbench (.ws-col.left / .ws-col.right) — seperti
-// side panel app modern. Dua state INDEPENDEN, in-memory per sesi (tanpa
-// persistence). Collapse dilakukan via ukuran grid track (rail tipis), BUKAN
-// display:none, sehingga transisi tetap halus dan lebar semula kembali persis.
-const leftCollapsed = ref(false);
+// Collapse HORIZONTAL:
+//  - sidebarCollapsed: menyempitkan SIDEBAR APLIKASI kiri (.sidebar di grid
+//    .app) ke rail tipis (±44px), dikembalikan persis ke lebar semula.
+//  - rightCollapsed: collapse kolom kanan grid workspace (.ws-col.right),
+//    perilaku lama yang sudah benar dan tidak diubah.
+// Keduanya in-memory per sesi (tanpa persistence). Collapse dilakukan via
+// ukuran track/lebar (rail tipis), BUKAN display:none, sehingga transisi tetap
+// halus dan lebar semula kembali persis.
+const sidebarCollapsed = ref(false);
 const rightCollapsed = ref(false);
 
 // Notifikasi global (banner error + notice sementara).
@@ -473,9 +477,9 @@ const { editorOpen, editorFile, openFileInEditor, closeCodeEditor, onEditorError
   />
 
   <!-- Workbench shell (dummy index.html): sidebar | main + statusbar. -->
-  <div v-else class="app">
+  <div v-else class="app" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
     <!-- ===================== SIDEBAR ===================== -->
-    <aside class="sidebar">
+    <aside class="sidebar" :class="{ 'is-collapsed': sidebarCollapsed }">
       <div class="side-brand">
         <img class="logo" :src="aetherLogoIcon" alt="AETHER" />
         <div>
@@ -574,6 +578,21 @@ const { editorOpen, editorFile, openFileInEditor, closeCodeEditor, onEditorError
           <span class="v">{{ agentStatus.label }}</span>
         </div>
       </div>
+
+      <!-- Toggle collapse sidebar kiri (.sidebar). Pola & perilaku sama dengan
+           tombol chevron kolom kanan workspace: menyempitkan ke rail tipis di
+           pinggir (BUKAN display:none) dan mengembalikan persis ke lebar
+           semula; tombol tetap terlihat & klikabel saat collapsed. -->
+      <button
+        class="sidebar-toggle"
+        type="button"
+        :aria-expanded="sidebarCollapsed ? 'false' : 'true'"
+        :aria-label="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
+        :title="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
+        @click="sidebarCollapsed = !sidebarCollapsed"
+      >
+        <span class="sidebar-chevron" aria-hidden="true">{{ sidebarCollapsed ? "›" : "‹" }}</span>
+      </button>
     </aside>
 
     <!-- ===================== MAIN ===================== -->
@@ -601,19 +620,9 @@ const { editorOpen, editorFile, openFileInEditor, closeCodeEditor, onEditorError
       <div
         v-if="activeNav === 'agent'"
         class="ws-body"
-        :class="{ 'left-collapsed': leftCollapsed, 'right-collapsed': rightCollapsed }"
+        :class="{ 'right-collapsed': rightCollapsed }"
       >
-        <div class="ws-col left" :class="{ 'is-collapsed': leftCollapsed }">
-          <button
-            class="ws-col-toggle left"
-            type="button"
-            :aria-expanded="leftCollapsed ? 'false' : 'true'"
-            :aria-label="leftCollapsed ? 'Expand main panel' : 'Collapse main panel'"
-            :title="leftCollapsed ? 'Expand panel' : 'Collapse panel'"
-            @click="leftCollapsed = !leftCollapsed"
-          >
-            <span class="ws-col-chevron" aria-hidden="true">{{ leftCollapsed ? "›" : "‹" }}</span>
-          </button>
+        <div class="ws-col left">
           <div class="ws-scroll">
             <!-- Latest Task -->
             <section class="block">

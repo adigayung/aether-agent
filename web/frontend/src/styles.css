@@ -73,6 +73,13 @@ button {
   grid-template-columns: 248px 1fr;
   grid-template-rows: 1fr 30px;
   height: 100vh;
+  /* Collapse sidebar kiri dianimasikan via lebar grid track. */
+  transition: grid-template-columns 0.22s ease;
+}
+.app.sidebar-collapsed {
+  /* Sidebar dikecilkan ke rail tipis di pinggir. Track kedua (main) memakai
+     1fr sehingga isi utama otomatis mengisi sisa ruang. */
+  grid-template-columns: 44px 1fr;
 }
 
 /* ===================== SIDEBAR ===================== */
@@ -83,6 +90,55 @@ button {
   border-right: 1px solid var(--border-soft);
   background: linear-gradient(180deg, #100e1a, #0c0b14);
   min-height: 0;
+  /* Anchor untuk tombol toggle (rail saat collapsed) — tombol selalu terlihat. */
+  position: relative;
+  overflow: hidden;
+}
+/* Collapse: isi sidebar yang tidak muat disembunyikan rapi (bukan
+   display:none) sehingga tombol rail tetap berada di atasnya. */
+.sidebar.is-collapsed .side-brand,
+.sidebar.is-collapsed .side-scroll,
+.sidebar.is-collapsed .consultant-card,
+.sidebar.is-collapsed .side-foot {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.16s ease;
+}
+
+/* Tombol chevron di tepi dalam sidebar (pola sama dengan .ws-col-toggle). */
+.sidebar-toggle {
+  position: absolute;
+  top: 50%;
+  right: 3px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--bg-panel, #16161c);
+  color: var(--text-faint);
+  cursor: pointer;
+  opacity: 0.55;
+  transform: translateY(-50%);
+  transition: opacity 0.16s ease, background 0.16s ease, color 0.16s ease;
+}
+.sidebar-toggle:hover {
+  opacity: 1;
+  color: var(--text);
+  background: var(--bg-hover);
+}
+.sidebar-toggle:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent, #8b5cf6);
+  outline-offset: 1px;
+}
+.sidebar-chevron {
+  font-size: 15px;
+  line-height: 1;
 }
 .side-brand {
   display: flex;
@@ -349,53 +405,36 @@ button {
 }
 
 /* ---- Collapse HORIZONTAL kolom Workbench (toggle chevron) ----------------
-   Dua kolom .ws-body (.ws-col.left / .ws-col.right) dapat dikecilkan ke rail
-   tipis (±44px) dan dikembalikan persis ke lebar semula. Collapse dilakukan
-   dengan mengubah UKURAN GRID TRACK (bukan display:none) sehingga transisi
-   halus dan lebar asli kembali utuh. State: .ws-body.left-collapsed /
-   .ws-body.right-collapsed. Isi kolom digeser horizontal (bukan di-display:none)
-   sehingga animasi viewport-nya tetap terlihat, dan kolom men-set
-   overflow:hidden saat collapsed agar isi yang tidak muat tidak menyemprot.
-   Tidak menyentuh scroll contract internal (.ws-scroll/.changes-body/.explorer). */
+   Kolom kanan .ws-col.right dapat dikecilkan ke rail tipis (±44px) dan
+   dikembalikan persis ke lebar semula. Collapse dilakukan dengan mengubah
+   UKURAN GRID TRACK (bukan display:none) sehingga transisi halus dan lebar
+   asli kembali utuh. State: .ws-body.right-collapsed. Isi kolom digeser
+   horizontal (bukan di-display:none) sehingga animasi viewport-nya tetap
+   terlihat, dan kolom men-set overflow:hidden saat collapsed agar isi yang
+   tidak muat tidak menyemprot. Tidak menyentuh scroll contract internal
+   (.ws-scroll/.changes-body/.explorer).
+   CATATAN: collapse kolom KIRI (.ws-col.left) sudah dihapus — kontrol collapse
+   aplikasi kini berada pada SIDEBAR kiri (.sidebar + .app.sidebar-collapsed). */
 .ws-body {
   transition: grid-template-columns 0.22s ease;
-}
-.ws-body.left-collapsed {
-  grid-template-columns: 44px 340px;
 }
 .ws-body.right-collapsed {
   grid-template-columns: 1fr 44px;
 }
-.ws-body.left-collapsed.right-collapsed {
-  /* Kedua kolom collapsed: pertahankan track fleksibel di tengah agar rail
-     kiri tetap menempel ke tepi kiri dan rail kanan tetap ke tepi kanan
-     (bukan berdempet di kiri). Kedua kolom ditempatkan eksplisit. */
-  grid-template-columns: 44px 1fr 44px;
-}
-.ws-body.left-collapsed.right-collapsed > .ws-col.left {
-  grid-column: 1;
-}
-.ws-body.left-collapsed.right-collapsed > .ws-col.right {
-  grid-column: 3;
-}
 .ws-col {
   transition: opacity 0.22s ease;
 }
-.ws-col.is-collapsed {
+.ws-col.right.is-collapsed {
   overflow: hidden;
 }
-/* Rail: isi kolom digeser keluar (ke kiri untuk kolom kiri, ke kanan untuk
-   kolom kanan) agar tidak menyemprot/terpotong pada lebar rail. */
-.ws-col.left.is-collapsed > *:not(.ws-col-toggle) {
-  transform: translateX(-100%);
-  transition: transform 0.22s ease;
-}
+/* Rail: isi kolom kanan digeser keluar (ke kanan) agar tidak menyemprot/
+   terpotong pada lebar rail. */
 .ws-col.right.is-collapsed > *:not(.ws-col-toggle) {
   transform: translateX(100%);
   transition: transform 0.22s ease;
 }
 
-/* Tombol chevron kecil di tepi dalam tiap kolom. */
+/* Tombol chevron kecil di tepi dalam kolom kanan workspace. */
 .ws-col-toggle {
   position: absolute;
   top: 50%;
@@ -414,9 +453,6 @@ button {
   opacity: 0.55;
   transform: translateY(-50%);
   transition: opacity 0.16s ease, background 0.16s ease, color 0.16s ease;
-}
-.ws-col.left .ws-col-toggle {
-  right: 3px;
 }
 .ws-col.right .ws-col-toggle {
   left: 3px;
@@ -2866,26 +2902,31 @@ tr:hover .q-copy-btn.hist-copy {
   .wb-queue {
     max-height: 210px;
   }
-  /* Mode stacked (<=1080px): dua kolom vertikal, jadi tombol collapse
-     horizontal TIDAK relevan (rail 44px akan memotong seluruh baris).
-     Sembunyikan tombol dan netralkan state collapsed agar tidak ada
-     track grid 44px yang tersisa. Isi kolom TIDAK perlu transform lagi
-     (transform rail dinetralkan juga) supaya layout stacked utuh. */
+  /* Mode stacked (<=1080px): kolom workspace jadi dua baris vertikal, jadi
+     tombol collapse horizontal kolom kanan TIDAK relevan (rail 44px akan
+     memotong seluruh baris). Sembunyikan tombol dan netralkan state collapsed
+     kolom kanan agar tidak ada track grid 44px yang tersisa. Isi kolom TIDAK
+     perlu transform lagi supaya layout stacked utuh.
+     Sidebar kiri (.sidebar) TETAP dapat di-collapse pada layar sempit — hanya
+     lebar expanded-nya yang sedikit lebih ramping. */
   .ws-col-toggle {
     display: none;
   }
   .ws-body,
-  .ws-body.left-collapsed,
-  .ws-body.right-collapsed,
-  .ws-body.left-collapsed.right-collapsed {
+  .ws-body.right-collapsed {
     grid-template-columns: 1fr;
   }
-  .ws-col.is-collapsed {
+  .ws-col.right.is-collapsed {
     overflow: visible;
   }
-  .ws-col.left.is-collapsed > *:not(.ws-col-toggle),
   .ws-col.right.is-collapsed > *:not(.ws-col-toggle) {
     transform: none;
+  }
+  .app {
+    grid-template-columns: 210px 1fr;
+  }
+  .app.sidebar-collapsed {
+    grid-template-columns: 44px 1fr;
   }
 }
 
