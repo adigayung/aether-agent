@@ -24,6 +24,7 @@ agar pilihan tidak di-hardcode di frontend.
 
 from __future__ import annotations
 
+import json
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -2715,7 +2716,255 @@ class GatewayService:
         tasks.sort(key=lambda t: t.get("last_timestamp") or "", reverse=True)
         return tasks
 
-    def get_task_history(self, task_id: str, project_id: Optional[str] = None) -> Dict[str, Any]:
+    # ------------------------------------------------------------------ #
+    # Statistics API (TASK 3) — agregasi project-local read-only.
+    # ------------------------------------------------------------------ #
+    def get_statistics(
+        self,
+        project_id: Optional[str] = None,
+        *,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        group_by: str = "day",
+        activity: str = "all",
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        status: Optional[str] = None,
+        sort: str = "total_tokens",
+        order: str = "desc",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """Statistik penggunaan AETHER per-project (TASK 3).
+
+        Isolasi: resolusi root memakai project management yang sudah ada
+        (`project_store` + active project). Pembacaan HANYA pada root project
+        yang tervalidasi; TIDAK ada scan lintas-project maupun path arbitrer.
+        Agregasi dijalankan oleh modul `agent_ai.statics` (tanpa storage kedua).
+
+        Args:
+            project_id: project yang diminta; bila None -> active project.
+            from_date, to_date: rentang tanggal inklusif (YYYY-MM-DD).
+            group_by: `day` | `provider` | `model` | `task`.
+            activity: `all` | `agent` | `consultant`.
+            provider, model, status: filter opsional.
+            sort, order, limit, offset: kontrol daftar detail task.
+
+        Returns:
+            Kontrak statistik lengkap (lihat `agent_ai.statics.aggregate`).
+
+        Raises:
+            ValidationError: project tidak dikenali / project_id kosong-tak ada,
+                atau parameter tidak valid.
+            NotFoundError: bila tidak ada project yang bisa di-resolve.
+        """
+        # 1) Resolusi project (active project bila project_id tidak diberikan).
+        effective_project_id = project_id
+        meta: Optional[Dict[str, Any]] = None
+        if effective_project_id:
+            meta = self.project_store.get_project(effective_project_id)
+            if meta is None:
+                # Project tidak dikenal -> error eksplisit (BUKAN fallback).
+                raise ValidationError(
+                    f"Project '{effective_project_id}' tidak dikenal."
+                )
+        else:
+            active = self.get_active_project()
+            if active is None:
+                raise NotFoundError(
+                    "Tidak ada project yang dipilih dan tidak ada active project."
+                )
+            meta = active
+            effective_project_id = active.get("id")
+
+        root = meta.get("path") or meta.get("root")
+        if not root:
+            raise ValidationError(
+                f"Project '{effective_project_id}' tidak memiliki path root."
+            )
+
+        # 2) Agregasi project-local (tanpa menyentuh project lain).
+        from agent_ai.statics import build_statistics
+
+        try:
+            return build_statistics(
+                project_id=str(effective_project_id),
+                root=str(root),
+                from_date=from_date,
+                to_date=to_date,
+                group_by=group_by,
+                activity=activity,
+                provider=provider,
+                model=model,
+                status=status,
+                sort=sort,
+                order=order,
+                limit=limit,
+                offset=offset,
+            )
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+
+    # ------------------------------------------------------------------ #
+    # Statistics export (TASK 6) — CSV/JSON, project-LOCAL, read-only.
+    # ------------------------------------------------------------------ #
+    def export_statistics(
+        self,
+        project_id: Optional[str] = None,
+        *,
+        export_format: str = "json",
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        group_by: str = "day",
+        activity: str = "all",
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        status: Optional[str] = None,
+        sort: str = "total_tokens",
+        order: str = "desc",
+    ) -> Dict[str, Any]:
+        """Ekspor data Statics per-project (TASK 6) sebagai CSV atau JSON.
+
+        Isolasi project: resolusi root SAMA dengan `get_statistics` (project
+        store + active project). Tidak menerima path filesystem dari frontend.
+        Seluruh task yang cocok filter diekspor (TANPA batas pagination).
+
+        Args:
+            project_id: project yang diminta; None -> active project.
+            export_format: ``json`` atau ``csv``.
+            from_date/to_date/group_by/activity/provider/model/status:
+                filter yang sama dengan Statistics API.
+            sort/order: urutan baris task pada ekspor.
+
+        Returns:
+            Dict berisi ``format``, ``filename``, ``content_type``, dan
+            ``content`` (string siap diunduh).
+
+        Raises:
+            ValidationError: format/filter tidak valid atau project tak dikenal.
+            NotFoundError: bila tidak ada project yang bisa di-resolve.
+        """
+        if export_format not in ("csv", "json"):
+            raise ValidationError(
+                "Parameter 'format' harus 'csv' atau 'json'."
+            )
+
+        # Ekspor memakai agregasi yang sama (isolasi + definisi metrik konsisten).
+        # offset/limit=0 -> SELURUH task ikut terhitung & disertakan.
+        stats = self.get_statistics(
+            project_id=project_id,
+            from_date=from_date,
+            to_date=to_date,
+            group_by=group_by,
+            activity=activity,
+            provider=provider,
+            model=model,
+            status=status,
+            sort=sort,
+            order=order,
+            limit=0,
+            offset=0,
+        )
+
+        from agent_ai.statics import (
+            build_csv_export,
+            build_json_export,
+            export_metadata,
+        )
+        from agent_ai.statics.records import read_agent_task_stats
+        from agent_ai.statics.aggregate import (
+            _in_range,
+            _normalize_range,
+            _task_matches,
+        )
+
+        # Resolusi ulang root HANYA untuk membaca baris task (sumber sama).
+        effective_project_id = stats.get("project_id")
+        meta = self.project_store.get_project(str(effective_project_id))
+        if meta is None:
+            raise ValidationError(
+                f"Project '{effective_project_id}' tidak dikenal."
+            )
+        root = meta.get("path") or meta.get("root")
+        if not root:
+            raise ValidationError(
+                f"Project '{effective_project_id}' tidak memiliki path root."
+            )
+
+        start, end = _normalize_range(from_date, to_date)
+        # Baca SEMUA task project ini lalu terapkan filter SAMA dengan agregasi
+        # (tidak ada pembatasan pagination pada ekspor).
+        export_tasks = []
+        for task in read_agent_task_stats(str(root)):
+            if not _in_range(task.day_key(), start, end):
+                continue
+            if not _task_matches(task, provider, model, status):
+                continue
+            task.project_id = str(effective_project_id)
+            export_tasks.append(task)
+
+        generated_at = stats.get("generated_at") or ""
+        metadata = export_metadata(
+            project_id=str(effective_project_id),
+            from_date=from_date,
+            to_date=to_date,
+            group_by=group_by,
+            activity=activity,
+            provider=provider,
+            model=model,
+            status=status,
+            generated_at=generated_at,
+            task_count=len(export_tasks),
+            data_quality=stats.get("data_quality"),
+        )
+        # Metadata juga disematkan pada payload JSON agar self-describing.
+        stats["export_metadata"] = metadata
+
+        trend_rows = self._trend_rows(stats.get("trends"))
+
+        stem = f"aether-statics-{effective_project_id}"
+        if export_format == "csv":
+            content = build_csv_export(tasks=export_tasks, metadata=metadata, trend_rows=trend_rows)
+            return {
+                "format": "csv",
+                "filename": f"{stem}.csv",
+                "content_type": "text/csv; charset=utf-8",
+                "content": content,
+                "task_rows": len(export_tasks),
+            }
+
+        payload = build_json_export(
+            statistics=stats,
+            tasks=export_tasks,
+            trend_rows=trend_rows,
+        )
+        return {
+            "format": "json",
+            "filename": f"{stem}.json",
+            "content_type": "application/json; charset=utf-8",
+            "content": json.dumps(payload, ensure_ascii=False, indent=2),
+            "task_rows": len(export_tasks),
+        }
+
+    @staticmethod
+    def _trend_rows(trends: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Ubah blok ``trends`` menjadi baris datar untuk ekspor CSV/JSON."""
+        if not trends:
+            return []
+        rows: List[Dict[str, Any]] = []
+        for key, metric in (trends.get("metrics") or {}).items():
+            rows.append(
+                {
+                    "key": key,
+                    "label": metric.get("label"),
+                    "unit": metric.get("unit"),
+                    "current": metric.get("current"),
+                    "previous": metric.get("previous"),
+                    "change": metric.get("change") or {},
+                }
+            )
+        return rows
+
         """Ambil ringkasan task spesifik dari .aether/log/.
 
         Args:

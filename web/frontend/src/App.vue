@@ -44,6 +44,7 @@ import SettingsView from "./components/SettingsView.vue";
 import ProjectPolicyPanel from "./components/ProjectPolicyPanel.vue";
 import ConsultantChat from "./components/ConsultantChat.vue";
 import ExtensionManager from "./components/ExtensionManager.vue";
+import StaticsView from "./components/StaticsView.vue";
 import { getHealth } from "./api.js";
 // Aset gambar dari <repo-root>/assets/icons/** (Vite membundel import ini,
 // sama seperti pola audioRegistry.js). TIDAK ada publicDir/alias baru.
@@ -1049,6 +1050,14 @@ const { editorOpen, editorFile, openFileInEditor, closeCodeEditor, onEditorError
               <ExtensionManager :key="extensionRefreshKey" @error="(m) => { error = m; }" />
             </div>
           </section>
+
+          <!-- Statics (statistik penggunaan PER-PROJECT, Statistics API). -->
+          <StaticsView
+            v-else-if="activeNav === 'statics'"
+            :project-id="activeProject ? activeProject.id : ''"
+            :project-name="activeProject ? activeProject.name : ''"
+            @open-task="openHistoryTask"
+          />
 
           <!-- Settings (kelola provider/model/credential via Gateway). -->
           <SettingsView v-else-if="activeNav === 'settings'" :config="config" />

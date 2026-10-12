@@ -398,6 +398,115 @@ export function getTaskReport(taskId, projectId = null) {
   return request(`/tasks/${encodeURIComponent(taskId)}/report${qs}`);
 }
 
+// --- Statistics (TASK 3/4) --------------------------------------------------
+// GET /api/statics -> statistik penggunaan AETHER PER-PROJECT (token, aktivitas
+// task, pemakaian provider/model). Agregasi dijalankan backend dari sumber
+// project-local (.aether/log + .aether/consultant/usage.jsonl); frontend TIDAK
+// melakukan scan filesystem / agregasi lintas-project.
+//
+// `projectId` WAJIB diisi bila tersedia agar statistik selalu milik project
+// yang sedang dipilih (backend fallback ke active project bila kosong).
+// Parameter lain bersifat opsional (kontrak = agent_ai.statics.aggregate).
+export function getStatics({
+  projectId = null,
+  from = null,
+  to = null,
+  groupBy = null,
+  activity = null,
+  provider = null,
+  model = null,
+  status = null,
+  sort = null,
+  order = null,
+  limit = null,
+  offset = null,
+} = {}) {
+  const params = new URLSearchParams();
+  if (projectId) params.set("project_id", projectId);
+  if (from) params.set("from", from);
+  if (to) params.set("to", to);
+  if (groupBy) params.set("group_by", groupBy);
+  if (activity) params.set("activity", activity);
+  if (provider) params.set("provider", provider);
+  if (model) params.set("model", model);
+  if (status) params.set("status", status);
+  if (sort) params.set("sort", sort);
+  if (order) params.set("order", order);
+  if (limit != null) params.set("limit", String(limit));
+  if (offset != null) params.set("offset", String(offset));
+  const qs = params.toString();
+  return request(`/statics${qs ? `?${qs}` : ""}`);
+}
+
+// GET /api/statics/export -> unduhan CSV/JSON Statics (TASK 6). Mengikuti
+// project/periode/activity/group_by/sort/filter yang SAMA dengan
+// `getStatics`. Backend mengekspor SELURUH task yang cocok filter (bukan hanya
+// halaman pagination yang tampil) dan TIDAK memuat prompt/raw response/API key.
+// Unduhan dilakukan lewat blob + anchor (tanpa mengubah hash/history browser).
+export async function downloadStaticsExport({
+  projectId = null,
+  format = "json",
+  from = null,
+  to = null,
+  groupBy = null,
+  activity = null,
+  provider = null,
+  model = null,
+  status = null,
+  sort = null,
+  order = null,
+} = {}) {
+  const params = new URLSearchParams();
+  if (format) params.set("format", format);
+  if (projectId) params.set("project_id", projectId);
+  if (from) params.set("from", from);
+  if (to) params.set("to", to);
+  if (groupBy) params.set("group_by", groupBy);
+  if (activity) params.set("activity", activity);
+  if (provider) params.set("provider", provider);
+  if (model) params.set("model", model);
+  if (status) params.set("status", status);
+  if (sort) params.set("sort", sort);
+  if (order) params.set("order", order);
+
+  const resp = await fetch(`${BASE}/statics/export?${params.toString()}`);
+  if (!resp.ok) {
+    const text = await resp.text();
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = null;
+    }
+    const message = data?.error?.message || `HTTP ${resp.status}`;
+    const err = new Error(message);
+    err.status = resp.status;
+    err.code = data?.error?.code;
+    throw err;
+  }
+  const blob = await resp.blob();
+  // Nama file dari header bila tersedia; fallback deterministik.
+  let filename = `aether-statics.${format === "csv" ? "csv" : "json"}`;
+  const disposition = resp.headers.get("Content-Disposition") || "";
+  const match = /filename="?([^";]+)"?/i.exec(disposition);
+  if (match && match[1]) filename = match[1];
+
+  const url = URL.createObjectURL(blob);
+  try {
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.style.display = "none";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+  } finally {
+    // Bebaskan object URL setelah unduhan dimulai.
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+  return { filename, size: blob.size };
+}
+
 // --- Consultant (AETHER reasoning layer) -----------------------------------
 // POST /api/consultant/consult -> satu giliran konsultasi. Backend menjalankan
 // reasoning/tool/boundary/bible memakai subsistem AETHER yang sudah ada.

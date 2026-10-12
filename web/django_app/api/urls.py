@@ -137,6 +137,10 @@ urlpatterns = [
     path("tasks/<str:task_id>/activity", views.task_activity, name="task_activity"),
     # Report API (final Agent Report per task)
     path("tasks/<str:task_id>/report", views.task_report, name="task_report"),
+    # Statistics API (TASK 3) — agregasi statistik penggunaan per-project.
+    path("statics", views.statics, name="statics"),
+    # Statistics export (TASK 6) — unduhan CSV/JSON, filter + isolasi project SAMA.
+    path("statics/export", views.statics_export, name="statics_export"),
     # Consultant API (AETHER reasoning layer, read-only terhadap CODE PROJECT)
     path("consultant/sessions", views.consultant_sessions, name="consultant_sessions"),
     path(

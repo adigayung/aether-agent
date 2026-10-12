@@ -14,7 +14,7 @@ import json
 from typing import Any, Callable, Dict
 
 from django.conf import settings
-from django.http import HttpRequest, JsonResponse, StreamingHttpResponse
+from django.http import HttpRequest, HttpResponse, JsonResponse, StreamingHttpResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
@@ -730,6 +730,101 @@ def task_history_detail(request: HttpRequest, service: GatewayService, task_id: 
     """
     project_id = request.GET.get("project_id") or None
     return _json_response(service.get_task_history(task_id, project_id=project_id))
+
+
+# ---------------------------------------------------------------------------
+# Statistics API (TASK 3) — agregasi project-local read-only.
+# ---------------------------------------------------------------------------
+def _int_param(value: Optional[str], *, default: int, field: str) -> int:
+    """Parse query param integer (default bila kosong).
+
+    Raises:
+        ValidationError: bila bukan integer.
+    """
+    from api.services import ValidationError
+
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"Parameter '{field}' harus integer: {value!r}") from exc
+
+
+@require_http_methods(["GET"])
+@_handle
+def statics(request: HttpRequest, service: GatewayService) -> JsonResponse:
+    """GET /api/statics -> statistik penggunaan AETHER per-project (TASK 3).
+
+    Query params (semua opsional kecuali resolusi project):
+        project_id : project yang diminta; bila kosong -> active project.
+        from, to   : rentang tanggal INKLUSIF (YYYY-MM-DD).
+        group_by   : day | provider | model | task (default day).
+        activity   : all | agent | consultant (default all).
+        provider, model, status : filter opsional.
+        sort, order : sorting daftar detail task (default total_tokens desc).
+        limit, offset : pagination daftar detail task (default 50, 0).
+
+    Isolasi: resolusi root memakai project management existing; pembacaan HANYA
+    pada project tervalidasi (tidak ada scan lintas-project / path arbitrer).
+    """
+    project_id = request.GET.get("project_id") or None
+    return _json_response(
+        service.get_statistics(
+            project_id=project_id,
+            from_date=request.GET.get("from") or None,
+            to_date=request.GET.get("to") or None,
+            group_by=request.GET.get("group_by") or "day",
+            activity=request.GET.get("activity") or "all",
+            provider=request.GET.get("provider") or None,
+            model=request.GET.get("model") or None,
+            status=request.GET.get("status") or None,
+            sort=request.GET.get("sort") or "total_tokens",
+            order=request.GET.get("order") or "desc",
+            limit=_int_param(request.GET.get("limit"), default=50, field="limit"),
+            offset=_int_param(request.GET.get("offset"), default=0, field="offset"),
+        )
+    )
+
+
+@require_http_methods(["GET"])
+@_handle
+def statics_export(request: HttpRequest, service: GatewayService) -> HttpResponse:
+    """GET /api/statics/export -> unduhan CSV/JSON data Statics (TASK 6).
+
+    Query params:
+        format     : csv | json (default json).
+        project_id : project yang diminta; kosong -> active project.
+        from, to   : rentang tanggal INKLUSIF (YYYY-MM-DD).
+        group_by   : day | provider | model (default day).
+        activity   : all | agent | consultant (default all).
+        provider, model, status : filter opsional.
+        sort, order : urutan baris task (default total_tokens desc).
+
+    Isolasi project identik dengan `GET /api/statics`: root di-resolve lewat
+    project management existing; TIDAK ada path filesystem dari frontend.
+    Ekspor menyertakan SELURUH task yang cocok filter (bukan hanya halaman
+    pagination yang tampil). Tidak ada prompt/raw response/API key di ekspor.
+    """
+    project_id = request.GET.get("project_id") or None
+    result = service.export_statistics(
+        project_id=project_id,
+        export_format=request.GET.get("format") or "json",
+        from_date=request.GET.get("from") or None,
+        to_date=request.GET.get("to") or None,
+        group_by=request.GET.get("group_by") or "day",
+        activity=request.GET.get("activity") or "all",
+        provider=request.GET.get("provider") or None,
+        model=request.GET.get("model") or None,
+        status=request.GET.get("status") or None,
+        sort=request.GET.get("sort") or "total_tokens",
+        order=request.GET.get("order") or "desc",
+    )
+    response = HttpResponse(result.get("content") or "", content_type=result.get("content_type"))
+    response["Content-Disposition"] = f'attachment; filename="{result.get("filename")}"'
+    # Cegah caching respons ekspor (data dapat berubah setiap saat).
+    response["Cache-Control"] = "no-store"
+    return response
 
 
 # ---------------------------------------------------------------------------

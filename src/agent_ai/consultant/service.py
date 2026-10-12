@@ -44,6 +44,11 @@ from agent_ai.consultant.store import (
     ConsultantSessionStore,
     project_sessions_path,
 )
+from agent_ai.consultant.telemetry import (
+    ConsultantUsageStore,
+    make_usage_record,
+    project_usage_path,
+)
 
 #: Batas langkah reasoning/tool per giliran konsultasi (safety, bukan target).
 _DEFAULT_MAX_STEPS = 40
@@ -613,6 +618,48 @@ class ConsultantService:
 
         tool_events: List[Dict[str, Any]] = []
 
+        # Telemetry usage Consultant (TASK 2): persistensi project-local
+        # ``<root>/.aether/consultant/usage.jsonl``. Sumbernya adalah event
+        # `provider_response` dari orchestrator (angka usage AKTUAL provider,
+        # sudah dinormalisasi `response_usage`). Ini TIDAK menyalin usage Agent
+        # ke storage kedua: Consultant punya jalur orchestrator/penyimpanan
+        # sendiri (tidak menulis Task Log Agent).
+        turn_id = uuid.uuid4().hex
+        usage_index = 0
+        usage_store: Optional[ConsultantUsageStore] = None
+        # Root untuk telemetry: utamakan root project dari scope (isolasi yang
+        # sama dengan sesi), lalu `root` eksplisit. Tidak ada storage lintas-project.
+        telemetry_root = self._resolve_root(session.project_id) or root
+        if telemetry_root:
+            try:
+                usage_store = ConsultantUsageStore(project_usage_path(telemetry_root))
+            except Exception:  # noqa: BLE001 - telemetry tidak boleh menggagalkan konsultasi
+                usage_store = None
+
+        def _record_provider_usage(payload: Dict[str, Any]) -> None:
+            """Catat metadata usage satu respons provider (best-effort)."""
+            nonlocal usage_index
+            if usage_store is None:
+                return
+            try:
+                # `provider_response` juga diemit saat error (memuat `error`);
+                # hanya respons yang BERHASIL yang dicatat sebagai usage.
+                if "error" in payload:
+                    return
+                record = make_usage_record(
+                    project_id=session.project_id or "",
+                    session_id=session.session_id,
+                    turn_id=turn_id,
+                    response_index=usage_index,
+                    provider=str(payload.get("provider", "") or ""),
+                    model=str(payload.get("model", "") or ""),
+                    usage=payload.get("usage"),
+                )
+                usage_index += 1
+                usage_store.append(record)
+            except Exception:  # noqa: BLE001 - telemetry tidak boleh menggagalkan konsultasi
+                return
+
         def _sink(event_type: str, payload: Dict[str, Any]) -> None:
             if event_type == "tool_called":
                 tool_events.append(
@@ -631,6 +678,10 @@ class ConsultantService:
                         "error": payload.get("error"),
                     }
                 )
+            elif event_type == "provider_response":
+                # Telemetry usage: rekam metadata token respons provider ini
+                # (best-effort; tidak menyimpan prompt/respons).
+                _record_provider_usage(payload)
             # Observability LIVE: teruskan event runtime yang SAMA ke event
             # system AETHER existing (SessionStore via Gateway) agar UI dapat
             # menampilkan status nyata selama konsultasi. Ini TIDAK mengubah

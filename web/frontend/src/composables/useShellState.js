@@ -32,6 +32,11 @@ const navItems = [
     icon: "M12 2l7 4v8l-7 4-7-4V6zM12 12v8M5 6l7 6 7-6",
   },
   {
+    id: "statics",
+    label: "Statics",
+    icon: "M4 20V10M10 20V4M16 20v-7M22 20H2",
+  },
+  {
     id: "settings",
     label: "Settings",
     icon: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 7 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9H1a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 2.6 7a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H7a1.7 1.7 0 0 0 1-1.5V1a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V7a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z",
@@ -77,6 +82,7 @@ export function useShellState({ getRuntime, getConfig, getQueueCount, getProject
     if (activeNav.value === "projects") return "Projects";
     if (activeNav.value === "backup") return "Backup";
     if (activeNav.value === "extension") return "Extension";
+    if (activeNav.value === "statics") return "Statics";
     if (activeNav.value === "settings") return "Settings";
     return "Workbench";
   });
@@ -85,6 +91,8 @@ export function useShellState({ getRuntime, getConfig, getQueueCount, getProject
     if (activeNav.value === "projects") return "Workspaces registered in AETHER.";
     if (activeNav.value === "backup") return "GitHub backup, checkpoints, and recovery for the active project.";
     if (activeNav.value === "extension") return "Manage AETHER extensions.";
+    if (activeNav.value === "statics")
+      return "Token usage, task activity, and provider/model usage for the active project.";
     if (activeNav.value === "settings") return "Configure providers and models used by the AETHER workbench.";
     return "";
   });

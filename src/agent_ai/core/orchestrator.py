@@ -125,6 +125,11 @@ _MAX_TRUNCATION_RECOVERIES = 4
 #: NON-SUKSES (FAILED) — bukan DONE palsu.
 _MAX_VERIFICATION_RECOVERIES = 3
 
+#: BOUNDED tool-call metadata pada event `provider_response` (telemetry usage):
+#: jumlah MAKSIMUM nama tool yang disertakan per respons. Hanya observability
+#: (payload event tidak membengkak); TIDAK mengubah alur eksekusi.
+_MAX_RESPONSE_TOOL_NAMES = 20
+
 #: Pola credential yang disamarkan dari teks error provider sebelum dikirim ke
 #: telemetry/activity (jaring pengaman agar secret tidak bocor ke log/UI).
 _CREDENTIAL_PATTERNS = re.compile(
@@ -1213,6 +1218,13 @@ class AgentOrchestrator:
             "finish_reason": response.finish_reason.value,
             "tool_calls": len(response.tool_calls()),
         }
+        # Metadata tool-call yang RELEVAN (nama tool; urutan sesuai response).
+        # BOUNDED: hanya nama (string) dan dibatasi jumlahnya agar payload event
+        # tidak membengkak. TIDAK memuat argumen/konten (bisa besar & sensitif);
+        # ini murni observability dan tidak mengubah alur eksekusi.
+        tool_names = [a.name for a in response.tool_calls() if a.name][:_MAX_RESPONSE_TOOL_NAMES]
+        if tool_names:
+            payload["tool_names"] = tool_names
         usage = response_usage(getattr(response, "raw", None))
         if usage:
             payload["usage"] = usage

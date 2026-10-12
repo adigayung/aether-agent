@@ -93,12 +93,149 @@ def response_usage(raw: Any) -> Optional[Dict[str, int]]:
     if not usage:
         return None
 
-    # Total: pakai angka provider bila ada; selain itu jumlahkan prompt+completion
-    # yang memang dilaporkan provider (bukan estimasi baru).
-    if "total" not in usage and ("prompt" in usage or "completion" in usage):
-        usage["total"] = usage.get("prompt", 0) + usage.get("completion", 0)
+    # Total: pakai angka provider bila ada; BILA TIDAK ADA, hitung HANYA ketika
+    # prompt DAN completion keduanya dilaporkan provider (angka aktual, bukan
+    # estimasi tokenizer). Bila hanya salah satu yang tersedia, `total` TIDAK
+    # diisi: komponen yang hilang TIDAK boleh disimpulkan sebagai 0.
+    if "total" not in usage and "prompt" in usage and "completion" in usage:
+        usage["total"] = usage["prompt"] + usage["completion"]
 
     return usage
+
+
+#: Status ketersediaan usage (kontrak telemetry TASK 3).
+USAGE_STATUS_ACTUAL = "actual"          # input + output tersedia (total andal)
+USAGE_STATUS_PARTIAL = "partial"        # sebagian komponen tersedia
+USAGE_STATUS_UNAVAILABLE = "unavailable"  # provider tidak melaporkan usage
+
+#: Sumber angka usage yang EKSPLISIT (bukan asumsi dari nama provider).
+USAGE_SOURCE_OPENAI = "openai_usage"     # usage.prompt_tokens/..._tokens
+USAGE_SOURCE_CANONICAL = "aether_usage"  # usage.prompt/completion/total
+USAGE_SOURCE_OLLAMA = "ollama_native"    # prompt_eval_count/eval_count
+USAGE_SOURCE_UNAVAILABLE = "unavailable"
+
+
+def _usage_value(raw: Any, *, nested: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Ekstrak komponen usage mentah + sumber eksplisit dari payload provider.
+
+    Mengembalikan dict ``{"prompt", "completion", "total", "source"}`` dengan
+    nilai ``Optional[int]`` (None = komponen TIDAK dilaporkan) dan ``source``
+    string yang menandai format provider asal angka (bukan asumsi nama provider).
+    """
+    result: Dict[str, Any] = {
+        "prompt": None,
+        "completion": None,
+        "total": None,
+        "source": USAGE_SOURCE_UNAVAILABLE,
+    }
+    if nested is None:
+        # Ollama native (top-level) — sumber angka adalah respons provider.
+        prompt = _usage_int(raw.get("prompt_eval_count"))
+        completion = _usage_int(raw.get("eval_count"))
+        if prompt is not None or completion is not None:
+            result["prompt"] = prompt
+            result["completion"] = completion
+            result["source"] = USAGE_SOURCE_OLLAMA
+        return result
+
+    prompt = _usage_int(nested.get("prompt_tokens"))
+    completion = _usage_int(nested.get("completion_tokens"))
+    total = _usage_int(nested.get("total_tokens"))
+    openai_keys = any(
+        nested.get(k) is not None
+        for k in ("prompt_tokens", "completion_tokens", "total_tokens")
+    )
+    if prompt is None:
+        prompt = _usage_int(nested.get("prompt"))
+    if completion is None:
+        completion = _usage_int(nested.get("completion"))
+    if total is None:
+        total = _usage_int(nested.get("total"))
+    if prompt is None and completion is None and total is None:
+        return result
+    result["prompt"] = prompt
+    result["completion"] = completion
+    result["total"] = total
+    result["source"] = USAGE_SOURCE_OPENAI if openai_keys else USAGE_SOURCE_CANONICAL
+    return result
+
+
+def usage_detail(raw: Any) -> Dict[str, Any]:
+    """Metadata usage terperinci + status + sumber untuk KONTRAK telemetry.
+
+    Berbeda dari :func:`response_usage` (yang mengembalikan subset
+    ``{"prompt","completion","total"}`` untuk kompatibilitas pemanggil lama),
+    fungsi ini mengembalikan SEMUA komponen termasuk yang TIDAK tersedia
+    (``None``) supaya konsumen statistik dapat membedakan nilai valid, parsial,
+    dan tidak tersedia — tanpa menyimpulkan komponen yang hilang sebagai 0.
+
+    Returns:
+        dict dengan kunci:
+            prompt, completion, total : Optional[int]
+                None = komponen TIDAK dilaporkan provider (BUKAN 0).
+            status : str
+                ``actual``      -> input + output tersedia (total andal),
+                ``partial``     -> hanya sebagian komponen tersedia,
+                ``unavailable`` -> provider tidak melaporkan usage apa pun.
+            source : str
+                sumber angka eksplisit (``openai_usage`` / ``aether_usage`` /
+                ``ollama_native`` / ``unavailable``).
+    """
+    if not isinstance(raw, dict):
+        return {
+            "prompt": None,
+            "completion": None,
+            "total": None,
+            "status": USAGE_STATUS_UNAVAILABLE,
+            "source": USAGE_SOURCE_UNAVAILABLE,
+        }
+
+    nested = raw.get("usage")
+    values = _usage_value(raw, nested=nested if isinstance(nested, dict) else None)
+    prompt = values["prompt"]
+    completion = values["completion"]
+    total = values["total"]
+    source = values["source"]
+
+    if prompt is None and completion is None and total is None:
+        status = USAGE_STATUS_UNAVAILABLE
+    elif prompt is not None and completion is not None:
+        status = USAGE_STATUS_ACTUAL
+    else:
+        status = USAGE_STATUS_PARTIAL
+
+    # Total: gunakan angka provider; bila tidak ada tetapi input+output tersedia,
+    # turunkan dari keduanya (angka aktual). Jangan mengisi bila salah satu hilang.
+    if total is None and prompt is not None and completion is not None:
+        total = prompt + completion
+
+    return {
+        "prompt": prompt,
+        "completion": completion,
+        "total": total,
+        "status": status,
+        "source": source,
+    }
+
+
+def usage_status(usage: Optional[Dict[str, Any]]) -> str:
+    """Klasifikasi status dari hasil :func:`response_usage` (kompatibilitas).
+
+    Args:
+        usage: hasil ``response_usage`` (subset ``{"prompt","completion","total"}``)
+            atau ``None``.
+
+    Returns:
+        ``actual`` bila input+output tersedia, ``partial`` bila hanya sebagian,
+        ``unavailable`` bila kosong.
+    """
+    if not usage:
+        return USAGE_STATUS_UNAVAILABLE
+    has_prompt = usage.get("prompt") is not None
+    has_completion = usage.get("completion") is not None
+    if has_prompt and has_completion:
+        return USAGE_STATUS_ACTUAL
+    return USAGE_STATUS_PARTIAL
 
 
 class ActionType(str, Enum):
