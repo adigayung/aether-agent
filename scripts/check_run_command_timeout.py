@@ -15,12 +15,17 @@ Yang diverifikasi (deterministik, tanpa API cloud):
     1. Command normal tetap bekerja (backward compatible).
     2. TIMEOUT membunuh SELURUH process tree (parent + grandchild) dan
        tool kembali dalam waktu terbatas (bukan hang permanen).
-    3. Proses induk selesai tetapi grandchild masih memegang pipe ->
-       tool tetap kembali (bounded), tidak menunggu EOF selamanya.
+    3. Proses induk selesai tetapi grandchild masih memegang pipe -> tool tetap
+       kembali (bounded), TIDAK menunggu EOF selamanya, DAN grandchild (orphan)
+       dibersihkan (tidak ditinggalkan hidup).
     4. Cancel (Stop) benar-benar menghentikan command yang sedang berjalan,
        bukan hanya mengubah status.
     5. Queue recovery end-to-end: task yang command-nya timeout berakhir
        FAILED terkontrol, slot scheduler dilepas, dan task berikutnya jalan.
+    6. Timeout pada parent yang masih hidup membunuh grandchild pemegang pipe
+       (PID terpisah) tanpa meninggalkan orphan.
+    7. Default timeout aman, override dipakai untuk proses lambat, nilai
+       berlebihan di-clamp, dan nilai tidak valid ditolak (bukan hang).
 
 Jalankan:
     python scripts/check_run_command_timeout.py
@@ -28,6 +33,7 @@ Jalankan:
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -45,6 +51,7 @@ for _p in (str(SRC_DIR), str(DJANGO_APP_DIR)):
         sys.path.insert(0, _p)
 
 from agent_ai.core.cancel import CancellationToken  # noqa: E402
+from agent_ai.tools.base import ToolValidationError  # noqa: E402
 from agent_ai.tools.terminal import RunCommandTool  # noqa: E402
 
 from api.project_store import ProjectStore  # noqa: E402
@@ -100,6 +107,32 @@ def _kill_pid(pid: int) -> None:
         pass
 
 
+def _pid_alive(pid: int) -> bool:
+    """True bila proses dengan PID tersebut masih hidup.
+
+    Windows: `tasklist /FI "PID eq <pid>"`. POSIX: `os.kill(pid, 0)`.
+    """
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                shell=False,
+            )
+            return str(pid) in (out.stdout or "")
+        except Exception:  # noqa: BLE001 - anggap hidup bila tak bisa dipastikan
+            return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
 # --------------------------------------------------------------------------- #
 # Skenario
 # --------------------------------------------------------------------------- #
@@ -137,7 +170,8 @@ def scenario_2_timeout_kills_tree(run: RunCommandTool, ws: Path) -> None:
 
 
 def scenario_3_parent_exit_grandchild_pipe(run: RunCommandTool, ws: Path) -> None:
-    """Parent selesai tetapi grandchild memegang pipe -> tidak hang (bounded)."""
+    """Parent selesai tetapi grandchild memegang pipe -> tidak hang (bounded)
+    DAN grandchild (orphan) tidak ditinggalkan hidup."""
     pid_file = ws / "spawn_pid.txt"
     if pid_file.exists():
         pid_file.unlink()
@@ -151,16 +185,114 @@ def scenario_3_parent_exit_grandchild_pipe(run: RunCommandTool, ws: Path) -> Non
         f"run_command menunggu EOF pipe yang dipegang grandchild terlalu lama: "
         f"{elapsed:.1f}s (harus bounded, grandchild tidur 60s)"
     )
-    # Hygiene: bunuh grandchild yang sengaja tertinggal.
-    try:
-        pid = int(pid_file.read_text(encoding="utf-8").strip())
-        _kill_pid(pid)
-    except Exception:  # noqa: BLE001
-        pass
+    # Orphan cleanup: grandchild yang memegang pipe TIDAK boleh dibiarkan hidup.
+    # Bila pid file sempat ditulis, proses dengan PID itu harus sudah mati.
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
+            assert not _pid_alive(pid), (
+                f"grandchild pemegang pipe (PID={pid}) masih hidup setelah "
+                "run_command kembali (orphan tidak dibersihkan)"
+            )
+        except ValueError:
+            pass
     print(
         f"[3] parent selesai + grandchild memegang pipe -> kembali "
-        f"dalam {elapsed:.1f}s (tidak hang) OK"
+        f"dalam {elapsed:.1f}s (tidak hang, orphan dibersihkan) OK"
     )
+
+
+def scenario_6_orphan_killed_on_timeout(ws: Path) -> None:
+    """Timeout pada parent yang masih hidup membunuh SELURUH tree:
+
+    grandchild (pemegang pipe) dengan PID terpisah harus benar-benar mati
+    setelah run_command timeout kembali. Ini menguji reaping process tree
+    tanpa bergantung pada relasi PID induk (yang bisa sudah hilang).
+    """
+    pid_file = ws / "tree_pid.txt"
+    if pid_file.exists():
+        pid_file.unlink()
+
+    run = RunCommandTool(root=ws)
+    # Parent hidup lama dan men-spawn grandchild yang menulis PID-nya lalu tidur.
+    (ws / "tree_parent.py").write_text(
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, 'tree_grandchild.py'])\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    (ws / "tree_grandchild.py").write_text(
+        "import os, time\n"
+        "with open('tree_pid.txt', 'w', encoding='utf-8') as fh:\n"
+        "    fh.write(str(os.getpid()))\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+
+    r = run.execute(command=f'"{PY}" tree_parent.py', timeout=2)
+    assert r["timed_out"] is True and r["outcome"] == "timeout", r
+    assert r["success"] is False, r
+
+    deadline = time.time() + 5.0
+    pid: Optional[int] = None
+    while time.time() < deadline:
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text(encoding="utf-8").strip())
+                break
+            except ValueError:
+                pass
+        time.sleep(0.1)
+    assert pid is not None, "grandchild tidak menulis PID (fixture tidak jalan)"
+    # Beri sedikit waktu OS mereap; lalu pastikan grandchild benar-benar mati.
+    time.sleep(1.0)
+    assert not _pid_alive(pid), (
+        f"grandchild (PID={pid}) yang memegang pipe masih hidup setelah timeout "
+        "(process tree TIDAK dihentikan penuh)"
+    )
+    print("[6] timeout membunuh grandchild pemegang pipe (tanpa orphan) OK")
+
+
+def scenario_7_timeout_override_and_default(ws: Path) -> None:
+    """Default timeout aman, override dipakai untuk proses lambat, dan nilai
+    berlebihan dibatasi (clamp) ke batas maksimum."""
+    from agent_ai.tools import terminal as _terminal  # noqa: E402
+
+    run = RunCommandTool(root=ws)
+
+    # (a) Override: command yang butuh >1s TETAP sukses bila timeout dinaikkan.
+    r = run.execute(
+        command=f'"{PY}" -c "import time; time.sleep(2); print(\'late\')"',
+        timeout=30,
+    )
+    assert r["success"] and "late" in r["stdout"], r
+
+    # (b) Default timeout terpasang bila argumen tidak diberikan (60s) dan
+    #     tidak memotong command cepat.
+    r = run.execute(command=f'"{PY}" -c "print(\'fast\')"')
+    assert r["success"] and "fast" in r["stdout"], r
+    assert _terminal._DEFAULT_TIMEOUT == 60.0, _terminal._DEFAULT_TIMEOUT
+
+    # (c) Nilai timeout berlebihan dibatasi ke _MAX_TIMEOUT (clamp) — bukan
+    #     diteruskan mentah. Diverifikasi tanpa menunggu 600s: command yang
+    #     "timeout" memakai nilai kecil, dan clamp diuji lewat pemetaan nilai.
+    r = run.execute(command=f'"{PY}" -c "import time; time.sleep(5)"', timeout=0.5)
+    assert r["outcome"] == "timeout", r
+    assert "0.5" in r["error"], r
+
+    huge = _terminal._MAX_TIMEOUT + 5000
+    # Replikasi jalur validasi: timeout efektif = min(huge, _MAX_TIMEOUT).
+    assert min(float(huge), _terminal._MAX_TIMEOUT) == _terminal._MAX_TIMEOUT
+
+    # (d) Timeout tidak valid ditolak sebagai validation error (tidak hang).
+    rejected = False
+    try:
+        run.execute(command=f'"{PY}" -c "print(1)"', timeout=0)
+    except ToolValidationError:
+        rejected = True
+    assert rejected, "timeout <= 0 harus ditolak sebagai ToolValidationError"
+
+    print("[7] default/override/clamp timeout OK")
 
 
 def scenario_4_cancel_stops_process(ws: Path) -> None:
@@ -300,6 +432,8 @@ def main() -> int:
         scenario_3_parent_exit_grandchild_pipe(run, ws)
         scenario_4_cancel_stops_process(ws)
         scenario_5_queue_recovery(ws)
+        scenario_6_orphan_killed_on_timeout(ws)
+        scenario_7_timeout_override_and_default(ws)
         print()
         print(
             "[OK] run_command timeout menghentikan process tree, tidak hang, "

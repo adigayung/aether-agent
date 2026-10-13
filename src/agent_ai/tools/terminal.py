@@ -14,10 +14,14 @@ Keamanan & desain:
     - Shell syntax (&&, ||, |, >, >>) dideteksi dan dijalankan via shell.
     - Timeout wajib (default) agar agent tidak menggantung.
     - Timeout BENAR-BENAR menghentikan proses: saat habis waktu (atau saat
-      cancel diminta) SELURUH process tree dibunuh (Windows: `taskkill /T /F`;
-      POSIX: process-group kill). Ini mencegah hang permanen karena grandchild
+      cancel diminta) SELURUH process tree dibunuh (Windows: Job Object
+      KILL_ON_JOB_CLOSE + `taskkill /T /F` sebagai fallback; POSIX:
+      process-group kill). Ini mencegah hang permanen karena grandchild
       yang mewarisi pipe stdout/stderr (kasus `communicate()` yang menunggu EOF
       selamanya pada `subprocess.run(capture_output=True)`).
+    - Windows Job Object juga mereap descendant yang tetap hidup setelah induk
+      keluar lebih dulu (orphan pemegang pipe yang tidak terjangkau
+      `taskkill /T /PID` karena PID induk sudah hilang).
     - Output dibaca lewat thread reader daemon + bounded join, sehingga proses
       yang selesai tetapi pipe masih dipegang grandchild TIDAK membuat tool
       menggantung.
@@ -310,12 +314,138 @@ def _wait_bounded(process: "subprocess.Popen[Any]", seconds: float) -> None:
         pass
 
 
-def _kill_process_tree(process: "subprocess.Popen[Any]") -> None:
+def _create_kill_on_close_job() -> Optional[int]:
+    """Buat Windows Job Object dengan JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.
+
+    Job Object adalah mekanisme OS yang menjamin SEMUA proses yang di-assign
+    ke job (beserta descendant-nya) dihentikan saat handle job ditutup. Ini
+    menutup celah `taskkill /T /PID`: `taskkill` berbasis relasi parent-child
+    pada PID induk, sehingga GAGAL menjangkau grandchild yang tetap hidup
+    setelah induk sudah keluar (kasus grandchild pemegang pipe stdout/stderr).
+
+    Job object bersifat recursive secara native: proses apa pun yang di-spawn
+    oleh proses di dalam job otomatis menjadi anggota job yang sama; jadi
+    grandchild (dan cicit) ikut dibunuh tanpa perlu menelusuri tree manual.
+
+    Returns:
+        Handle job (int) bila berhasil; None bila bukan Windows atau gagal
+        (best-effort — pemanggil akan fallback ke `taskkill`).
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER),
+                ("PerJobUserTimeLimit", wintypes.LARGE_INTEGER),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.POINTER(ctypes.c_ulong)),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class _IO_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong),
+            ]
+
+        class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", _IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+        JobObjectExtendedLimitInformation = 9
+
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+
+        info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        ok = kernel32.SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        )
+        if not ok:
+            kernel32.CloseHandle(job)
+            return None
+        return int(job)
+    except Exception:  # noqa: BLE001 - Job Object tidak wajib; ada fallback
+        return None
+
+
+def _assign_to_job(job: Optional[int], process: "subprocess.Popen[Any]") -> bool:
+    """Assign proses (Windows HANDLE) ke job object. Best-effort."""
+    if not job or os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = wintypes.HANDLE(int(process._handle))  # type: ignore[attr-defined]
+        return bool(kernel32.AssignProcessToJobObject(wintypes.HANDLE(job), handle))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _terminate_job(job: Optional[int]) -> None:
+    """Bunuh semua proses dalam job (bila job tersedia), lalu tutup handle.
+
+    Menutup handle job dengan limit KILL_ON_JOB_CLOSE otomatis menghentikan
+    seluruh anggota job. Best-effort: kegagalan tidak melempar exception.
+    """
+    if not job or os.name != "nt":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        try:
+            kernel32.TerminateJobObject(wintypes.HANDLE(job), 1)
+        except Exception:  # noqa: BLE001
+            pass
+        kernel32.CloseHandle(wintypes.HANDLE(job))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _kill_process_tree(
+    process: "subprocess.Popen[Any]",
+    job: Optional[int] = None,
+) -> None:
     """Hentikan proses beserta SELURUH descendant-nya (best-effort, bounded).
 
-    Windows: `taskkill /F /T /PID` membunuh process tree (relasi parent-child),
-    sehingga grandchild yang mewarisi pipe stdout/stderr ikut mati dan pipe
-    segera tertutup. Ini menghilangkan penyebab hang permanen saat menunggu EOF.
+    Windows: bila `job` (Job Object KILL_ON_JOB_CLOSE) tersedia, SELURUH anggota
+    job — termasuk grandchild yang di-spawn setelah induk keluar — dihentikan
+    lewat job. Ini juga menangani kasus grandchild pemegang pipe stdout/stderr
+    yang TIDAK terjangkau `taskkill /T /PID` setelah PID induk hilang.
+
+    Bila job tidak tersedia, fallback `taskkill /F /T /PID` (relasi parent-child
+    pada induk yang masih hidup).
 
     POSIX: proses dijalankan pada session/process-group sendiri
     (`start_new_session=True`) sehingga `os.killpg` membunuh seluruh grup.
@@ -323,9 +453,13 @@ def _kill_process_tree(process: "subprocess.Popen[Any]") -> None:
     Selalu aman dipanggil: kegagalan terminasi tidak pernah melempar exception
     (fallback membunuh proses langsung).
     """
+    if job:
+        _terminate_job(job)
+        return
+
     if process.poll() is not None:
-        # Proses langsung sudah selesai. Bila masih ada grandchild yang
-        # memegang pipe, itu ditangani oleh bounded join reader thread.
+        # Proses langsung sudah selesai dan tidak ada job: grandchild yang
+        # masih hidup ditangani oleh bounded join reader thread (tidak hang).
         return
 
     if os.name == "nt":
@@ -399,6 +533,18 @@ def _run_process(
 
     process = subprocess.Popen(target, **popen_kwargs)
 
+    # Windows: assign proses ke Job Object KILL_ON_JOB_CLOSE. Ini menjamin
+    # SELURUH process tree (termasuk grandchild yang memegang pipe stdout/stderr)
+    # dihentikan saat job ditutup — juga pada kasus induk sudah keluar lebih dulu
+    # sehingga `taskkill /T /PID` tidak bisa lagi menjangkaunya.
+    job: Optional[int] = None
+    if os.name == "nt":
+        candidate = _create_kill_on_close_job()
+        if candidate and _assign_to_job(candidate, process):
+            job = candidate
+        elif candidate:
+            _terminate_job(candidate)
+
     out_chunks: List[str] = []
     err_chunks: List[str] = []
     readers = [
@@ -432,12 +578,16 @@ def _run_process(
                     cancelled = True
                     break
         if timed_out or cancelled:
-            _kill_process_tree(process)
+            _kill_process_tree(process, job)
             _wait_bounded(process, _KILL_GRACE_SECONDS)
     finally:
-        # Bounded join (deadline bersama): reader daemon tidak boleh membuat
-        # kita menggantung bila grandchild masih memegang pipe (proses induk
-        # sudah selesai). Total drain dibatasi _DRAIN_GRACE_SECONDS.
+        # 1) Reap process tree: tutup job (KILL_ON_JOB_CLOSE) sehingga grandchild
+        #    yang memegang pipe ikut mati walau induk sudah keluar lebih dulu.
+        #    Pada jalur timeout/cancel ini idempoten (job sudah dihentikan).
+        _terminate_job(job)
+        # 2) Bounded join (deadline bersama): reader daemon tidak boleh membuat
+        #    kita menggantung bila grandchild masih memegang pipe (proses induk
+        #    sudah selesai). Total drain dibatasi _DRAIN_GRACE_SECONDS.
         drain_deadline = time.perf_counter() + _DRAIN_GRACE_SECONDS
         for reader in readers:
             remaining = drain_deadline - time.perf_counter()
@@ -466,7 +616,11 @@ def _run_process(
             "success": False,
             "timed_out": True,
             "outcome": "timeout",
-            "error": f"Command timeout setelah {timeout} detik.",
+            "error": (
+                f"Command timeout setelah {timeout} detik dan seluruh process "
+                "tree dihentikan. Periksa apakah command menggantung/menunggu "
+                "input, atau naikkan 'timeout' bila proses memang butuh lebih lama."
+            ),
         }
 
     exit_code = process.returncode
