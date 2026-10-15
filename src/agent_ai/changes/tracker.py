@@ -78,6 +78,20 @@ Mutasi dari LUAR proses (editor eksternal, script non-tool, proses lain)
 tetap hanya dapat dideteksi bila metadata berubah; bila metadata pun
 identik, perubahan itu TIDAK terdeteksi — celah ini didokumentasikan,
 bukan disembunyikan, dan tidak diklaim setara dengan hashing konten penuh.
+
+Batas ukuran file yang di-track
+-------------------------------
+Snapshot direktori melewati file individual yang LEBIH BESAR dari
+`MAX_TRACKED_FILE_SIZE` (25 MiB) SEBELUM isinya dibaca — keputusan diambil
+dari `st_size` hasil `stat` yang sudah dibutuhkan untuk fingerprint, jadi file
+besar tidak pernah dibaca hanya untuk di-hash. Aturan berlaku per file (bukan
+per direktori), file tepat 25 MiB tetap dilacak, dan file besar tidak
+menyebabkan hashing penuh berulang pada snapshot berikutnya. Akses eksplisit
+ke satu path file (mis. lewat `register_path` pada mutasi tool) tetap
+menghasilkan hash penuh sehingga perubahan yang dilaporkan tool tidak hilang.
+Statistik snapshot terakhir tersedia lewat
+`ChangeTracker.last_snapshot_stats()` (`files_seen` / `tracked` /
+`skipped_large`).
 """
 
 from __future__ import annotations
@@ -94,6 +108,47 @@ from agent_ai.tools.filesystem import (
     _iter_files,
     _resolve_within_root,
 )
+
+
+# --------------------------------------------------------------------------- #
+# Batas ukuran file yang di-track (eksplisit).
+#
+# File yang LEBIH BESAR dari batas ini dikecualikan dari snapshot workspace
+# OTOMATIS (rekursif) dan TIDAK PERNAH dibaca/di-hash. Tujuannya menghilangkan
+# penundaan New Task akibat hashing model AI, checkpoint, dataset, media, dan
+# file biner besar yang tidak relevan untuk pelacakan perubahan kode.
+#
+# Aturan:
+#   * berlaku per FILE INDIVIDUAL — TIDAK mengecualikan seluruh direktori yang
+#     kebetulan memuat file besar (file source di direktori yang sama tetap
+#     dilacak);
+#   * file berukuran TEPAT 25 MiB masih dilacak (batasnya "lebih dari");
+#   * keputusan memakai metadata `st_size` yang sudah dibaca saat `stat` —
+#     isi file TIDAK PERNAH dibaca hanya untuk memutuskan pengecualian;
+#   * akses EXPLISIT ke satu path (mis. tool `read_file`/`edit_file` pada file
+#     besar, atau `snapshot(path_file)`) tetap MENGHASILKAN hash: snapshot
+#     per-file yang diminta pemanggil bukan "full-workspace scan" dan tidak
+#     boleh diam-diam mengembalikan entri kosong.
+#
+# Konsekuensi file besar (DIDOKUMENTASIKAN, bukan disembunyikan):
+#   * file >25 MiB tidak bermunculan pada snapshot direktori sehingga TIDAK
+#     pernah dilaporkan created/modified lewat pemindaian rekursif;
+#   * mutasi tool pada file besar tetap dicatat lewat jalur kandidat eksplisit
+#     (`TaskChangeEvidence.register_path`) yang menyelesaikan hash per-file;
+#   * karena snapshot berikutnya melewati file itu pada tahap `stat`,
+#     pengecualian ini TIDAK menyebabkan hashing penuh berulang pada setiap
+#     task — biaya untuk file besar adalah nol setelah pemeriksaan ukuran.
+# --------------------------------------------------------------------------- #
+MAX_TRACKED_FILE_SIZE: int = 25 * 1024 * 1024  # 25 MiB
+
+
+def _within_size_limit(size: Optional[int]) -> bool:
+    """True bila ukuran file masih boleh di-track (<= 25 MiB).
+
+    Dipisahkan agar aturan batas dapat diuji/di-reuse tanpa menyalin angka.
+    `None` (tidak ada metadata, mis. stat gagal) dianggap TIDAK layak track.
+    """
+    return size is not None and size <= MAX_TRACKED_FILE_SIZE
 
 
 # --------------------------------------------------------------------------- #
@@ -164,6 +219,13 @@ def iter_trackable_files(base: Path):
     Berbeda dari `rules` tool filesystem (yang menyembunyikan `.aether`),
     eksekusi tetap diizinkan lewat root AETHER dan file yang di-delete tetap
     dapat ditemukan. Ini murni daftar file yang layak di-hash.
+
+    Aturan ukuran (`MAX_TRACKED_FILE_SIZE`) TIDAK diterapkan di generator ini:
+    generator memakai `os.walk` dan untuk direktori besar setiap `stat` yang
+    dilakukan di sini akan hilang dari akuntansi "file ditemukan / di-track /
+    dilewati" di `snapshot()`. Pemeriksaan ukuran dilakukan `snapshot()` pada
+    `stat` yang MEMANG sudah dibutuhkan untuk fingerprint — satu syscall per
+    file, tanpa pembacaan isi tambahan.
     """
     for file_path in _iter_files(base):
         if _allowed_in_snapshot(file_path):
@@ -394,6 +456,8 @@ class ChangeTracker:
         self._sync = bool(sync)
         # Cache thread-local (fallback saat sync dimatikan / root di reset).
         self._local_cache: Dict[str, _FingerprintEntry] = {}
+        # Statistik snapshot terakhir (observability; lihat `last_snapshot_stats`).
+        self._last_snapshot_stats: Dict[str, int] = {}
 
     def _fingerprint_cache(self) -> Dict[str, _FingerprintEntry]:
         """Cache fingerprint untuk root ini (diambil dari registry proses).
@@ -480,6 +544,15 @@ class ChangeTracker:
         proses ini (`mark_mutated` / `mark_moved` / `mark_deleted`). Lihat
         batas akurasi pada docstring modul.
 
+        Batas ukuran (`MAX_TRACKED_FILE_SIZE` = 25 MiB): pada penelusuran
+        DIREKTORI, file yang `st_size`-nya LEBIH BESAR dari batas itu
+        DILEWATI sebelum SHA-1 dihitung — isinya tidak pernah dibaca hanya
+        untuk fingerprint. Keputusan memakai `st_size` dari `stat` yang sudah
+        diambil; konsekuensinya biaya per snapshot untuk file besar hanya satu
+        `stat`, sehingga tidak ada hashing penuh berulang. Satu path FILE yang
+        diminta EKSPLISIT (atau `task_id` yang menargetkan file itu) tetap
+        di-hash penuh agar mutasi yang dilaporkan tool tidak hilang.
+
         Pemanggilan berulang pada workspace yang tidak berubah tidak membaca
         ulang isi file — biaya didominasi `stat` per file. Penelusuran
         direktori mengecualikan direktori/ekstensi yang tidak relevan
@@ -496,24 +569,99 @@ class ChangeTracker:
         root_resolved = self.root.resolve()
         cache = self._fingerprint_cache()
         result: Dict[str, tuple] = {}
+        stats = {"files_seen": 0, "tracked": 0, "skipped_large": 0}
 
         if target.is_file():
+            # Path FILE eksplisit: hash penuh (lihat catatan di docstring).
             rel = str(target.relative_to(root_resolved)).replace("\\", "/")
             digest, size = _fingerprint_stat(cache, rel, target)
             result[rel] = (digest, size)
+            stats["files_seen"] = 1
+            stats["tracked"] = 1
         elif target.is_dir():
             for file_path in iter_trackable_files(target):
+                stats["files_seen"] += 1
                 try:
                     rel = str(file_path.relative_to(root_resolved)).replace("\\", "/")
                 except ValueError:
                     continue
+                # Batas ukuran: pakai metadata `stat` (bukan membaca isi file).
+                fp = _stat_fingerprint(file_path)
+                if fp is None:
+                    continue
+                size = fp[0]
+                if size > MAX_TRACKED_FILE_SIZE:
+                    stats["skipped_large"] += 1
+                    continue
                 digest, size = _fingerprint_stat(cache, rel, file_path)
                 result[rel] = (digest, size)
+                stats["tracked"] += 1
+
+        stats["skipped_large"] += self._skip_task_id_large(task_id, result, cache)
+
+        self._last_snapshot_stats = stats
 
         if task_id is not None:
             self._snapshots.setdefault(task_id, {}).update(result)
 
         return result
+
+    def _skip_task_id_large(
+        self,
+        task_id: Optional[str],
+        result: Dict[str, tuple],
+        cache: Dict[str, _FingerprintEntry],
+    ) -> int:
+        """Buang file besar dari snapshot (hasil + state task) bila tercatat.
+
+        Antisipasi jalur campuran: `TaskChangeEvidence.register_path` dapat
+        menyelesaikan hash per-file untuk file besar (mutasi eksplisit tool),
+        dan file itu kemudian ikut terbawa ke snapshot direktori berikutnya.
+        File >batas dibuang dari hasil DAN dari snapshot task agar biayanya
+        tidak kembali setiap snapshot (konsisten dengan perilaku "tidak
+        diproses ulang"), sehingga `tracked_paths(task_id)` tidak lagi
+        memuatnya. Perubahan file besar itu tetap dapat dideteksi lewat
+        deteksi per-file yang memang jalur eksplisit runtime.
+
+        File besar yang TIDAK dimiliki task ini tidak disentuh.
+
+        Returns:
+            Jumlah entri yang dibuang.
+        """
+        if not task_id:
+            return 0
+        baseline = self._snapshots.get(task_id)
+        if not baseline:
+            return 0
+        dropped = 0
+        owned = set(baseline) | set(result)
+        for rel in owned:
+            size = None
+            if rel in result:
+                size = result[rel][1]
+            elif rel in baseline and len(baseline[rel]) > 1:
+                size = baseline[rel][1]
+            if size is None or size <= MAX_TRACKED_FILE_SIZE:
+                continue
+            # Buang dari hasil DAN state task (bila ada). Entri file besar yang
+            # sudah tercatat task tidak boleh bertahan sehingga biaya hashing
+            # eksplisitnya tidak ikut terbawa ke snapshot berikutnya.
+            result.pop(rel, None)
+            baseline.pop(rel, None)
+            cache.pop(rel, None)
+            dropped += 1
+        return dropped
+
+    def last_snapshot_stats(self) -> Dict[str, int]:
+        """Statistik snapshot terakhir (observability, bukan keputusan).
+
+        Mengembalikan hitungan: `files_seen` (file ditemukan setelah aturan
+        eksklusi direktori/ekstensi), `tracked` (file yang benar-benar masuk
+        snapshot), dan `skipped_large` (file yang dilewati karena
+        melampaui `MAX_TRACKED_FILE_SIZE`). Pembacaan murni; tidak mengubah
+        state tracker.
+        """
+        return dict(getattr(self, "_last_snapshot_stats", {}) or {})
 
     # ------------------------------------------------------------------ #
     # Detection
