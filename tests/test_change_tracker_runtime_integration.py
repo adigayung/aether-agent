@@ -50,6 +50,33 @@ from agent_ai.task.models import PreparedTask  # noqa: E402
 from api.execution import TaskExecutor  # noqa: E402
 
 
+def test_change_payload_sanitizer_strips_internal_bytes() -> None:
+    """Payload perubahan untuk Task Log/SSE TIDAK memuat byte mentah internal.
+
+    `_register_change_target`/sink memakai kunci `before_bytes`/`after_bytes`
+    sebagai pembawa byte untuk self-aware sync ChangeTracker; kunci itu tidak
+    boleh bocor ke persisten/UI (payload perubahan hanya metadata ringkas).
+    """
+    from api.execution import _sanitize_change_payload
+
+    payload = {
+        "path": "a.py",
+        "kind": "modified",
+        "before_size": 10,
+        "after_size": 10,
+        "before_bytes": b"AAAAAAAA\n",
+        "after_bytes": b"BBBBBBBB\n",
+        "diff": "- old\n+ new\n",
+    }
+    clean = _sanitize_change_payload(payload)
+    assert "before_bytes" not in clean
+    assert "after_bytes" not in clean
+    assert clean["path"] == "a.py"
+    assert clean["kind"] == "modified"
+    assert clean["before_size"] == 10
+    assert clean["diff"] == "- old\n+ new\n"
+
+
 # --------------------------------------------------------------------------- #
 # Evidence unit (tanpa runtime)
 # --------------------------------------------------------------------------- #

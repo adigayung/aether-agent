@@ -225,6 +225,13 @@ class _WorkspaceChangeTool(BaseTool):
                 except Exception:  # noqa: BLE001 - cache tidak boleh gagalkan operasi
                     pass
 
+    def _root_key(self) -> str:
+        """Canonical workspace root (kunci cache fingerprint ChangeTracker)."""
+        try:
+            return str(self.root.resolve())
+        except OSError:
+            return str(self.root)
+
     def _to_rel(self, path: Any) -> str:
         """Normalisasi path menjadi relative terhadap workspace root (posix)."""
         text = str(path or "")
@@ -266,6 +273,10 @@ class _WorkspaceChangeTool(BaseTool):
         }
         if old_path is not None:
             payload["old_path"] = self._to_rel(old_path)
+        if before is not None:
+            payload["before_bytes"] = before
+        if after is not None:
+            payload["after_bytes"] = after
         diff_text, additions, deletions = _diff_summary(before, after, rel_path)
         if diff_text is not None:
             payload["diff"] = diff_text
@@ -341,6 +352,9 @@ class WriteFileTool(_WorkspaceChangeTool):
                 "bytes": target.stat().st_size,
                 "written": True,
                 "changed": True,
+                # Root canonical workspace: dipakai `ToolRegistry.execute` untuk
+                # menandai cache fingerprint ChangeTracker (self-aware sync).
+                "root": self._root_key(),
             }
         finally:
             if acquired:
@@ -486,6 +500,9 @@ class EditFileTool(_WorkspaceChangeTool):
                 "changed_start_line": changed_start,
                 "changed_end_line": changed_start + changed_line_count - 1,
                 "total_lines": total_lines,
+                # Root canonical workspace: dipakai `ToolRegistry.execute` untuk
+                # menandai cache fingerprint ChangeTracker (self-aware sync).
+                "root": self._root_key(),
             }
             if start_line is not None:
                 result["start_line"] = start_line
@@ -553,7 +570,12 @@ class DeleteFileTool(_WorkspaceChangeTool):
                 after=None,
             )
             self._invalidate_read_cache(rel_path)
-            return {"path": rel_path, "type": kind, "deleted": True}
+            return {
+                "path": rel_path,
+                "type": kind,
+                "deleted": True,
+                "root": self._root_key(),
+            }
         finally:
             if acquired:
                 _release_file_lock(lock_key, owner)
@@ -628,6 +650,11 @@ class MoveFileTool(_WorkspaceChangeTool):
                 old_path=source,
             )
             self._invalidate_read_cache(source, destination)
-            return {"source": source, "destination": destination, "moved": True}
+            return {
+                "source": source,
+                "destination": destination,
+                "moved": True,
+                "root": self._root_key(),
+            }
         finally:
             _lock_manager.release_multiple([src_key, dst_key], owner)

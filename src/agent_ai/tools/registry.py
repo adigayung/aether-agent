@@ -92,7 +92,7 @@ class ToolRegistry:
         tool.validate(args)
 
         try:
-            return tool.execute(**args)
+            output = tool.execute(**args)
         except (ToolValidationError, ToolNotFoundError):
             # Error tool yang sudah jelas: teruskan apa adanya.
             raise
@@ -100,6 +100,55 @@ class ToolRegistry:
             raise ToolExecutionError(
                 f"Tool '{name}' gagal dieksekusi: {type(exc).__name__}: {exc}"
             ) from exc
+        self._mark_change_cache(name, args, output)
+        return output
+
+    @staticmethod
+    @staticmethod
+    def _mark_change_cache(
+        name: str, args: Dict[str, Any], output: Any
+    ) -> None:
+        """Tandai mutasi tool pada cache fingerprint ChangeTracker (best-effort).
+
+        Mutasi yang dilakukan proses ini diketahui PERSIS, sehingga tidak perlu
+        menunggu `key` filesystem: entri cache fingerprint path terkait dibuang
+        agar snapshot berikutnya menghitung ulang SHA-1 dari isi nyata — bahkan
+        bila `size`/`mtime_ns` kebetulan identik.
+
+        Deterministik dari nama tool + argumen (bukan deteksi heuristik) dan
+        memakai `_mark_change_cache` pada `_WorkspaceChangeTool` yang sudah ada.
+        Read-only terhadap project; kegagalan apa pun diabaikan.
+        """
+        key = (name or "").lower()
+        if key not in ("write_file", "edit_file", "delete_file", "move_file"):
+            return
+        mark = getattr(output, "get", None)
+        if not callable(mark):
+            return
+        try:
+            from agent_ai.changes.tracker import mark_deleted, mark_moved, mark_mutated
+
+            root = mark("root")
+            if not root:
+                return
+            if mark("deleted"):
+                rel = mark("path")
+                if rel:
+                    mark_deleted(root, rel)
+                return
+            destination = mark("destination")
+            if destination:
+                source = mark("source")
+                if source:
+                    mark_moved(root, source, destination)
+                else:
+                    mark_mutated(root, destination)
+                return
+            rel = mark("path")
+            if rel:
+                mark_mutated(root, rel)
+        except Exception:  # noqa: BLE001 - cache mark tidak boleh crash tool
+            return
 
 
 # ---------------------------------------------------------------------------

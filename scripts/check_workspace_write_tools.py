@@ -13,6 +13,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
@@ -139,6 +141,118 @@ def main() -> int:
     finally:
         shutil.rmtree(ws, ignore_errors=True)
         shutil.rmtree(outside, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- #
+# Pytest entry point (dipakai scripts/test_critical.bat).
+#
+# Mengunci kontrak keamanan yang sama dengan verifier di atas dalam bentuk
+# assertion pytest: boundary workspace + isolasi antar-root. Tidak ada test
+# yang dilewati/dinonaktifkan di sini (semua skenario verifier dijalankan).
+# --------------------------------------------------------------------------- #
+@pytest.fixture()
+def workspace(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    return ws
+
+
+@pytest.fixture()
+def outside(tmp_path):
+    out = tmp_path / "outside"
+    out.mkdir()
+    (out / "secret.txt").write_text("rahasia", encoding="utf-8")
+    return out
+
+
+def test_write_edit_delete_move_roundtrip(workspace) -> None:
+    write, edit = WriteFileTool(root=workspace), EditFileTool(root=workspace)
+    delete, move = DeleteFileTool(root=workspace), MoveFileTool(root=workspace)
+
+    write.execute(path="src/app/main.py", content="print('hi')\n")
+    assert (workspace / "src" / "app" / "main.py").read_text(encoding="utf-8") == "print('hi')\n"
+
+    edit.execute(path="src/app/main.py", old_text="hi", new_text="hello")
+    assert (workspace / "src" / "app" / "main.py").read_text(encoding="utf-8") == "print('hello')\n"
+
+    write.execute(path="old.txt", content="data")
+    move.execute(source="old.txt", destination="new.txt")
+    assert not (workspace / "old.txt").exists()
+    assert (workspace / "new.txt").read_text(encoding="utf-8") == "data"
+
+    delete.execute(path="new.txt")
+    assert not (workspace / "new.txt").exists()
+
+
+def test_delete_directory_recursive_and_move_directory(workspace) -> None:
+    write, delete, move = (
+        WriteFileTool(root=workspace),
+        DeleteFileTool(root=workspace),
+        MoveFileTool(root=workspace),
+    )
+    write.execute(path="dir/sub/a.txt", content="a")
+    write.execute(path="dir/sub/b.txt", content="b")
+    delete.execute(path="dir")
+    assert not (workspace / "dir").exists()
+
+    write.execute(path="d1/x.txt", content="x")
+    move.execute(source="d1", destination="d2")
+    assert not (workspace / "d1").exists()
+    assert (workspace / "d2" / "x.txt").exists()
+
+
+def test_edit_missing_and_ambiguous_target_rejected(workspace) -> None:
+    write, edit = WriteFileTool(root=workspace), EditFileTool(root=workspace)
+    write.execute(path="src/app/main.py", content="print('hi')\n")
+    with pytest.raises(ToolError):
+        edit.execute(path="src/app/main.py", old_text="tidak-ada", new_text="x")
+
+    write.execute(path="dup.txt", content="aa aa")
+    with pytest.raises(ToolError):
+        edit.execute(path="dup.txt", old_text="aa", new_text="bb")
+
+
+def test_move_destination_exists_rejected(workspace) -> None:
+    write, move = WriteFileTool(root=workspace), MoveFileTool(root=workspace)
+    write.execute(path="a.txt", content="a")
+    write.execute(path="b.txt", content="b")
+    with pytest.raises(ToolError):
+        move.execute(source="a.txt", destination="b.txt")
+
+
+def test_workspace_root_cannot_be_deleted_or_moved(workspace) -> None:
+    delete, move = DeleteFileTool(root=workspace), MoveFileTool(root=workspace)
+    with pytest.raises(ToolError):
+        delete.execute(path=".")
+    with pytest.raises(ToolError):
+        move.execute(source=".", destination="moved")
+
+
+def test_traversal_outside_root_rejected(workspace) -> None:
+    write, delete, move = (
+        WriteFileTool(root=workspace),
+        DeleteFileTool(root=workspace),
+        MoveFileTool(root=workspace),
+    )
+    write.execute(path="a.txt", content="a")
+    with pytest.raises(ToolError):
+        write.execute(path="../evil.txt", content="x")
+    with pytest.raises(ToolError):
+        delete.execute(path="../evil.txt")
+    with pytest.raises(ToolError):
+        move.execute(source="a.txt", destination="../evil.txt")
+
+
+def test_nested_directories_and_outside_files_untouched(workspace, outside) -> None:
+    write, read = WriteFileTool(root=workspace), ReadFileTool(root=workspace)
+    write.execute(path="deep/a/b/c/d.txt", content="deep")
+    assert (workspace / "deep" / "a" / "b" / "c" / "d.txt").read_text(encoding="utf-8") == "deep"
+
+    # File di luar workspace tidak tersentuh (isolasi antarproyek).
+    assert (outside / "secret.txt").read_text(encoding="utf-8") == "rahasia"
+
+    # Tool read-only existing tetap bekerja.
+    assert "deep" in str(read.execute(path="deep/a/b/c/d.txt"))
 
 
 if __name__ == "__main__":

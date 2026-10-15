@@ -61,6 +61,24 @@ def _normalize_change_path(path: Any) -> str:
     return text.strip()
 
 
+#: Kunci payload sink internal yang membawa byte mentah file (self-aware sync).
+#: Kunci ini dipakai proses untuk menandai mutasi pada cache fingerprint
+#: ChangeTracker; TIDAK boleh dipersist/di-emit ke Task Log/SSE (payload
+#: perubahan hanya memuat metadata ringkas: path/kind/size/diff).
+_INTERNAL_CHANGE_KEYS = ("before_bytes", "after_bytes")
+
+
+def _sanitize_change_payload(payload: Any) -> Dict[str, Any]:
+    """Salin payload perubahan TANPA kunci internal (byte mentah) bila dict."""
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        key: value
+        for key, value in payload.items()
+        if key not in _INTERNAL_CHANGE_KEYS
+    }
+
+
 class TaskExecutor:
     """Merakit & menjalankan AETHER Runtime untuk sebuah PreparedTask.
 
@@ -454,6 +472,13 @@ class TaskExecutor:
 
                 change_tracker = ChangeTracker(root=_Path(workspace_root))
                 change_tracker.start(task_id)
+                # Snapshot awal INKREMENTAL (TASK 1): tracker memakai cache
+                # fingerprint proses-level (size + mtime_ns) yang di-key
+                # canonical root, sehingga hanya file yang fingerprint-nya
+                # berubah yang di-hash ulang. Pada workspace besar (mis. puluhan
+                # ribu file / GB), pemanggilan ini tidak lagi memblokir sebelum
+                # LLM pertama dengan hashing penuh berulang. Lihat catatan
+                # batas akurasi pada docstring `agent_ai.changes.tracker`.
                 change_tracker.snapshot(".", task_id=task_id)
                 # Evidence terikat ke task_id task ini (isolasi antar-task):
                 # SATU tracker existing + adapter tipis di atasnya, dipakai
@@ -491,7 +516,9 @@ class TaskExecutor:
             if log is None:
                 return
             try:
-                log.append(EventType.CHANGE_DETECTED.value, dict(payload))
+                log.append(
+                    EventType.CHANGE_DETECTED.value, _sanitize_change_payload(payload)
+                )
             except Exception:  # noqa: BLE001 - logging tidak boleh crash task
                 return
 
@@ -517,7 +544,7 @@ class TaskExecutor:
                     session_id,
                     EventType.CHANGE_DETECTED,
                     task_id=task_id,
-                    payload=payload,
+                    payload=_sanitize_change_payload(payload),
                 )
             except Exception:  # noqa: BLE001 - event tidak boleh crash task
                 pass
