@@ -62,6 +62,28 @@ didokumentasikan: file yang sengaja dibuat Agent di dalam direktori yang
 diabaikan hanya akan tetap terdeteksi bila ia sendiri menjadi kandidat
 eksplisit task (`register_path`), bukan lewat pemindaian rekursif root.
 
+Pengecualian environment Conda (dinamis, tanpa hardcode nama)
+-------------------------------------------------------------
+Workspace proyek dapat memuat environment Conda DI DALAM folder proyek (mis.
+`K:\\F5-TTS\\conda`, >5 GB). Environment seperti itu BUKAN source code dan
+tidak pernah perlu di-hash. Karena itu `iter_trackable_files()` memangkas
+subtree-nya SEBELUM rekursi: direktori yang dikenali sebagai root environment
+Conda dibuang dari `os.walk` sehingga file di dalamnya tidak di-`stat`,
+dibaca, maupun di-hash.
+
+Deteksinya BERBASIS STRUKTUR, bukan nama folder (lihat `_is_conda_environment`):
+adanya direktori `conda-meta` berisi file metadata `*.json` + direktori
+`history`, semuanya lewat PENGECEKAN KEBERADAAN path tanpa membaca isi file.
+Nama foldernya arbitrer (`conda`, `myenv-xyz`, dst). Folder bernama `Lib`,
+`Library`, `Scripts`, atau `DLLs` TIDAK pernah dikecualikan hanya karena
+namanya. Root workspace sendiri tidak dikecualikan.
+
+Entri environment Conda yang masih tersisa dari snapshot/cache eksekusi LAMA
+dibuang lewat `ChangeTracker._drop_excluded_conda_entries()` (terlihat sebagai
+`excluded_conda` pada `last_snapshot_stats()`) sehingga file environment tidak
+pernah dilaporkan sebagai perubahan palsu dan tidak dikembalikan diam-diam ke
+full-workspace scan.
+
 Deteksi perubahan isi saat metadata identik
 -------------------------------------------
 Alih-alih membaca ulang seluruh isi workspace setiap snapshot, AETHER
@@ -97,6 +119,7 @@ Statistik snapshot terakhir tersedia lewat
 from __future__ import annotations
 
 import hashlib
+import os
 import threading
 import time
 from pathlib import Path
@@ -105,7 +128,7 @@ from typing import Dict, List, Optional, Tuple
 from agent_ai.changes.models import ChangeRecord, ChangeSet, ChangeType
 from agent_ai.tools.filesystem import (
     _DEFAULT_ROOT,
-    _iter_files,
+    _IGNORED_DIRS,
     _resolve_within_root,
 )
 
@@ -191,6 +214,118 @@ _TRACKER_IGNORED_SUFFIXES = {
     ".swo",
 }
 
+#: Aturan eksklusi LENGKAP untuk rekursi snapshot: aturan tool filesystem
+#: (`_IGNORED_DIRS`) DIGABUNG aturan tambahan tracker. General-purpose
+#: filesystem tool TIDAK diubah — `_IGNORED_DIRS` tetap apa adanya.
+_TRACKER_IGNORED_DIRS_FOR_TRACKER = _IGNORED_DIRS | _TRACKER_IGNORED_DIRS
+
+
+# --------------------------------------------------------------------------- #
+# Deteksi environment Conda (DINAMIS, tanpa hardcode nama folder).
+#
+# Masalah nyata: workspace proyek dapat memuat environment Conda yang berada
+# DI DALAM folder proyek (mis. `K:\F5-TTS\conda`, >5 GB). environment seperti
+# itu adalah BINARY environment (Lib/Scripts/DLLs/pkg), BUKAN source code, dan
+# memindai + meng-hash isinya per task tidak ada nilainya.
+#
+# Aturan deteksi memakai STRUKTUR AKTUAL, bukan nama folder:
+#   * penanda utama: keberadaan direktori `conda-meta` di dalam direktori itu
+#     (setiap environment Conda selalu memilikinya);
+#   * validasi tambahan (mengurangi false positive) memakai PENGECEKAN
+#     KEBERADAAN path saja (file metadata .json pada `conda-meta` + entri
+#     `conda-meta/history`); isi file metadata TIDAK PERNAH dibaca;
+#   * nama foldernya ARBITRER: `conda`, `anaconda`, `envs`, `myenv-xyz`, dst
+#     semuanya terdeteksi selama strukturnya adalah environment Conda.
+#
+# Yang SENGAJA TIDAK dilakukan:
+#   * folder bernama `Lib`, `Library`, `Scripts`, `DLLs` TIDAK pernah
+#     dikecualikan karena namanya — folder itu bisa jadi bagian source code
+#     proyek lain (`src/Lib/`, `Scripts/deploy.sh`, dst). Hanya environment
+#     yang STRUKTURNYA Conda yang dipangkas;
+#   * root workspace TIDAK dikecualikan walau struktur root menyerupai
+#     environment (lihat `_is_conda_environment_root` `is_workspace_root`).
+#
+# Pruning dilakukan SEBELUM rekursi (di `iter_trackable_files`), bukan dengan
+# menyaring file setelah seluruh subtree dipindai: begitu sebuah direktori
+# dikenali sebagai root environment Conda, os.walk tidak pernah masuk ke
+# subtree-nya sehingga file di dalamnya tidak di-`stat`/dibaca/di-hash.
+# --------------------------------------------------------------------------- #
+_CONDA_ENV_MARKER_DIRNAME = "conda-meta"
+_CONDA_HISTORY_FILENAME = "history"
+_CONDA_METADATA_SUFFIX = ".json"
+
+
+def _dir_entries(dirpath: Path) -> Optional[Tuple[frozenset, frozenset]]:
+    """(nama directory, nama file) langsung di dalam `dirpath`.
+
+    Satu `os.scandir` — metadata sudah tersedia di entry sehingga tidak ada
+    `stat` tambahan. `None` bila direktori tidak dapat dibaca (best-effort:
+    direktori bermasalah TIDAK dianggap environment).
+    """
+    try:
+        with os.scandir(dirpath) as entries:
+            dirs = set()
+            files = set()
+            for entry in entries:
+                try:
+                    if entry.is_dir():
+                        dirs.add(entry.name)
+                        continue
+                except OSError:
+                    continue
+                files.add(entry.name)
+    except OSError:
+        return None
+    return frozenset(dirs), frozenset(files)
+
+
+def _is_conda_environment(dirpath: Path) -> bool:
+    """True bila `dirpath` adalah root environment Conda (deteksi struktur).
+
+    Kriteria (semua berbasis KEBERADAAN path, tanpa membaca isi file):
+        1. ada direktori `conda-meta`;
+        2. di dalamnya ada file metadata `*.json` DAN entri `history`
+           (pada environment Conda nyata `conda-meta/history` adalah FILE
+           yang mencatat riwayat transaksi; pada sebagian build ia dapat
+           berupa direktori — keduanya diterima).
+
+    Syarat (2) menurunkan risiko false positive untuk proyek yang kebetulan
+    punya folder bernama `conda-meta` tanpa benar-benar environment Conda.
+    """
+    entries = _dir_entries(dirpath)
+    if entries is None:
+        return False
+    dirs, files = entries
+    if _CONDA_ENV_MARKER_DIRNAME not in dirs:
+        return False
+    meta_entries = _dir_entries(dirpath / _CONDA_ENV_MARKER_DIRNAME)
+    if meta_entries is None:
+        return False
+    meta_dirs, meta_files = meta_entries
+    has_metadata = any(
+        name.lower().endswith(_CONDA_METADATA_SUFFIX) for name in meta_files
+    )
+    has_history = (
+        _CONDA_HISTORY_FILENAME in meta_files
+        or _CONDA_HISTORY_FILENAME in meta_dirs
+    )
+    return has_metadata and has_history
+
+
+def _is_conda_environment_root(dirpath: Path, workspace_root: Path) -> bool:
+    """True bila subtree `dirpath` harus DIPANGKAS dari rekursi snapshot.
+
+    Root workspace dikembalikan False: hanya environment yang berada DI DALAM
+    proyek yang dipangkas, sehingga struktur root yang kebetulan menyerupai
+    environment tidak membuat seluruh workspace terlewat.
+    """
+    try:
+        if Path(dirpath).resolve() == Path(workspace_root).resolve():
+            return False
+    except OSError:
+        return False
+    return _is_conda_environment(dirpath)
+
 
 def _allowed_in_snapshot(path: Path) -> bool:
     """True bila file layak masuk snapshot rekursif (aturan eksplisit).
@@ -210,15 +345,28 @@ def _allowed_in_snapshot(path: Path) -> bool:
     # `path.parts` memuat nama directory + file; nama direktori terabaikan
     # tidak mungkin muncul pada hasil `os.walk`, tetapi pemeriksaan ini
     # menjaga aturan tetap benar bila helper iterasi lain dipakai kelak.
-    return not any(part in _TRACKER_IGNORED_DIRS for part in path.parts)
+    return not any(part in _TRACKER_IGNORED_DIRS_FOR_TRACKER for part in path.parts)
 
 
-def iter_trackable_files(base: Path):
+def iter_trackable_files(base: Path, root: Optional[Path] = None):
     """Iterasi file di bawah `base` dengan aturan eksklusi snapshot.
 
     Berbeda dari `rules` tool filesystem (yang menyembunyikan `.aether`),
     eksekusi tetap diizinkan lewat root AETHER dan file yang di-delete tetap
     dapat ditemukan. Ini murni daftar file yang layak di-hash.
+
+    PRUNING SUBTREE SEBELUM REKURSI
+    -------------------------------
+    Iterasi memakai `os.walk` langsung (bukan `_iter_files`) agar `dirnames`
+    dapat dipangkas IN-PLACE **sebelum** os.walk menuruninya. Direktori yang
+    dikenali sebagai root environment Conda (`conda-meta`, deteksi struktur —
+    lihat `_is_conda_environment`) dibuang dari `dirnames`, sehingga file di
+    dalam environment itu TIDAK PERNAH di-`stat`, dibaca, atau di-hash. Ini
+    bukan penyaringan hasil setelah subtree dipindai.
+
+    `root` adalah workspace root (boundary). Default: `base` — dipakai saat
+    pemanggil meminta snapshot sebuah SUBdirektori, sehingga direktori itu
+    sendiri tetap ditelusuri walau strukturnya menyerupai environment.
 
     Aturan ukuran (`MAX_TRACKED_FILE_SIZE`) TIDAK diterapkan di generator ini:
     generator memakai `os.walk` dan untuk direktori besar setiap `stat` yang
@@ -227,9 +375,28 @@ def iter_trackable_files(base: Path):
     `stat` yang MEMANG sudah dibutuhkan untuk fingerprint — satu syscall per
     file, tanpa pembacaan isi tambahan.
     """
-    for file_path in _iter_files(base):
-        if _allowed_in_snapshot(file_path):
-            yield file_path
+    try:
+        workspace_root = Path(root) if root is not None else Path(base)
+    except TypeError:
+        workspace_root = Path(base)
+    for dirpath, dirnames, filenames in os.walk(base):
+        current = Path(dirpath)
+        kept = []
+        for name in dirnames:
+            child = current / name
+            if name in _TRACKER_IGNORED_DIRS_FOR_TRACKER:
+                continue
+            if _is_conda_environment_root(child, workspace_root):
+                continue
+            kept.append(name)
+        # Eksekusi tetap diizinkan menyentuh direktori environment secara
+        # eksplisit (`snapshot("conda/...")`): hanya pemindaian REKURSIF
+        # otomatis yang memangkasnya.
+        dirnames[:] = kept
+        for filename in filenames:
+            file_path = current / filename
+            if _allowed_in_snapshot(file_path):
+                yield file_path
 
 
 def _hash_file(path: Path) -> Optional[str]:
@@ -274,6 +441,15 @@ _FingerprintEntry = Tuple[str, int, int]
 _fingerprint_lock = threading.Lock()
 _fingerprint_cache: Dict[str, Dict[str, _FingerprintEntry]] = {}
 
+#: Penghitung invalidasi per canonical root. Dinaikkan SETIAP kali entri cache
+#: fingerprint root tersebut dibuang lewat `mark_mutated`/`mark_moved`/
+#: `mark_deleted` (mutasi yang dilakukan PROSES INI). Dipakai sebagai sinyal
+#: murah bagi consumer (mis. `TaskChangeEvidence.mark_fs_changed`) untuk tahu
+#: bahwa "ada mutasi yang diketahui pada root ini" TANPA membandingkan isi
+#: cache — sehingga consumer tidak perlu menscan apa pun hanya untuk
+#: mendeteksi adanya mutasi.
+_fingerprint_generation: Dict[str, int] = {}
+
 #: Salinan cache untuk jalur BACA HOTS (stat per file). Dilindungi lock yang
 #: SAMA dengan `_fingerprint_cache`, sehingga konsisten. Disimpan terpisah
 #: agar setiap `stat` tidak perlu mengambil lock (menghindari overhead lock
@@ -303,10 +479,27 @@ def clear_fingerprint_cache(root: Optional[Path] = None) -> None:
         if root is None:
             _fingerprint_cache.clear()
             _fingerprint_cache_sync.clear()
+            _fingerprint_generation.clear()
         else:
             key = _canonical_root_key(root)
             _fingerprint_cache.pop(key, None)
             _fingerprint_cache_sync.pop(key, None)
+            _fingerprint_generation[key] = _fingerprint_generation.get(key, 0) + 1
+
+
+def fingerprint_generation(root: "Path | str") -> int:
+    """Penghitung invalidasi fingerprint untuk root (monoton, proses-level).
+
+    Dinaikkan setiap mutasi yang dilakukan proses ini ditandai lewat
+    `mark_mutated` / `mark_moved` / `mark_deleted`. Pembacaan murni (tanpa
+    lock pada jalur baca) — nilai hanya dipakai sebagai perbandingan "berubah
+    atau tidak", bukan nilai absolut.
+
+    Berguna untuk consumer yang perlu tahu bahwa ADA mutasi known-process pada
+    root ini tanpa harus menyentuh filesystem sama sekali.
+    """
+    key = _canonical_root_key(Path(root))
+    return _fingerprint_generation.get(key, 0)
 
 
 def mark_mutated(root: "Path | str", paths) -> None:
@@ -382,6 +575,9 @@ def _mark(root: "Path | str", paths) -> None:
                 continue
             for rel in rels:
                 bucket.pop(rel, None)
+        # Penanda murah "ada mutasi known-process di root ini": dibaca oleh
+        # consumer (TaskChangeEvidence.mark_fs_changed) tanpa menyentuh disk.
+        _fingerprint_generation[key] = _fingerprint_generation.get(key, 0) + 1
 
 
 def _stat_fingerprint(path: Path) -> Optional[Tuple[int, int]]:
@@ -458,6 +654,102 @@ class ChangeTracker:
         self._local_cache: Dict[str, _FingerprintEntry] = {}
         # Statistik snapshot terakhir (observability; lihat `last_snapshot_stats`).
         self._last_snapshot_stats: Dict[str, int] = {}
+        # rel_path -> bool baseline KEBERADAAN (bukan hash) untuk jalur LAZY.
+        # Lihat `remember_exists`/`known_existed`.
+        self._existence_baseline: Dict[str, Optional[bool]] = {}
+
+    # ------------------------------------------------------------------ #
+    # Baseline MURAH (tanpa hashing) — untuk task lazy
+    # ------------------------------------------------------------------ #
+    def exists(self, path: str) -> Optional[bool]:
+        """Keberadaan satu path (murah: `stat`, TANPA membaca isi file).
+
+        Dipakai jalur change tracking LAZY untuk mencatat baseline kondisi
+        "sebelum" sebuah path yang akan dimutasi oleh tool filesystem. Ini
+        SENGAJA BUKAN `snapshot()`: kontrak inti AETHER adalah "jangan
+        menyamakan snapshot metadata-only dengan SHA-1 konten". Karena itu
+        nilai ini TIDAK pernah ditulis ke `_snapshots` (basis perbandingan
+        `detect_changes`) dan tidak boleh dipakai sebagai klaim hash.
+
+        Baseline ini hanya menjawab pertanyaan murah yang diperlukan untuk
+        klasifikasi mutasi yang DIKETAHUI path-nya:
+            * file sudah ada sebelum tool -> `modified` / `deleted`
+            * file belum ada sebelum tool  -> `created`
+
+        Returns:
+            True bila path ada, False bila tidak ada, None bila tidak dapat
+            diperiksa (di luar root / error filesystem).
+        """
+        try:
+            target = _resolve_within_root(path, self.root)
+        except Exception:  # noqa: BLE001 - path di luar root tidak dianggap ada
+            return None
+        try:
+            return target.exists()
+        except OSError:
+            return None
+
+    @staticmethod
+    def _normalize_rel(path: Any) -> str:
+        """Normalisasi path ke bentuk relatif-posix (backslash -> slash)."""
+        text = str(path or "").replace("\\", "/")
+        while text.startswith("./"):
+            text = text[2:]
+        return text.strip()
+
+    def remember_exists(self, path: str, existed: Optional[bool]) -> None:
+        """Catat baseline keberadaan hasil `exists()` untuk satu path.
+
+        Nilai disimpan pada state instance (bukan state modul) agar tidak
+        bocor antar-tracker, dan hanya berlaku untuk path yang TIDAK memakai
+        baseline hash. Tidak mengubah `_snapshots` — lihat `exists()`.
+        """
+        rel = self._normalize_rel(path)
+        if not rel:
+            return
+        self._existence_baseline[rel] = existed
+
+    def known_existed(self, path: str) -> Optional[bool]:
+        """Baca baseline keberadaan untuk path (None bila tidak dikenal)."""
+        return self._existence_baseline.get(self._normalize_rel(path))
+
+    def observe_generation(self) -> int:
+        """Baca penghitung invalidasi fingerprint root ini (murah, tanpa I/O).
+
+        Dipakai consumer untuk tahu bahwa ADA mutasi known-process pada root
+        ini sejak pembacaan terakhir — tanpa membandingkan isi cache dan tanpa
+        menyentuh filesystem.
+        """
+        return _fingerprint_generation.get(self._root_key, 0)
+
+    def cached_fingerprint(self, path: str) -> Optional[Tuple[str, Optional[int]]]:
+        """Hash konten yang SUDAH dihitung proses ini untuk `path` (bila ada).
+
+        Mengembalikan `(sha1, size)` dari cache fingerprint proses-level, atau
+        None bila path itu belum pernah di-hash oleh proses ini.
+
+        Nilainya adalah SHA-1 NYATA dari isi file (bukan metadata): cache
+        hanya menyimpan hash yang benar-benar dihitung dari disk. Karena itu
+        nilai ini AMAN dipakai sebagai pembanding `before_hash` pada jalur
+        LAZY (`detect_known_path`) — tidak ada fingerprint metadata yang
+        dipresentasikan sebagai hash konten.
+
+        Hanya membaca (tanpa lock, seperti jalur baca panas cache): nilai yang
+        tidak ada/berubah ditangani oleh pemanggil sebagai "tidak diketahui".
+        """
+        rel = self._normalize_rel(path)
+        if not rel:
+            return None
+        entry = self._fingerprint_cache().get(rel)
+        if entry is None:
+            return None
+        try:
+            digest, size = entry[0], entry[1]
+        except (IndexError, TypeError):
+            return None
+        if not digest:
+            return None
+        return digest, size
 
     def _fingerprint_cache(self) -> Dict[str, _FingerprintEntry]:
         """Cache fingerprint untuk root ini (diambil dari registry proses).
@@ -569,7 +861,12 @@ class ChangeTracker:
         root_resolved = self.root.resolve()
         cache = self._fingerprint_cache()
         result: Dict[str, tuple] = {}
-        stats = {"files_seen": 0, "tracked": 0, "skipped_large": 0}
+        stats = {
+            "files_seen": 0,
+            "tracked": 0,
+            "skipped_large": 0,
+            "excluded_conda": 0,
+        }
 
         if target.is_file():
             # Path FILE eksplisit: hash penuh (lihat catatan di docstring).
@@ -579,7 +876,7 @@ class ChangeTracker:
             stats["files_seen"] = 1
             stats["tracked"] = 1
         elif target.is_dir():
-            for file_path in iter_trackable_files(target):
+            for file_path in iter_trackable_files(target, root=self.root):
                 stats["files_seen"] += 1
                 try:
                     rel = str(file_path.relative_to(root_resolved)).replace("\\", "/")
@@ -598,6 +895,7 @@ class ChangeTracker:
                 stats["tracked"] += 1
 
         stats["skipped_large"] += self._skip_task_id_large(task_id, result, cache)
+        stats["excluded_conda"] += self._drop_excluded_conda_entries(task_id, result, cache)
 
         self._last_snapshot_stats = stats
 
@@ -652,14 +950,65 @@ class ChangeTracker:
             dropped += 1
         return dropped
 
+    def _drop_excluded_conda_entries(
+        self,
+        task_id: Optional[str],
+        result: Dict[str, tuple],
+        cache: Dict[str, _FingerprintEntry],
+    ) -> int:
+        """Buang entri STALE milik environment Conda dari hasil/state/cache.
+
+        Pruning terjadi sebelum rekursi (`iter_trackable_files`), jadi file di
+        dalam environment Conda tidak pernah masuk snapshot BARU. Akan tetapi
+        snapshot/cache dari eksekusi LAMA (sebelum aturan ini ada) atau dari
+        jalur kandidat eksplisit (`TaskChangeEvidence.register_path` pada path
+        di dalam environment) dapat masih memuat entri environment tersebut.
+        Penghapusan ini memastikan entri itu tidak bertahan sehingga:
+            * environment tidak pernah dilaporkan `modified`/`deleted` palsu;
+            * biaya hashing environment tidak terbawa ke snapshot berikutnya;
+            * file environment tidak diam-diam dikembalikan ke full-workspace
+              scan (aturan eksklusi tetap berlaku).
+
+        File/task yang TIDAK menyangkut environment Conda tidak disentuh.
+        Environment hanya dianggap milik task bila path-nya (atau induknya)
+        adalah workspace root — environment di LUAR project tidak pernah
+        disertakan ke dalam snapshot project ini.
+
+        Returns:
+            Jumlah entri yang dibuang.
+        """
+        if not task_id:
+            return 0
+        baseline = self._snapshots.get(task_id)
+        if not baseline:
+            return 0
+        dropped = 0
+        owned = set(baseline) | set(result)
+        for rel in owned:
+            try:
+                candidate = _resolve_within_root(rel, self.root)
+            except Exception:  # noqa: BLE001 - path di luar root tidak dikenal
+                continue
+            ancestors = [candidate] + [p for p in candidate.parents]
+            if not any(
+                _is_conda_environment_root(d, self.root) for d in ancestors
+            ):
+                continue
+            result.pop(rel, None)
+            baseline.pop(rel, None)
+            cache.pop(rel, None)
+            dropped += 1
+        return dropped
+
     def last_snapshot_stats(self) -> Dict[str, int]:
         """Statistik snapshot terakhir (observability, bukan keputusan).
 
         Mengembalikan hitungan: `files_seen` (file ditemukan setelah aturan
         eksklusi direktori/ekstensi), `tracked` (file yang benar-benar masuk
-        snapshot), dan `skipped_large` (file yang dilewati karena
-        melampaui `MAX_TRACKED_FILE_SIZE`). Pembacaan murni; tidak mengubah
-        state tracker.
+        snapshot), `skipped_large` (file yang dilewati karena melampaui
+        `MAX_TRACKED_FILE_SIZE`), dan `excluded_conda` (entri environment
+        Conda STALE yang dibuang dari hasil/state task). Pembacaan murni;
+        tidak mengubah state tracker.
         """
         return dict(getattr(self, "_last_snapshot_stats", {}) or {})
 
@@ -745,6 +1094,147 @@ class ChangeTracker:
             ))
 
         return sorted(records, key=lambda r: r.path)
+
+    def _advance_baseline(
+        self, task_id: str, rel: str, digest: Optional[str], size: Optional[int]
+    ) -> None:
+        """Maju-kan baseline task untuk SATU path setelah mutasinya tercatat.
+
+        Dipisahkan dari `detect_known_path` supaya tidak ada kebingungan antara
+        "basis perbandingan" dan "record yang dilaporkan": baseline hanya
+        bergerak setelah mutasi benar-benar diklasifikasikan.
+        """
+        if digest is None:
+            return
+        self._snapshots.setdefault(task_id, {})[rel] = (digest, size)
+
+    def detect_known_path(
+        self,
+        task_id: str,
+        path: str,
+        before_existed: bool,
+    ) -> List[ChangeRecord]:
+        """Deteksi perubahan untuk SATU path yang baseline-nya KEBERADAAN.
+
+        Jalur LAZY (TASK: hilangkan full-workspace snapshot sebelum LLM
+        pertama): untuk path yang diketahui akan dimutasi, AETHER mencatat
+        KEBERADAAN sebelum mutasi (satu `stat`, lihat
+        `TaskChangeEvidence.register_path(hash_baseline=False)`) alih-alih
+        memindai & mem-hash seluruh workspace.
+
+        Mengapa `modified` tetap akurat tanpa snapshot awal
+        ---------------------------------------------------
+        Isi file yang sama tidak perlu di-hash pada setiap task per-request:
+        hash-nya sudah tersedia di cache fingerprint PROSES-LEVEL
+        (`rel_path -> (sha1, size, mtime_ns)`) yang key-nya canonical project
+        root. Snapshot awal seluruh workspace juga hanya memindahkan nilai itu
+        ke `_snapshots[task_id]` tanpa menambah informasi baru — jadi
+        menghapusnya TIDAK melemahkan deteksi perubahan. Setelah mutasi tool,
+        cache untuk path tersebut sudah dibuang (`mark_mutated`), sehingga hash
+        kondisi SEKARANG dihitung dari isi nyata; membandingkannya dengan hash
+        cache sebelum mutasi memberi klasifikasi yang sama seperti sebelum
+        perubahan ini:
+
+            * absent -> present            = `created`
+            * present -> present, hash beda  = `modified` (termasuk perubahan
+              in-place yang ukurannya sama)
+            * present -> absent            = `deleted`
+
+        Bila path itu belum pernah di-hash proses ini (tanpa riwayat cache),
+        transisi keberadaan tetap akurat dan perubahan isi murni tidak
+        dilaporkan — kondisi itu didokumentasikan, bukan diklaim setara
+        hashing penuh di awal task.
+
+        `before_hash` yang dikembalikan HANYA berasal dari hash yang benar-benar
+        terukur (cache / `_snapshots`), tidak pernah ditebak.
+
+        Returns:
+            Daftar ChangeRecord (0 atau 1 entri) untuk path tersebut.
+        """
+        now = time.time()
+        without_extras = path is None or str(path).strip() in ("", ".")
+        # Path "." TIDAK punya makna file tunggal -> jatuh ke semantik lama
+        # (full compare) supaya perilaku pemanggil `detect_changes(".")` utuh.
+        if without_extras:
+            return self.detect_changes(task_id, path=".")
+
+        rel = self._normalize_rel(path)
+        baseline = self._snapshots.setdefault(task_id, {})
+        known = baseline.get(rel)
+        before_hash: Optional[str] = None
+        before_size: Optional[int] = None
+        if known is not None:
+            before_hash, before_size = known[0], known[1]
+        else:
+            # Sumber kedua: cache fingerprint proses-level. Nilainya tetap
+            # hash konten yang NYATA (dihitung dari isi file pada suatu
+            # snapshot sebelumnya), bukan metadata.
+            cached = self.cached_fingerprint(rel)
+            if cached is not None:
+                before_hash, before_size = cached
+
+        try:
+            target = _resolve_within_root(rel, self.root)
+        except Exception:  # noqa: BLE001 - path di luar root tidak dipantau
+            return []
+
+        if target.is_file():
+            # Hash kondisi SEKARANG: dihitung dari isi nyata (cache untuk path
+            # ini sudah di-invalidate `mark_mutated` oleh jalur tool).
+            digest = _hash_file(target)
+            size = _file_size(target)
+            if not before_existed:
+                # absent -> present = CREATED (fakta keberadaan).
+                self._advance_baseline(task_id, rel, digest, size)
+                return [ChangeRecord(
+                    path=rel,
+                    change_type=ChangeType.CREATED,
+                    before_hash=None,
+                    after_hash=digest,
+                    before_size=None,
+                    after_size=size,
+                    timestamp=now,
+                )]
+            if before_hash is not None and digest is not None and before_hash != digest:
+                # Baseline untuk operasi BERIKUTNYA pada path yang sama
+                # (dipisah dari record agar pemanggilan berulang tetap
+                # melaporkan mutasi yang sama selama baseline belum berubah).
+                self._advance_baseline(task_id, rel, digest, size)
+                return [ChangeRecord(
+                    path=rel,
+                    change_type=ChangeType.MODIFIED,
+                    before_hash=before_hash,
+                    after_hash=digest,
+                    before_size=before_size,
+                    after_size=size,
+                    timestamp=now,
+                )]
+            # Hash sama / tidak ada hash pembanding -> tidak diklaim berubah.
+            if digest is not None and known is None:
+                self._advance_baseline(task_id, rel, digest, size)
+            return []
+
+        if target.is_dir():
+            # Kandidat directory: perbandingan rekursif butuh baseline, dan
+            # `detect_changes` sudah menangani scope `path` dengan benar.
+            return self.detect_changes(task_id, path=rel)
+
+        # Path tidak ada sekarang.
+        if before_existed:
+            # present -> absent = DELETED (fakta hilangnya file). Baseline
+            # hash kondisi awal memang tidak tersedia pada jalur lazy ini.
+            self._snapshots.setdefault(task_id, {}).pop(rel, None)
+            return [ChangeRecord(
+                path=rel,
+                change_type=ChangeType.DELETED,
+                before_hash=before_hash,
+                after_hash=None,
+                before_size=before_size,
+                after_size=None,
+                timestamp=now,
+            )]
+        # absent -> absent: tidak ada perubahan yang dilaporkan.
+        return []
 
     def record_change(self, task_id: str, record: ChangeRecord) -> None:
         """Catat satu ChangeRecord secara eksplisit ke ChangeSet task.

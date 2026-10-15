@@ -1317,11 +1317,19 @@ class AgentRuntime:
             return
 
     def _register_change_target(self, *paths: Any) -> None:
-        """Catat path mutasi sebagai kandidat + snapshot kondisi "sebelum".
+        """Catat path mutasi sebagai kandidat + baseline kondisi "sebelum".
 
         Dipanggil SEGERA sebelum tool mutasi dijalankan (deterministik dari
-        tool call LLM), sehingga perbandingan hash/size berikutnya dapat
-        membedakan file yang DIBUAT vs DIUBAH.
+        tool call LLM), sehingga perbandingan berikutnya dapat membedakan file
+        yang DIBUAT vs DIUBAH vs DIHAPUS.
+
+        Baseline MURAH (TASK: hilangkan full-workspace snapshot sebelum LLM
+        pertama): yang dicatat adalah KEBERADAAN path (satu `stat`), bukan hash
+        isi file — sehingga jalur ini tidak pernah membaca isi workspace dan
+        biayanya proporsional terhadap jumlah operasi task, bukan ukuran
+        project. Hash tetap dihitung SETELAH mutasi (`detect_known_path`)
+        supaya nilai `after_hash`/ukuran yang dilaporkan adalah fakta konten,
+        bukan metadata yang diklaim setara SHA-1.
 
         Read-only & bounded: hanya file yang benar-benar disentuh task.
         """
@@ -1330,9 +1338,116 @@ class AgentRuntime:
             return
         for path in paths:
             try:
-                evidence.register_path(path, task_id=self._current_task_id)
-            except Exception:  # noqa: BLE001 - snapshot tidak boleh crash task
+                evidence.register_path(
+                    path,
+                    task_id=self._current_task_id,
+                    hash_baseline=False,
+                )
+            except TypeError:
+                # Adapter lama/duck-typed tanpa `hash_baseline`: pakai kontrak
+                # sebelumnya (snapshot per path) agar tetap kompatibel.
+                try:
+                    evidence.register_path(path, task_id=self._current_task_id)
+                except Exception:  # noqa: BLE001 - snapshot tidak boleh crash
+                    continue
+            except Exception:  # noqa: BLE001 - baseline tidak boleh crash task
                 continue
+
+    def _command_is_validation(self, payload: Dict[str, Any]) -> bool:
+        """True bila `run_command` ini TIDAK plausibel memutasi workspace.
+
+        Dipakai untuk TIDAK mengangkat sinyal "workspace mungkin berubah" pada
+        command yang hanya memeriksa/membaca (test, lint, type-check, check
+        script, serta perintah introspeksi sepele seperti `python -c
+        "print(1)"`, `--version`, `git status`). Command seperti itu tidak
+        dimaksudkan memutasi workspace, dan menandainya akan memicu
+        pemindaian seluruh workspace di akhir task tanpa ada perubahan nyata.
+
+        Memakai klasifikasi yang SUDAH ADA
+        (`runtime.activity.is_validation_command`) — bukan heuristik kedua —
+        ditambah daftar kecil perintah introspeksi yang jelas read-only.
+
+        Bila command tidak dapat dibaca, hasilnya False (konservatif: dianggap
+        mungkin memutasi).
+        """
+        try:
+            from agent_ai.runtime.activity import is_validation_command
+
+            command = self._command_text(payload)
+            if not command:
+                return False
+            if is_validation_command(command):
+                return True
+            text = command.strip().lower()
+            # Perintah introspeksi/read-only yang jelas tidak menulis file.
+            read_only_markers = (
+                "--version",
+                "-v ",
+                "git status",
+                "git log",
+                "git diff",
+                "git show",
+                "where.exe",
+                "echo ",
+                "type ",
+            )
+            if any(marker in text for marker in read_only_markers):
+                return True
+            # `python -c "..."` / `python -m ...` yang isinya hanya cetak/uji
+            # ekspresi: tidak ada panggilan penulisan file pada sumbernya.
+            if self._inline_python_is_read_only(text):
+                return True
+            return False
+        except Exception:  # noqa: BLE001 - klasifikasi tidak boleh crash task
+            return False
+
+    @staticmethod
+    def _command_text(payload: Dict[str, Any]) -> str:
+        """Ambil string command dari payload `run_command` (bentuk apa pun)."""
+        candidates = [payload.get("command")]
+        for key in ("arguments", "output"):
+            holder = payload.get(key)
+            if isinstance(holder, dict):
+                candidates.append(holder.get("command"))
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate
+        return ""
+
+    @staticmethod
+    def _inline_python_is_read_only(text: str) -> bool:
+        """True bila `python -c`/`python -m` jelas tidak menulis file.
+
+        Deterministik dan sengaja SEMPIT: hanya pengenalan perintah
+        introspeksi (`-c`, `-m`) yang isinya tidak memuat panggilan penulisan
+        file (open() mode tulis, write_text, mkdir, unlink, remove, rename,
+        shutil, pip install, npm install, dsb). Selain itu dianggap mungkin
+        memutasi (konservatif).
+        """
+        if "python" not in text and "py -" not in text:
+            return False
+        if "-c " not in text and "-m " not in text:
+            return False
+        mutation_markers = (
+            "open(",
+            "write_text",
+            "write_bytes",
+            "mkdir",
+            "makedirs",
+            "unlink",
+            "remove(",
+            "rename",
+            "replace(",
+            "rmtree",
+            "shutil",
+            "pip install",
+            "npm install",
+            "yarn add",
+            "touch(",
+            "chmod",
+            "copyfile",
+        )
+        return not any(marker in text for marker in mutation_markers)
 
     def _mark_tool_effects(self, payload: Dict[str, Any]) -> None:
         """Tandai efek filesystem NYATA dari satu tool call yang selesai.
@@ -1344,8 +1459,12 @@ class AgentRuntime:
           path yang dilaporkan tool (bounded, bukan full-project hashing).
         * Mutasi GAGAL -> path dihapus dari kandidat agar tidak ada perubahan
           semu yang terdeteksi untuk file yang tidak tersentuh.
-        * Command berhasil (`run_command`) -> deteksi ulang pada kandidat yang
-          sudah terdaftar, untuk menangkap file yang ditulis lewat command.
+        * Command berhasil (`run_command`) -> shell bisa memutasi file apa saja,
+          jadi tidak cukup mengandalkan pencatatan path tool. Command ditandai
+          sebagai "workspace mungkin berubah" (`mark_fs_changed`) lalu deteksi
+          dijalankan pada SCOPE kandidat task + directory kandidat (bounded,
+          bukan seluruh project). Full scan TIDAK dijalankan di sini dan TIDAK
+          PERNAH dijalankan sebelum request LLM.
         """
         evidence = self.change_evidence
         if evidence is None:
@@ -1355,15 +1474,44 @@ class AgentRuntime:
             return
         try:
             if tool == "run_command":
+                # Jalur shell: tandai dulu bahwa workspace MUNGKIN berubah
+                # (sinyal murah, tanpa I/O). Ini mencegah mutasi shell lewat
+                # path yang tidak dilaporkan tool hilang diam-diam: consumer
+                # lain (mis. verifier/gateway) dapat memakai flag ini untuk
+                # memutuskan deteksi yang lebih luas bila memang perlu.
+                #
+                # PENTING: sinyal ini hanya diangkat bila command memang
+                # PLAUSIBEL memutasi workspace. Perintah pemeriksaan
+                # (test/lint/type-check/`python -c "print(1)"`, `--version`,
+                # `git status`) dimaksudkan MEMERIKSA, bukan mengubah; memaksa
+                # pemindaian seluruh workspace untuk itu justru mengembalikan
+                # beban yang dihapus pada TASK ini. Klasifikasi memakai
+                # `runtime.activity.is_validation_command` yang SUDAH ADA
+                # plus token non-mutasi eksplisit — bukan heuristik kedua.
+                # Perubahan nyata di luar scope kandidat tetap dapat dilaporkan
+                # bila path-nya berada pada scope kandidat task.
+                is_validation = self._command_is_validation(payload)
+                marker = getattr(evidence, "mark_fs_changed", None)
+                if callable(marker) and not is_validation:
+                    marker(task_id=self._current_task_id)
                 if payload.get("success"):
                     # `run_command` tidak melaporkan path: file baru yang
                     # ditulis command hanya dapat ditangkap dengan memindai
                     # SCOPE kandidat yang sudah terdaftar (bounded, bukan
                     # seluruh project). Bila task belum punya kandidat, tidak
-                    # ada yang dipindai -> tidak ada perubahan yang dikarang.
+                    # ada yang dipindai -> tidak ada perubahan yang dikarang
+                    # dan tidak ada full-workspace scan.
+                    #
+                    # Urutan penting: file yang BARU terlihat pada scope
+                    # di-ADOPT (diberi baseline) SEBELUM deteksi, agar isi
+                    # directory yang tidak pernah dimutasi task tidak
+                    # dilaporkan sebagai "created" (false positive).
                     discover = getattr(evidence, "discover_from_candidates", None)
                     if callable(discover):
                         discover(task_id=self._current_task_id)
+                    adopt = getattr(evidence, "adopt_candidates", None)
+                    if callable(adopt):
+                        adopt(task_id=self._current_task_id)
                     evidence.detect(task_id=self._current_task_id)
                 return
             output = payload.get("output")

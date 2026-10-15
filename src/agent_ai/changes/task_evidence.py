@@ -3,9 +3,10 @@
 Modul ini TIDAK membuat tracker kedua. Ia hanya menyatukan tiga hal yang
 sebelumnya terpisah:
 
-1. **Snapshot** isi workspace saat task dimulai (`ChangeTracker.snapshot`).
+1. **Baseline LAZY** kondisi path yang benar-benar disentuh task (bukan
+   snapshot seluruh workspace sebelum LLM pertama).
 2. **Deteksi perubahan** (created/modified/deleted) yang DIBATASI pada path
-   yang memang disentuh task — bukan full-project hashing pada setiap round.
+   yang memang disentuh task — bukan full-project hashing.
 3. **Ringkasan ringkas** (compact) hasil deteksi untuk continuous loop
    (`AgentOrchestrator`) dan review berbasis evidence.
 
@@ -14,6 +15,35 @@ Desain:
     `ChangeTracker` (existing)  ->  hashing + snapshot per task_id
     `TaskChangeEvidence`        ->  target path + kapan deteksi dijalankan
     `summary()`                 ->  daftar file ringkas (path + kind + sizes)
+
+Model LAZY (TASK: hilangkan full-workspace snapshot sebelum LLM pertama)
+-----------------------------------------------------------------------
+`begin()` TIDAK lagi memicu pemindaian workspace. Untuk task yang tidak
+memutasi file, biaya change tracking adalah NOL dan request LLM pertama tidak
+lagi tertahan oleh pemindaian/hashing seluruh workspace.
+
+Baseline per path diambil dari jalur yang deterministik dan murah:
+
+* **Tool filesystem** (`write_file`/`edit_file`/`delete_file`/`move_file`):
+  path sudah diketahui SEBELUM eksekusi (argumen tool call). Untuk path itu
+  baseline-nya adalah kondisi nyata di disk (hash + size via
+  `register_path`), sehingga klasifikasi created/modified/deleted tetap
+  akurat seperti sebelumnya.
+* **`run_command`**: shell dapat memodifikasi file APA SAJA, sehingga
+  pencatatan path tool tidak cukup. Baseline "sebelum" TIDAK diambil di awal
+  (itu justru beban yang dihapus); sebagai gantinya, command dianggap
+  berpotensi memutasi workspace dan menaikkan flag `fs_may_have_changed`.
+  Consumer (runtime) yang memiliki konteks task memutuskan kapan full scan
+  dijalankan (deteksi terarah saat command selesai) — dan scan itu TIDAK
+  pernah terjadi sebelum request LLM pertama.
+
+Batas akurasi (DIDOKUMENTASIKAN, bukan disembunyikan): task yang TIDAK
+menyentuh tool filesystem, TIDAK menjalankan `run_command`, tetapi memutasi
+file lewat jalur lain (mis. script inline di dalam reasoning/proses lain)
+tidak lagi otomatis tertangkap oleh pemindaian penuh di akhir task. Ini
+konsekuensi langsung dari menghapus full-workspace snapshot sebagai prasyarat;
+perubahan semacam itu hanya dilaporkan bila path-nya menjadi kandidat
+(`register_path`) atau bila konsumen memicu deteksi dengan `fs_may_have_changed`.
 
 Jaminan:
     - Isolasi per `task_id`: satu instance menangani banyak task tanpa
@@ -24,10 +54,15 @@ Jaminan:
       proporsional terhadap aktivitas task, bukan ukuran project.
     - Tidak mengarang data: `kind` berasal dari perbandingan hash/size
       (`ChangeType`), dan metadata only berisi field yang benar-benar tersedia.
+    - Baseline TIDAK dipalsukan: untuk path yang hanya diketahui
+      keberadaannya (tanpa hash) nilai itu disimpan TERPISAH
+      (`_existence_baseline`, bukan `_snapshots`) dan tidak pernah
+      dipresentasikan sebagai fingerprint konten.
 """
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -82,6 +117,15 @@ class TaskChangeEvidence:
         self._records: Dict[str, Dict[str, ChangeRecord]] = {}
         # task_id -> jumlah deteksi (observability saja, bukan keputusan).
         self._detections: Dict[str, int] = {}
+        # task_id -> True bila workspace mungkin berubah lewat jalur yang TIDAK
+        # melaporkan path (mis. `run_command`). Bukan keputusan: hanya sinyal
+        # bagi consumer untuk memutuskan deteksi terarah.
+        self._fs_dirty: Dict[str, bool] = {}
+        # task_id -> jumlah path yang memakai baseline KEBERADAAN (tanpa hash).
+        self._lazy_baselines: Dict[str, int] = {}
+        # task_id -> jam mulai (epoch detik). Dipakai untuk membedakan file
+        # yang sudah ada SEBELUM task dari file yang ditulis task (mtime).
+        self._task_started_at: Dict[str, float] = {}
 
     # ------------------------------------------------------------------ #
     # Identitas task
@@ -102,12 +146,13 @@ class TaskChangeEvidence:
     # Lifecycle
     # ------------------------------------------------------------------ #
     def begin(self, task_id: Optional[str] = None, *paths: str) -> None:
-        """Mulai task: buat ChangeSet + snapshot path awal (bounded).
+        """Mulai task: siapkan state LAZY (tanpa pemindaian workspace).
 
-        Snapshot awal HANYA untuk path yang diberikan (biasanya tidak ada),
-        karena deteksi berbasis kandidat: file yang belum dikenal dianggap
-        CREATED. Root `.` TIDAK di-snapshot di sini agar tidak ada
-        full-project hashing saat task dimulai.
+        SENGAJA TIDAK ADA snapshot workspace di sini. Root `.` TIDAK pernah
+        di-snapshot saat task dimulai: baseline hanya diambil untuk path yang
+        benar-benar disentuh task (`register_path`) atau ketika consumer
+        memutuskan deteksi terarah. Dengan begitu request LLM pertama tidak
+        lagi tertahan oleh pemindaian/hashing seluruh workspace.
 
         Bila instance dipakai ULANG untuk beberapa task (mis. satu AgentRuntime
         menjalankan task berurutan) dan `task_id` diberikan, instance ini
@@ -115,7 +160,7 @@ class TaskChangeEvidence:
         sedang berjalan — bukan task pertama. Isolasi antar-task tetap dijaga:
         state tiap task_id disimpan terpisah (tidak saling mencemari).
 
-        Best-effort: kegagalan snapshot tidak menggagalkan task.
+        Best-effort: kegagalan snapshot kandidat tidak menggagalkan task.
         """
         effective = self._resolve_task_id(task_id)
         if task_id:
@@ -125,6 +170,10 @@ class TaskChangeEvidence:
         self._targets[effective] = []
         self._records[effective] = {}
         self._detections[effective] = 0
+        self._fs_dirty[effective] = False
+        self._lazy_baselines[effective] = 0
+        # Jam mulai task: batas deterministik untuk `adopt_candidates`.
+        self._task_started_at[effective] = time.time()
         for path in paths:
             self.register_path(path, task_id=effective)
 
@@ -134,14 +183,15 @@ class TaskChangeEvidence:
         task_id: Optional[str] = None,
         *,
         snapshot_baseline: bool = True,
+        hash_baseline: bool = True,
     ) -> None:
-        """Catat path sebagai kandidat perubahan + snapshot kondisi SEKARANG.
+        """Catat path sebagai kandidat perubahan + baseline kondisi "sebelum".
 
         Dipanggil dari aktivitas NYATA Agent (tool mutasi / command yang
-        menulis file). Snapshot kondisi "sebelum intervensi" diambil di sini
-        sehingga deteksi berikutnya tahu apakah file dibuat atau diubah.
+        menulis file). Baseline "sebelum intervensi" diambil di sini sehingga
+        deteksi berikutnya tahu apakah file dibuat atau diubah.
 
-        Snapshot juga di-refresh saat path didaftarkan ULANG (mis. operasi
+        Baseline juga di-refresh saat path didaftarkan ULANG (mis. operasi
         berikutnya pada file yang sama), sehingga basis perbandingan selalu
         kondisi terakhir yang terdeteksi — bukan kondisi task dimulai.
 
@@ -153,6 +203,12 @@ class TaskChangeEvidence:
                 Dalam kasus itu kondisi "sebelum" memang tidak diketahui,
                 sehingga TIDAK diadakan baseline dan deteksi berikutnya
                 melaporkannya sebagai CREATED — bukan modified palsu.
+            hash_baseline: True (default) = baseline hash+size (`snapshot`),
+                dipakai untuk path yang diketahui SEBELUM mutasi (tool
+                filesystem). False = baseline MURAH berupa keberadaan saja
+                (`ChangeTracker.exists`), dipakai jalur LAZY yang tidak boleh
+                menyentuh isi file. Nilai keberadaan disimpan TERPISAH dan
+                tidak pernah diklaim sebagai hash konten.
 
         Best-effort: path di luar root / tidak valid diabaikan.
         """
@@ -169,6 +225,30 @@ class TaskChangeEvidence:
             # (file belum ada saat task berjalan), sehingga deteksi berikutnya
             # melaporkannya sebagai CREATED — bukan modified palsu.
             return
+        if not hash_baseline:
+            # Baseline MURAH: SATU path yang diketahui akan dimutasi (bukan
+            # penelusuran workspace). Biayanya satu `stat` + hash satu file —
+            # proporsional terhadap aktivitas task, bukan ukuran project — dan
+            # inilah yang mempertahankan klasifikasi `modified` tanpa perlu
+            # snapshot seluruh workspace di awal task.
+            #
+            # `remember_exists` mencatat keberadaan (dipakai untuk membedakan
+            # created vs modified vs deleted); `snapshot` per-path menyimpan
+            # hash kondisi "sebelum" untuk path ITU saja. Tidak ada root `.`
+            # yang di-snapshot dan tidak ada file lain yang disentuh.
+            try:
+                self._tracker.remember_exists(rel, self._tracker.exists(rel))
+                self._lazy_baselines[effective] = (
+                    self._lazy_baselines.get(effective, 0) + 1
+                )
+            except Exception:  # noqa: BLE001 - baseline murah tidak boleh crash
+                return
+            if self._tracker.known_existed(rel):
+                try:
+                    self._tracker.snapshot(rel, task_id=effective)
+                except Exception:  # noqa: BLE001 - snapshot satu file best-effort
+                    return
+            return
         try:
             self._tracker.snapshot(rel, task_id=effective)
         except Exception:  # noqa: BLE001 - snapshot tidak boleh crash task
@@ -178,6 +258,53 @@ class TaskChangeEvidence:
         """Tutup tracking task (set `finished_at`)."""
         effective = self._resolve_task_id(task_id)
         return self._tracker.finish(effective)
+
+    # ------------------------------------------------------------------ #
+    # Sinyal mutasi jalur shell (`run_command`)
+    # ------------------------------------------------------------------ #
+    def mark_fs_changed(self, task_id: Optional[str] = None) -> None:
+        """Tandai bahwa workspace MUNGKIN berubah lewat jalur tanpa path.
+
+        Dipakai untuk `run_command`: shell dapat memutasi file apa saja, jadi
+        pencatatan path tool tidak cukup. Flag ini BUKAN klaim "ada perubahan";
+        ia hanya sinyal bagi consumer bahwa deteksi terarah perlu dijalankan.
+        Tidak ada filesystem I/O di sini.
+        """
+        effective = self._resolve_task_id(task_id)
+        self._fs_dirty[effective] = True
+
+    def fs_may_have_changed(self, task_id: Optional[str] = None) -> bool:
+        """True bila task pernah menjalankan jalur yang mungkin memutasi file.
+
+        Konsumen memakainya untuk memutuskan kapan deteksi terarah dijalankan
+        (mis. setelah `run_command` selesai) — bukan sebelum request LLM.
+        """
+        effective = task_id or self._task_id
+        if not effective:
+            return False
+        return bool(self._fs_dirty.get(effective, False))
+
+    def has_candidates(self, task_id: Optional[str] = None) -> bool:
+        """True bila task sudah punya kandidat path (scope deteksi diketahui).
+
+        Tanpa kandidat sama sekali, deteksi terarah tidak punya scope: memindai
+        apa pun akan berarti menebak, sehingga consumer sebaiknya tidak
+        melaporkan perubahan (dalam kasus itu full scan hanya dijalankan untuk
+        melihat SEMUA perubahan, dan itu eksplisit, bukan default).
+        """
+        effective = task_id or self._task_id
+        if not effective:
+            return False
+        if self._targets.get(effective):
+            return True
+        return bool(self._tracker.tracked_paths(effective))
+
+    @property
+    def lazy_baseline_count(self) -> int:
+        """Jumlah baseline MURAH (keberadaan saja) untuk task yang diikat."""
+        if not self._task_id:
+            return 0
+        return self._lazy_baselines.get(self._task_id, 0)
 
     def unregister_path(self, path: Any, task_id: Optional[str] = None) -> None:
         """Hentikan tracking path yang tidak lagi dipantau task.
@@ -265,18 +392,33 @@ class TaskChangeEvidence:
         """
         effective = self._resolve_task_id(task_id)
         known = set(self._tracker._snapshots.get(effective, {}))  # noqa: SLF001 - API tracker existing
-        # Scope = parent directory dari kandidat yang sudah terdaftar. Kandidat
-        # berupa file -> pakai parent-nya; kandidat berupa directory -> dirinya.
+        # Scope discovery:
+        #   * kandidat DIRECTORY (mis. "." bila command menyatakan cakupannya)
+        #     -> directory itu sendiri;
+        #   * kandidat FILE di dalam SUBDIRECTORY -> subdirectory tempat file
+        #     itu berada;
+        #   * kandidat FILE langsung di root -> scope root (".\"), karena
+        #     command yang menyentuh file di root bekerja di root. File yang
+        #     ternyata sudah ada SEBELUM task tidak dilaporkan berubah lewat
+        #     `adopt_candidates` (mtime), jadi sweep ini tidak mengarang
+        #     perubahan.
         scopes: List[str] = []
-        for rel in known:
-            candidate = (rel or "").strip("/")
+        for rel in list(known) + list(self._targets.get(effective, [])):
+            candidate = normalize_change_path(rel).strip("/")
             if not candidate:
                 continue
-            # Path kandidat yang BUKAN directory (mis. "app.py") -> pakai root.
-            # Path di dalam subdirectory -> pakai subdirectory tersebut.
-            parts = candidate.split("/")
-            parent = "/".join(parts[:-1])
-            scope = parent if parent else "."
+            scope = None
+            try:
+                from agent_ai.tools.filesystem import _resolve_within_root
+
+                if _resolve_within_root(candidate, Path(self._tracker.root)).is_dir():
+                    scope = candidate
+            except Exception:  # noqa: BLE001 - path tidak terbaca -> tebak scope
+                scope = None
+            if scope is None:
+                parts = candidate.split("/")
+                parent = "/".join(parts[:-1])
+                scope = parent if parent else "."
             if scope not in scopes:
                 scopes.append(scope)
         if not scopes:
@@ -312,6 +454,67 @@ class TaskChangeEvidence:
             self.register_path(rel, task_id=effective, snapshot_baseline=False)
         return found
 
+    def adopt_candidates(
+        self, task_id: Optional[str] = None, *, limit: int = 200
+    ) -> List[str]:
+        """Beri baseline untuk kandidat yang JELAS sudah ada SEBELUM task.
+
+        Dipakai setelah `run_command`: file yang belum pernah kita lihat tidak
+        bisa dibedakan dari file yang memang sudah ada sejak awal. Kalau
+        semuanya dilaporkan `created`, setiap pemindaian scope akan
+        mengumumkan seluruh isi directory sebagai "file baru" (false positive
+        yang terukur pada workspace nyata).
+
+        Pembedanya deterministik dan murah: `mtime` file dibanding jam mulai
+        task.
+
+            * mtime LEBIH TUA dari jam mulai task -> file sudah ada sebelum
+              command berjalan: diberi baseline, TIDAK dilaporkan berubah.
+            * mtime >= jam mulai task -> command memang menyentuhnya:
+              dibiarkan tanpa baseline agar tetap dilaporkan `created`
+              (fakta, bukan tebakan).
+
+        Bila jam mulai task tidak diketahui, TIDAK ada yang di-adopt sehingga
+        tidak ada perilaku yang berubah secara diam-diam.
+
+        Returns:
+            Daftar path yang mendapatkan baseline.
+        """
+        effective = self._resolve_task_id(task_id)
+        known = set(self._tracker.tracked_paths(effective))
+        started = self._task_started_at.get(effective)
+        if started is None:
+            return []
+        adopted: List[str] = []
+        for rel in list(self._targets.get(effective, [])):
+            if len(adopted) >= limit:
+                break
+            if rel in known:
+                continue
+            try:
+                from agent_ai.tools.filesystem import _resolve_within_root
+
+                target = _resolve_within_root(rel, self._tracker.root)
+                mtime = target.stat().st_mtime
+            except Exception:  # noqa: BLE001 - path tidak terbaca -> lewati
+                continue
+            if mtime >= started:
+                # Command menyentuh file ini -> jangan diberi baseline, agar
+                # deteksi berikutnya melaporkannya sebagai fakta `created`.
+                continue
+            try:
+                # Baseline KEBERADAAN (satu `stat`), bukan hash: file yang
+                # sudah lama ada tidak perlu dibaca isinya hanya supaya
+                # diketahui "tidak berubah". Hash dihitung pada deteksi
+                # berikutnya bila path ini benar-benar menjadi target operasi.
+                self._tracker.remember_exists(
+                    rel, self._tracker.exists(rel)
+                )
+            except Exception:  # noqa: BLE001 - baseline best-effort
+                continue
+            adopted.append(rel)
+        return adopted
+
     # ------------------------------------------------------------------ #
     # Deteksi
     # ------------------------------------------------------------------ #
@@ -321,6 +524,11 @@ class TaskChangeEvidence:
         Untuk setiap path kandidat:
             * directory -> deteksi rekursif di dalamnya;
             * file      -> deteksi tepat pada file tersebut.
+
+        Path yang hanya punya baseline KEBERADAAN (lazy, tanpa hash) dideteksi
+        memakai `ChangeTracker.detect_known_path`, yang mencatat hash setelah
+        mutasi — sehingga perubahan yang DIKETAHUI path-nya tetap dilaporkan
+        tanpa perlu baseline hash seluruh workspace di awal task.
 
         Records di-refresh (bukan hanya ditambahkan) untuk setiap path
         kandidat: hasil lama dibuang lebih dulu sehingga perubahan yang sudah
@@ -334,13 +542,43 @@ class TaskChangeEvidence:
         effective = self._resolve_task_id(task_id)
         records = self._records.setdefault(effective, {})
         for rel in list(self._targets.get(effective, [])):
+            # Record yang sudah ada untuk path ini (dipakai bila deteksi ulang
+            # tidak menemukan perubahan lagi — lihat catatan di bawah).
+            previous = [
+                record
+                for key, record in records.items()
+                if key == rel or key.startswith(rel + "/")
+            ]
             try:
-                found = self._tracker.detect_changes(effective, path=rel)
+                before_exists = self._tracker.known_existed(rel)
+                if before_exists is None:
+                    found = self._tracker.detect_changes(effective, path=rel)
+                else:
+                    # Jalur LAZY: baseline hanya keberadaan (+ hash dibuat
+                    # SETELAH mutasi), bukan hash kondisi awal.
+                    found = self._tracker.detect_known_path(
+                        effective, rel, before_exists
+                    )
             except Exception:  # noqa: BLE001 - deteksi tidak boleh crash task
                 continue
+            # Records di-refresh per path: hasil lama dibuang agar perubahan
+            # yang sudah tidak berlaku (mis. file dikembalikan ke isi semula)
+            # tidak dilaporkan sebagai fakta usang.
+            #
+            # PENGECUALIAN: bila deteksi ULANG tidak menemukan apa-apa untuk
+            # path ini, record yang SUDAH ADA dipertahankan. Alasannya ada di
+            # jalur LAZY: baseline maju ke kondisi SETELAH mutasi, sehingga
+            # pemanggilan berikutnya pada path yang sama memang tidak lagi
+            # melaporkan mutasi itu (bukan berarti mutasinya tidak terjadi).
+            # Menggantinya dengan "kosong" akan menghapus fakta yang sudah
+            # terdeteksi — dan itu bertentangan dengan tujuan evidence.
             self._forget_records(effective, rel)
-            for record in found:
-                records[normalize_change_path(record.path)] = record
+            if found:
+                for record in found:
+                    records[normalize_change_path(record.path)] = record
+            else:
+                for record in previous:
+                    records[normalize_change_path(record.path)] = record
         self._detections[effective] = self._detections.get(effective, 0) + 1
         return self.records(effective)
 

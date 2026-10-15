@@ -472,14 +472,20 @@ class TaskExecutor:
 
                 change_tracker = ChangeTracker(root=_Path(workspace_root))
                 change_tracker.start(task_id)
-                # Snapshot awal INKREMENTAL (TASK 1): tracker memakai cache
-                # fingerprint proses-level (size + mtime_ns) yang di-key
-                # canonical root, sehingga hanya file yang fingerprint-nya
-                # berubah yang di-hash ulang. Pada workspace besar (mis. puluhan
-                # ribu file / GB), pemanggilan ini tidak lagi memblokir sebelum
-                # LLM pertama dengan hashing penuh berulang. Lihat catatan
-                # batas akurasi pada docstring `agent_ai.changes.tracker`.
-                change_tracker.snapshot(".", task_id=task_id)
+                # TIDAK ADA snapshot workspace di sini (TASK: hilangkan
+                # full-workspace snapshot sebelum LLM pertama). Baseline
+                # kondisi "sebelum" diambil LAZY, hanya untuk path yang
+                # benar-benar disentuh task:
+                #   * tool filesystem -> snapshot per-path dari argumen tool
+                #     (hash + size), sehingga created/modified/deleted akurat;
+                #   * `run_command`    -> hanya sinyal `fs_may_have_changed()`,
+                #     lalu deteksi terarah dijalankan SETELAH command selesai.
+                # Task yang tidak memutasi file tidak membayar pemindaian apa
+                # pun, sehingga `provider_request` pertama tidak lagi tertahan
+                # oleh penelusuran/hashing seluruh workspace (terukur ratusan
+                # detik pada workspace puluhan ribu file). Lihat catatan batas
+                # akurasi pada docstring `agent_ai.changes.task_evidence`.
+                #
                 # Evidence terikat ke task_id task ini (isolasi antar-task):
                 # SATU tracker existing + adapter tipis di atasnya, dipakai
                 # runtime untuk deteksi perubahan bounded pada titik mutasi.
@@ -613,7 +619,33 @@ class TaskExecutor:
         # event change_detected (event system existing) untuk perubahan yang
         # TIDAK tercakup event live (mis. file dibuat lewat run_command).
         # File yang sudah diemit live di-skip (hindari duplicate event).
+        #
+        # TASK (hilangkan full-workspace snapshot): pemindaian SELURUH workspace
+        # di sini hanya dijalankan bila memang ADA alasan untuk percaya workspace
+        # berubah lewat jalur yang tidak melaporkan path:
+        #   (a) task menjalankan `run_command` (shell bisa memutasi apa saja) —
+        #       dilaporkan evidence lewat `fs_may_have_changed()`; dan
+        #   (b) task sudah punya kandidat path, sehingga ada sesuatu yang layak
+        #       dibandingkan.
+        # Task yang tidak memutasi file (dan tidak menjalankan command) tidak
+        # membayar pemindaian penuh di akhir, dan tidak pernah membayarnya
+        # sebelum request LLM pertama.
+        should_scan_workspace = False
         if change_tracker is not None:
+            evidence_flags = change_evidence
+            try:
+                may_changed = bool(
+                    evidence_flags is not None
+                    and evidence_flags.fs_may_have_changed(task_id)
+                )
+                has_candidates = bool(
+                    evidence_flags is not None
+                    and evidence_flags.has_candidates(task_id)
+                )
+                should_scan_workspace = may_changed and has_candidates
+            except Exception:  # noqa: BLE001 - keputusan scan tidak boleh crash
+                should_scan_workspace = False
+        if change_tracker is not None and should_scan_workspace:
             try:
                 records = change_tracker.detect_changes(task_id, path=".")
                 change_tracker.finish(task_id)
